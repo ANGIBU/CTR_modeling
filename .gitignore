@@ -1,0 +1,9 @@
+# 모든 파일 기본 제외
+*
+
+# 허용할 파일만 추가
+!*.py
+!requirements.txt
+
+# .gitignore 파일은 항상 포함
+!.gitignore
