@@ -28,7 +28,7 @@ def get_memory_usage() -> float:
 def setup_logging():
     """로깅 설정"""
     logger = Config.setup_logging()
-    logger.info("=== CTR 모델 파이프라인 시작 ===")
+    logger.info("=== 파이프라인 시작 ===")
     return logger
 
 def memory_monitor_decorator(func):
@@ -148,7 +148,42 @@ def feature_engineering_pipeline(train_df: pd.DataFrame,
         # 피처 엔지니어링 결과 검증
         logger.info("피처 엔지니어링 결과 검증 시작")
         
-        # 결측치 확인
+        # 컬럼명 검증 (None 값 제거)
+        valid_columns = [col for col in X_train.columns if col is not None and str(col).strip() != '']
+        if len(valid_columns) != len(X_train.columns):
+            logger.warning(f"잘못된 컬럼명 발견: {len(X_train.columns) - len(valid_columns)}개")
+            X_train = X_train[valid_columns]
+            X_test = X_test[valid_columns]
+        
+        # 데이터 타입 통일 (수치형으로 변환)
+        logger.info("데이터 타입 통일 시작")
+        for col in X_train.columns:
+            try:
+                # 문자열이나 카테고리 타입을 수치형으로 변환
+                if X_train[col].dtype == 'object' or X_train[col].dtype.name == 'category':
+                    logger.info(f"{col}: {X_train[col].dtype} → 수치형 변환")
+                    
+                    # 카테고리 타입인 경우 코드로 변환
+                    if X_train[col].dtype.name == 'category':
+                        X_train[col] = X_train[col].cat.codes.astype('float32')
+                        X_test[col] = X_test[col].cat.codes.astype('float32')
+                    else:
+                        # 문자열을 수치형으로 변환 시도
+                        X_train[col] = pd.to_numeric(X_train[col], errors='coerce').astype('float32')
+                        X_test[col] = pd.to_numeric(X_test[col], errors='coerce').astype('float32')
+                
+                # 다른 수치형 타입을 float32로 통일
+                elif X_train[col].dtype in ['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64']:
+                    X_train[col] = X_train[col].astype('float32')
+                    X_test[col] = X_test[col].astype('float32')
+                elif X_train[col].dtype == 'float64':
+                    X_train[col] = X_train[col].astype('float32')
+                    X_test[col] = X_test[col].astype('float32')
+                    
+            except Exception as e:
+                logger.warning(f"{col} 데이터 타입 변환 실패: {str(e)}")
+        
+        # 결측치 확인 및 처리
         if X_train.isnull().any().any():
             logger.warning("X_train에 결측치 발견, 0으로 대치")
             X_train = X_train.fillna(0)
@@ -157,21 +192,33 @@ def feature_engineering_pipeline(train_df: pd.DataFrame,
             logger.warning("X_test에 결측치 발견, 0으로 대치")
             X_test = X_test.fillna(0)
         
-        # 무한값 확인
-        if np.isinf(X_train.values).any():
-            logger.warning("X_train에 무한값 발견, 클리핑 처리")
+        # 무한값 확인 및 처리 (수치형 컬럼만)
+        try:
+            # 수치형 컬럼만 선택
+            numeric_columns = X_train.select_dtypes(include=[np.number]).columns
+            
+            if len(numeric_columns) > 0:
+                # X_train 무한값 처리
+                inf_mask_train = np.isinf(X_train[numeric_columns].values)
+                if inf_mask_train.any():
+                    logger.warning("X_train에 무한값 발견, 클리핑 처리")
+                    X_train[numeric_columns] = X_train[numeric_columns].replace([np.inf, -np.inf], [1e6, -1e6])
+                
+                # X_test 무한값 처리
+                inf_mask_test = np.isinf(X_test[numeric_columns].values)
+                if inf_mask_test.any():
+                    logger.warning("X_test에 무한값 발견, 클리핑 처리")
+                    X_test[numeric_columns] = X_test[numeric_columns].replace([np.inf, -np.inf], [1e6, -1e6])
+            
+        except Exception as e:
+            logger.warning(f"무한값 처리 중 오류: {str(e)}")
+            # 안전한 방식으로 무한값 처리
             X_train = X_train.replace([np.inf, -np.inf], [1e6, -1e6])
-        
-        if np.isinf(X_test.values).any():
-            logger.warning("X_test에 무한값 발견, 클리핑 처리")
             X_test = X_test.replace([np.inf, -np.inf], [1e6, -1e6])
         
-        # 컬럼명 검증 (None 값 제거)
-        valid_columns = [col for col in X_train.columns if col is not None and str(col).strip() != '']
-        if len(valid_columns) != len(X_train.columns):
-            logger.warning(f"잘못된 컬럼명 발견: {len(X_train.columns) - len(valid_columns)}개")
-            X_train = X_train[valid_columns]
-            X_test = X_test[valid_columns]
+        # 최종 데이터 타입 확인
+        logger.info(f"X_train 최종 데이터 타입 분포: {X_train.dtypes.value_counts().to_dict()}")
+        logger.info(f"X_test 최종 데이터 타입 분포: {X_test.dtypes.value_counts().to_dict()}")
         
         logger.info("피처 엔지니어링 결과 검증 완료")
         

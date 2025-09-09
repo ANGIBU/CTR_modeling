@@ -14,10 +14,10 @@ class Config:
     LOG_DIR = BASE_DIR / "logs"
     OUTPUT_DIR = BASE_DIR / "output"
     
-    # 데이터 파일 경로
-    TRAIN_PATH = "C:/Users/facec/바탕화면/AI/CTR_modeling/train.parquet"
-    TEST_PATH = "C:/Users/facec/바탕화면/AI/CTR_modeling/test.parquet"
-    SUBMISSION_PATH = "C:/Users/facec/바탕화면/AI/CTR_modeling/sample_submission.csv"
+    # 데이터 파일 경로 (상대 경로로 수정)
+    TRAIN_PATH = "./train.parquet"
+    TEST_PATH = "./test.parquet"
+    SUBMISSION_PATH = "./sample_submission.csv"
     
     # 모델 하이퍼파라미터
     RANDOM_STATE = 42
