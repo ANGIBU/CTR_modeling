@@ -131,13 +131,21 @@ class FeatureEngineer:
                                    X_train: pd.DataFrame, 
                                    X_test: pd.DataFrame, 
                                    y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """범주형 피처 인코딩 (TargetEncoder 없이 수동 구현)"""
+        """범주형 피처 인코딩 (대용량 데이터 최적화)"""
         logger.info("범주형 피처 인코딩 시작")
         
         categorical_cols = X_train.select_dtypes(include=['object', 'category']).columns
+        logger.info(f"처리할 범주형 컬럼: {len(categorical_cols)}개")
+        
+        # 대용량 데이터 처리 최적화
+        if len(X_train) > 1000000:  # 100만 행 이상
+            logger.info("대용량 데이터 감지 - 최적화된 인코딩 적용")
+            return self._encode_categorical_features_optimized(X_train, X_test, y_train)
         
         for col in categorical_cols:
             try:
+                logger.info(f"{col} 컬럼 인코딩 시작")
+                
                 # categorical 타입을 object로 변환
                 if X_train[col].dtype.name == 'category':
                     X_train[col] = X_train[col].astype(str)
@@ -194,6 +202,8 @@ class FeatureEngineer:
                 X_test[f'{col}_frequency'] = test_freq.fillna(0).astype('int64')
                 self.generated_features.append(f'{col}_frequency')
                 
+                logger.info(f"{col} 컬럼 인코딩 완료")
+                
             except Exception as e:
                 logger.warning(f"{col} 컬럼 인코딩 실패: {str(e)}")
                 continue
@@ -206,6 +216,69 @@ class FeatureEngineer:
             logger.warning(f"범주형 컬럼 제거 실패: {str(e)}")
         
         logger.info(f"범주형 피처 인코딩 완료 - 생성된 피처: {len(self.generated_features)}개")
+        return X_train, X_test
+    
+    def _encode_categorical_features_optimized(self, 
+                                             X_train: pd.DataFrame, 
+                                             X_test: pd.DataFrame, 
+                                             y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """대용량 데이터를 위한 최적화된 범주형 피처 인코딩"""
+        logger.info("최적화된 범주형 피처 인코딩 시작")
+        
+        categorical_cols = X_train.select_dtypes(include=['object', 'category']).columns
+        
+        for col in categorical_cols:
+            try:
+                logger.info(f"{col} 컬럼 최적화 인코딩 시작 (유니크값: {X_train[col].nunique()}개)")
+                
+                # categorical 타입을 object로 변환
+                if X_train[col].dtype.name == 'category':
+                    X_train[col] = X_train[col].astype(str)
+                if X_test[col].dtype.name == 'category':
+                    X_test[col] = X_test[col].astype(str)
+                
+                # 1. 상위 빈도 카테고리만 유지 (메모리 절약)
+                top_categories = X_train[col].value_counts().head(50).index  # 상위 50개만
+                X_train[col] = X_train[col].where(X_train[col].isin(top_categories), 'other')
+                X_test[col] = X_test[col].where(X_test[col].isin(top_categories), 'other')
+                
+                # 2. Label Encoding만 수행 (타겟 인코딩은 너무 무거움)
+                le = LabelEncoder()
+                X_train[f'{col}_label_encoded'] = le.fit_transform(X_train[col].astype(str))
+                
+                # 테스트 데이터 변환
+                test_encoded = []
+                for val in X_test[col].astype(str):
+                    if val in le.classes_:
+                        test_encoded.append(le.transform([val])[0])
+                    else:
+                        test_encoded.append(-1)
+                
+                X_test[f'{col}_label_encoded'] = test_encoded
+                self.label_encoders[col] = le
+                self.generated_features.append(f'{col}_label_encoded')
+                
+                # 3. 간단한 빈도 인코딩
+                freq_map = X_train[col].value_counts().to_dict()
+                X_train[f'{col}_frequency'] = X_train[col].map(freq_map)
+                test_freq = X_test[col].map(freq_map)
+                X_test[f'{col}_frequency'] = test_freq.fillna(0).astype('int32')  # int32로 메모리 절약
+                self.generated_features.append(f'{col}_frequency')
+                
+                logger.info(f"{col} 컬럼 최적화 인코딩 완료")
+                
+            except Exception as e:
+                logger.warning(f"{col} 컬럼 최적화 인코딩 실패: {str(e)}")
+                continue
+        
+        # 원본 범주형 컬럼 제거
+        try:
+            X_train = X_train.drop(columns=categorical_cols)
+            X_test = X_test.drop(columns=categorical_cols)
+        except Exception as e:
+            logger.warning(f"범주형 컬럼 제거 실패: {str(e)}")
+        
+        logger.info(f"최적화된 범주형 피처 인코딩 완료 - 생성된 피처: {len(self.generated_features)}개")
         return X_train, X_test
     
     def _create_numerical_features(self, 
