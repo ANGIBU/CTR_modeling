@@ -8,14 +8,15 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
 import warnings
 import gc
+import psutil
 warnings.filterwarnings('ignore')
 
 from config import Config
 
 logger = logging.getLogger(__name__)
 
-class FeatureEngineer:
-    """64GB RAM 고성능 시스템 최적화 피처 엔지니어링 클래스"""
+class MemoryOptimizedFeatureEngineer:
+    """극한 메모리 최적화 피처 엔지니어링 클래스"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -24,227 +25,210 @@ class FeatureEngineer:
         self.scalers = {}
         self.feature_stats = {}
         self.generated_features = []
+        self.numeric_columns = []
+        self.categorical_columns = []
         
+    def get_memory_usage(self) -> float:
+        """현재 메모리 사용량 (GB)"""
+        process = psutil.Process()
+        return process.memory_info().rss / (1024**3)
+    
     def create_all_features(self, 
                           train_df: pd.DataFrame, 
                           test_df: pd.DataFrame, 
                           target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """모든 피처 생성 파이프라인 실행"""
-        logger.info("64GB RAM 최적화 피처 엔지니어링 파이프라인 시작")
+        """극한 메모리 최적화 피처 엔지니어링 파이프라인"""
+        logger.info("극한 메모리 최적화 피처 엔지니어링 시작")
         
         # 학습 데이터에서 타겟 분리
         X_train = train_df.drop(columns=[target_col])
         y_train = train_df[target_col]
         X_test = test_df.copy()
         
-        # 초기 메모리 상태 확인
-        initial_memory = X_train.memory_usage(deep=True).sum() / (1024**3)
+        # 초기 메모리 상태
+        initial_memory = self.get_memory_usage()
         logger.info(f"초기 메모리 사용량: {initial_memory:.2f} GB")
         
-        # 1. 기본 피처 정리 및 ID성 컬럼 제거
+        # 컬럼 타입 사전 분류 (select_dtypes 사용하지 않음)
+        self._classify_columns(X_train)
+        
+        # 1. 기본 피처 정리
         X_train, X_test = self._clean_basic_features(X_train, X_test)
         
-        # 2. 범주형 피처 인코딩 (64GB RAM 최적화)
-        X_train, X_test = self._encode_categorical_features(X_train, X_test, y_train)
+        # 2. 범주형 피처 인코딩 (극한 최적화)
+        X_train, X_test = self._encode_categorical_features_optimized(X_train, X_test, y_train)
         
-        # 3. 수치형 피처 생성
-        X_train, X_test = self._create_numerical_features(X_train, X_test)
+        # 3. 수치형 피처 생성 (제한적)
+        X_train, X_test = self._create_numerical_features_limited(X_train, X_test)
         
-        # 4. 상호작용 피처 생성 (메모리 적응형)
-        if self.config.FEATURE_CONFIG['interaction_features']:
-            X_train, X_test = self._create_interaction_features(X_train, X_test)
+        # 4. 메모리 체크 후 조건부 상호작용 피처
+        current_memory = self.get_memory_usage()
+        logger.info(f"상호작용 피처 생성 전 메모리: {current_memory:.2f} GB")
         
-        # 5. 집계 피처 생성 (메모리 효율적)
-        X_train, X_test = self._create_aggregation_features(X_train, X_test, y_train)
+        if current_memory < 45:  # 45GB 미만일 때만 상호작용 피처 생성
+            X_train, X_test = self._create_minimal_interaction_features(X_train, X_test)
+        else:
+            logger.warning("메모리 부족으로 상호작용 피처 생성 건너뛰기")
         
-        # 6. 통계적 피처 생성
-        if self.config.FEATURE_CONFIG['statistical_features']:
-            X_train, X_test = self._create_statistical_features(X_train, X_test)
+        # 5. 최종 최적화
+        X_train, X_test = self._final_optimization(X_train, X_test, y_train)
         
-        # 7. 스케일링
-        X_train, X_test = self._scale_features(X_train, X_test)
-        
-        # 8. 피처 선택 (메모리 고려)
-        X_train, X_test = self._select_features(X_train, X_test, y_train)
-        
-        # 최종 메모리 상태
-        final_memory = X_train.memory_usage(deep=True).sum() / (1024**3)
+        # 최종 상태
+        final_memory = self.get_memory_usage()
         logger.info(f"최종 메모리 사용량: {final_memory:.2f} GB")
         logger.info(f"피처 엔지니어링 완료 - 최종 피처 수: {X_train.shape[1]}")
         
         return X_train, X_test
     
+    def _classify_columns(self, df: pd.DataFrame):
+        """컬럼 타입 분류 (select_dtypes 대신 수동 분류)"""
+        logger.info("컬럼 타입 수동 분류 시작")
+        
+        self.numeric_columns = []
+        self.categorical_columns = []
+        
+        for col in df.columns:
+            dtype_str = str(df[col].dtype)
+            
+            if dtype_str in ['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64',
+                           'float16', 'float32', 'float64']:
+                self.numeric_columns.append(col)
+            elif dtype_str in ['object', 'category', 'string', 'bool']:
+                self.categorical_columns.append(col)
+            else:
+                # 샘플링해서 타입 확인
+                sample = df[col].dropna().iloc[:1000] if len(df[col].dropna()) > 0 else df[col].iloc[:1000]
+                
+                try:
+                    pd.to_numeric(sample)
+                    self.numeric_columns.append(col)
+                except:
+                    self.categorical_columns.append(col)
+        
+        logger.info(f"수치형 컬럼: {len(self.numeric_columns)}개, 범주형 컬럼: {len(self.categorical_columns)}개")
+    
     def _clean_basic_features(self, 
                             X_train: pd.DataFrame, 
                             X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """기본 피처 정리 및 ID성 컬럼 제거"""
-        logger.info("기본 피처 정리 및 ID성 컬럼 탐지 시작")
+        """기본 피처 정리 (메모리 효율적)"""
+        logger.info("기본 피처 정리 시작")
         
-        # ID성 컬럼 탐지 및 제거 (CTR 예측에 해로움)
-        id_columns = []
+        # 메모리 절약을 위한 청크 처리
+        chunk_size = 1000000  # 100만 행씩 처리
+        
+        # ID성 컬럼 및 상수 컬럼 제거
+        cols_to_remove = []
+        
         for col in X_train.columns:
-            unique_ratio = X_train[col].nunique() / len(X_train)
-            if unique_ratio > 0.7:  # 70% 이상이 유니크하면 ID성 컬럼
-                id_columns.append(col)
-                logger.warning(f"{col}: ID성 컬럼으로 판단 제거 (유니크 비율: {unique_ratio:.3f})")
+            # 유니크 비율 확인 (샘플링)
+            if len(X_train) > chunk_size:
+                sample_size = min(chunk_size, len(X_train))
+                sample_indices = np.random.choice(len(X_train), sample_size, replace=False)
+                sample_data = X_train.iloc[sample_indices]
+            else:
+                sample_data = X_train
+            
+            unique_ratio = sample_data[col].nunique() / len(sample_data)
+            
+            # ID성 컬럼 (유니크 비율 70% 이상)
+            if unique_ratio > 0.7:
+                cols_to_remove.append(col)
+                logger.info(f"{col}: ID성 컬럼 제거 (유니크 비율: {unique_ratio:.3f})")
+            
+            # 상수 컬럼
+            elif sample_data[col].nunique() <= 1:
+                cols_to_remove.append(col)
+                logger.info(f"{col}: 상수 컬럼 제거")
         
-        if id_columns:
-            X_train = X_train.drop(columns=id_columns)
-            X_test = X_test.drop(columns=id_columns)
-            logger.info(f"ID성 컬럼 제거: {len(id_columns)}개")
+        # 컬럼 제거
+        if cols_to_remove:
+            X_train = X_train.drop(columns=cols_to_remove)
+            X_test = X_test.drop(columns=cols_to_remove)
+            
+            # 분류된 컬럼 목록에서도 제거
+            self.numeric_columns = [col for col in self.numeric_columns if col not in cols_to_remove]
+            self.categorical_columns = [col for col in self.categorical_columns if col not in cols_to_remove]
         
-        # 상수 피처 제거
-        constant_features = []
-        for col in X_train.columns:
-            if X_train[col].nunique() <= 1:
-                constant_features.append(col)
-        
-        if constant_features:
-            X_train = X_train.drop(columns=constant_features)
-            X_test = X_test.drop(columns=constant_features)
-            logger.info(f"상수 피처 제거: {len(constant_features)}개")
-        
-        # 높은 결측치 비율 피처 제거 (90% 이상)
-        high_missing_features = []
-        for col in X_train.columns:
-            missing_ratio = X_train[col].isnull().sum() / len(X_train)
-            if missing_ratio > 0.9:
-                high_missing_features.append(col)
-        
-        if high_missing_features:
-            X_train = X_train.drop(columns=high_missing_features)
-            X_test = X_test.drop(columns=high_missing_features)
-            logger.info(f"높은 결측치 피처 제거: {len(high_missing_features)}개")
+        # 메모리 정리
+        gc.collect()
         
         return X_train, X_test
     
-    def _manual_target_encoding(self, 
-                              X_train_col: pd.Series, 
-                              X_test_col: pd.Series, 
-                              y_train: pd.Series, 
-                              smoothing: float = 100) -> Tuple[pd.Series, pd.Series, Dict]:
-        """메모리 효율적 수동 타겟 인코딩"""
-        # 전체 평균
-        global_mean = y_train.mean()
+    def _encode_categorical_features_optimized(self, 
+                                             X_train: pd.DataFrame, 
+                                             X_test: pd.DataFrame, 
+                                             y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """극한 최적화 범주형 피처 인코딩"""
+        logger.info("극한 최적화 범주형 피처 인코딩 시작")
         
-        # 범주별 타겟 평균 및 개수 계산
-        category_stats = y_train.groupby(X_train_col).agg(['mean', 'count'])
-        
-        # 스무딩 적용된 타겟 인코딩 맵 생성
-        target_encoded_map = {}
-        for category in category_stats.index:
-            category_mean = category_stats.loc[category, 'mean']
-            category_count = category_stats.loc[category, 'count']
-            
-            # 베이지안 스무딩 공식
-            smoothed_mean = (category_count * category_mean + smoothing * global_mean) / (category_count + smoothing)
-            target_encoded_map[category] = smoothed_mean
-        
-        # 학습 데이터 적용
-        train_encoded = X_train_col.map(target_encoded_map)
-        
-        # 테스트 데이터 적용 (없는 카테고리는 전체 평균 사용)
-        test_encoded = X_test_col.map(target_encoded_map).fillna(global_mean)
-        
-        return train_encoded, test_encoded, target_encoded_map
-    
-    def _encode_categorical_features(self, 
-                                   X_train: pd.DataFrame, 
-                                   X_test: pd.DataFrame, 
-                                   y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """64GB RAM 최적화 범주형 피처 인코딩"""
-        logger.info("64GB RAM 최적화 범주형 피처 인코딩 시작")
-        
-        categorical_cols = X_train.select_dtypes(include=['object', 'category']).columns
-        logger.info(f"처리할 범주형 컬럼: {len(categorical_cols)}개")
-        
-        for col in categorical_cols:
+        # 메모리 모니터링
+        for col in self.categorical_columns[:]:  # 복사본으로 반복
             try:
+                memory_before = self.get_memory_usage()
+                logger.info(f"{col} 인코딩 시작 (메모리: {memory_before:.2f} GB)")
+                
                 unique_count = X_train[col].nunique()
-                logger.info(f"{col} 컬럼 인코딩 시작 (유니크값: {unique_count:,}개)")
                 
-                # categorical 타입 변환
-                if X_train[col].dtype.name == 'category':
-                    X_train[col] = X_train[col].astype(str)
-                if X_test[col].dtype.name == 'category':
-                    X_test[col] = X_test[col].astype(str)
+                # 메모리 부족 방지를 위한 조건부 처리
+                if memory_before > 50:  # 50GB 초과 시 인코딩 스킵
+                    logger.warning(f"{col}: 메모리 부족으로 인코딩 스킵")
+                    continue
                 
-                # 고카디널리티 vs 저카디널리티 구분 처리
-                if unique_count > 1000:
-                    logger.info(f"{col}: 고카디널리티 컬럼 처리")
-                    
-                    # 상위 1000개 카테고리 유지 (64GB RAM 활용)
-                    top_categories = X_train[col].value_counts().head(1000).index
+                if unique_count > 10000:  # 초고카디널리티
+                    logger.info(f"{col}: 초고카디널리티 컬럼 - 상위 100개만 유지")
+                    top_categories = X_train[col].value_counts().head(100).index
                     X_train[col] = X_train[col].where(X_train[col].isin(top_categories), 'other')
                     X_test[col] = X_test[col].where(X_test[col].isin(top_categories), 'other')
-                    
-                    # 대용량 샘플로 타겟 인코딩
-                    if X_train[col].nunique() > 2:
-                        sample_size = min(3000000, len(X_train) // 2)  # 300만 샘플
-                        sample_idx = np.random.choice(len(X_train), sample_size, replace=False)
-                        
-                        X_sample = X_train.iloc[sample_idx]
-                        y_sample = y_train.iloc[sample_idx]
-                        
-                        logger.info(f"{col}: 대용량 샘플링 타겟 인코딩 ({sample_size:,}개 샘플)")
-                        
-                        train_target_enc, test_target_enc, target_map = self._manual_target_encoding(
-                            X_sample[col], X_test[col], y_sample,
-                            smoothing=self.config.FEATURE_CONFIG['target_encoding_smoothing']
-                        )
-                        
-                        X_train[f'{col}_target_encoded'] = X_train[col].map(target_map).fillna(y_train.mean())
-                        X_test[f'{col}_target_encoded'] = test_target_enc
-                        
-                        self.target_encoders[col] = target_map
-                        self.generated_features.append(f'{col}_target_encoded')
-                        
-                        del X_sample, y_sample  # 메모리 해제
-                        gc.collect()
                 
-                else:
-                    logger.info(f"{col}: 저카디널리티 컬럼 - 전체 인코딩")
-                    
-                    # 전체 데이터로 타겟 인코딩 (RAM 충분)
-                    if unique_count > 2:
-                        train_target_enc, test_target_enc, target_map = self._manual_target_encoding(
-                            X_train[col], X_test[col], y_train,
-                            smoothing=self.config.FEATURE_CONFIG['target_encoding_smoothing']
-                        )
-                        
-                        X_train[f'{col}_target_encoded'] = train_target_enc
-                        X_test[f'{col}_target_encoded'] = test_target_enc
-                        
-                        self.target_encoders[col] = target_map
-                        self.generated_features.append(f'{col}_target_encoded')
+                elif unique_count > 1000:  # 고카디널리티
+                    logger.info(f"{col}: 고카디널리티 컬럼 - 상위 500개만 유지")
+                    top_categories = X_train[col].value_counts().head(500).index
+                    X_train[col] = X_train[col].where(X_train[col].isin(top_categories), 'other')
+                    X_test[col] = X_test[col].where(X_test[col].isin(top_categories), 'other')
                 
-                # Label Encoding (항상 수행)
+                # Label Encoding만 수행 (메모리 절약)
                 le = LabelEncoder()
-                all_values = pd.concat([X_train[col], X_test[col]]).unique()
-                le.fit(all_values.astype(str))
                 
-                X_train[f'{col}_label_encoded'] = le.transform(X_train[col].astype(str))
-                X_test[f'{col}_label_encoded'] = le.transform(X_test[col].astype(str))
+                # 전체 카테고리 수집 (메모리 효율적)
+                try:
+                    all_values = pd.concat([X_train[col], X_test[col]], ignore_index=True).unique()
+                    le.fit(all_values.astype(str))
+                    
+                    X_train[f'{col}_encoded'] = le.transform(X_train[col].astype(str)).astype('int16')
+                    X_test[f'{col}_encoded'] = le.transform(X_test[col].astype(str)).astype('int16')
+                    
+                    self.label_encoders[col] = le
+                    self.generated_features.append(f'{col}_encoded')
+                    
+                except Exception as e:
+                    logger.warning(f"{col} Label Encoding 실패: {str(e)}")
+                    continue
                 
-                self.label_encoders[col] = le
-                self.generated_features.append(f'{col}_label_encoded')
+                # 빈도 인코딩 (메모리 절약 버전)
+                try:
+                    freq_map = X_train[col].value_counts().to_dict()
+                    X_train[f'{col}_freq'] = X_train[col].map(freq_map).fillna(0).astype('int16')
+                    X_test[f'{col}_freq'] = X_test[col].map(freq_map).fillna(0).astype('int16')
+                    self.generated_features.append(f'{col}_freq')
+                    
+                except Exception as e:
+                    logger.warning(f"{col} 빈도 인코딩 실패: {str(e)}")
                 
-                # 빈도 인코딩 (메모리 효율적)
-                freq_map = X_train[col].value_counts().to_dict()
-                X_train[f'{col}_frequency'] = X_train[col].map(freq_map).astype('int32')
-                X_test[f'{col}_frequency'] = X_test[col].map(freq_map).fillna(0).astype('int32')
-                self.generated_features.append(f'{col}_frequency')
+                # 메모리 정리
+                del freq_map, all_values
+                gc.collect()
                 
-                logger.info(f"{col} 컬럼 인코딩 완료")
+                memory_after = self.get_memory_usage()
+                logger.info(f"{col} 인코딩 완료 (메모리: {memory_after:.2f} GB)")
                 
             except Exception as e:
-                logger.warning(f"{col} 컬럼 인코딩 실패: {str(e)}")
+                logger.error(f"{col} 인코딩 전체 실패: {str(e)}")
                 continue
         
         # 원본 범주형 컬럼 제거
         try:
-            X_train = X_train.drop(columns=categorical_cols)
-            X_test = X_test.drop(columns=categorical_cols)
+            X_train = X_train.drop(columns=self.categorical_columns)
+            X_test = X_test.drop(columns=self.categorical_columns)
         except Exception as e:
             logger.warning(f"범주형 컬럼 제거 실패: {str(e)}")
         
@@ -254,336 +238,179 @@ class FeatureEngineer:
         logger.info(f"범주형 피처 인코딩 완료 - 생성된 피처: {len(self.generated_features)}개")
         return X_train, X_test
     
-    def _create_numerical_features(self, 
-                                 X_train: pd.DataFrame, 
-                                 X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """수치형 피처 생성"""
-        logger.info("수치형 피처 생성 시작")
+    def _create_numerical_features_limited(self, 
+                                         X_train: pd.DataFrame, 
+                                         X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """제한적 수치형 피처 생성"""
+        logger.info("제한적 수치형 피처 생성 시작")
         
-        numeric_cols = X_train.select_dtypes(include=[np.number]).columns
+        # 메모리 체크
+        current_memory = self.get_memory_usage()
+        if current_memory > 40:  # 40GB 초과 시 수치형 피처 생성 제한
+            logger.warning("메모리 부족으로 수치형 피처 생성 제한")
+            max_features = 5
+        else:
+            max_features = 15
         
-        for col in numeric_cols:
+        # 현재 수치형 컬럼 재확인 (타입 안전)
+        current_numeric_cols = []
+        for col in X_train.columns:
+            if X_train[col].dtype in ['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64',
+                                    'float16', 'float32', 'float64']:
+                current_numeric_cols.append(col)
+        
+        feature_count = 0
+        
+        for col in current_numeric_cols[:max_features]:
             try:
-                # 로그 변환 (양수인 경우)
+                # 메모리 체크
+                if self.get_memory_usage() > 45:
+                    break
+                
+                # 로그 변환 (양수 데이터만)
                 if (X_train[col] > 0).all():
-                    X_train[f'{col}_log'] = np.log1p(X_train[col])
-                    X_test[f'{col}_log'] = np.log1p(X_test[col])
+                    X_train[f'{col}_log'] = np.log1p(X_train[col]).astype('float32')
+                    X_test[f'{col}_log'] = np.log1p(X_test[col]).astype('float32')
                     self.generated_features.append(f'{col}_log')
+                    feature_count += 1
                 
-                # 제곱근 변환 (양수인 경우)
-                if (X_train[col] >= 0).all():
-                    X_train[f'{col}_sqrt'] = np.sqrt(X_train[col])
-                    X_test[f'{col}_sqrt'] = np.sqrt(X_test[col])
-                    self.generated_features.append(f'{col}_sqrt')
-                
-                # 이상치 기반 이진 피처
-                q1 = X_train[col].quantile(0.25)
-                q3 = X_train[col].quantile(0.75)
-                iqr = q3 - q1
-                lower_bound = q1 - 1.5 * iqr
-                upper_bound = q3 + 1.5 * iqr
-                
-                X_train[f'{col}_is_outlier'] = (
-                    (X_train[col] < lower_bound) | (X_train[col] > upper_bound)
-                ).astype(np.int8)
-                
-                X_test[f'{col}_is_outlier'] = (
-                    (X_test[col] < lower_bound) | (X_test[col] > upper_bound)
-                ).astype(np.int8)
-                
-                self.generated_features.append(f'{col}_is_outlier')
-                
-                # 구간화 피처
-                try:
-                    X_train[f'{col}_binned'] = pd.cut(X_train[col], bins=5, labels=False, duplicates='drop')
-                    X_test[f'{col}_binned'] = pd.cut(X_test[col], bins=5, labels=False, duplicates='drop')
+                # 이상치 플래그
+                if feature_count < max_features:
+                    q1 = X_train[col].quantile(0.25)
+                    q3 = X_train[col].quantile(0.75)
+                    iqr = q3 - q1
+                    lower_bound = q1 - 1.5 * iqr
+                    upper_bound = q3 + 1.5 * iqr
                     
-                    # NaN 값을 0으로 대체
-                    X_train[f'{col}_binned'] = X_train[f'{col}_binned'].fillna(0).astype(np.int8)
-                    X_test[f'{col}_binned'] = X_test[f'{col}_binned'].fillna(0).astype(np.int8)
+                    X_train[f'{col}_outlier'] = (
+                        (X_train[col] < lower_bound) | (X_train[col] > upper_bound)
+                    ).astype('int8')
                     
-                    self.generated_features.append(f'{col}_binned')
-                except:
-                    pass  # 구간화 실패 시 스킵
+                    X_test[f'{col}_outlier'] = (
+                        (X_test[col] < lower_bound) | (X_test[col] > upper_bound)
+                    ).astype('int8')
+                    
+                    self.generated_features.append(f'{col}_outlier')
+                    feature_count += 1
+                
+                # 메모리 정리
+                if feature_count % 5 == 0:
+                    gc.collect()
                 
             except Exception as e:
                 logger.warning(f"{col} 수치형 피처 생성 실패: {str(e)}")
                 continue
         
-        logger.info(f"수치형 피처 생성 완료")
+        logger.info(f"수치형 피처 생성 완료: {feature_count}개")
         return X_train, X_test
     
-    def _create_interaction_features(self, 
-                                   X_train: pd.DataFrame, 
-                                   X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """64GB RAM 활용 적응형 상호작용 피처 생성"""
-        logger.info("적응형 상호작용 피처 생성 시작")
+    def _create_minimal_interaction_features(self, 
+                                           X_train: pd.DataFrame, 
+                                           X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """최소한의 상호작용 피처 생성"""
+        logger.info("최소한의 상호작용 피처 생성 시작")
         
-        # 현재 메모리 사용량 체크
-        current_memory_gb = X_train.memory_usage(deep=True).sum() / (1024**3)
-        logger.info(f"현재 메모리 사용량: {current_memory_gb:.2f} GB")
+        # 수치형 컬럼 안전하게 확인
+        safe_numeric_cols = []
+        for col in X_train.columns:
+            if X_train[col].dtype in ['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64',
+                                    'float16', 'float32', 'float64']:
+                safe_numeric_cols.append(col)
         
-        numeric_cols = X_train.select_dtypes(include=[np.number]).columns
-        logger.info(f"수치형 컬럼 수: {len(numeric_cols)}")
+        # 메모리 기반 제한
+        current_memory = self.get_memory_usage()
+        if current_memory > 35:
+            max_interactions = 10
+            max_cols = 5
+        elif current_memory > 25:
+            max_interactions = 30
+            max_cols = 8
+        else:
+            max_interactions = 50
+            max_cols = 10
         
-        # 64GB RAM 활용 적응형 설정
-        if current_memory_gb < 15:  # 15GB 미만 사용 중
-            max_interactions = 300
-            important_numeric_cols = numeric_cols[:25]
-            logger.info("고성능 모드: 대용량 상호작용 피처 생성")
-        elif current_memory_gb < 30:  # 30GB 미만
-            max_interactions = 150
-            important_numeric_cols = numeric_cols[:20]
-            logger.info("표준 모드: 중간 수준 상호작용 피처 생성")
-        else:  # 30GB 이상
-            max_interactions = 75
-            important_numeric_cols = numeric_cols[:15]
-            logger.info("메모리 절약 모드: 제한적 상호작용 피처 생성")
-        
+        important_cols = safe_numeric_cols[:max_cols]
         interaction_count = 0
-        chunk_size = 2000000  # 200만 행씩 처리
         
-        for i, col1 in enumerate(important_numeric_cols):
+        logger.info(f"상호작용 피처 제한: {max_interactions}개, 컬럼: {max_cols}개")
+        
+        for i, col1 in enumerate(important_cols):
             if interaction_count >= max_interactions:
                 break
-                
-            for j, col2 in enumerate(important_numeric_cols[i+1:], i+1):
+            
+            for j, col2 in enumerate(important_cols[i+1:], i+1):
                 if interaction_count >= max_interactions:
                     break
                 
                 try:
-                    # 청크 단위 처리 (대용량 데이터)
-                    if len(X_train) > chunk_size:
-                        # 학습 데이터 청크 처리
-                        mul_chunks_train = []
-                        div_chunks_train = []
-                        
-                        for start_idx in range(0, len(X_train), chunk_size):
-                            end_idx = min(start_idx + chunk_size, len(X_train))
-                            chunk = X_train.iloc[start_idx:end_idx]
-                            
-                            mul_chunk = (chunk[col1] * chunk[col2]).astype(np.float32)
-                            div_chunk = (chunk[col1] / (chunk[col2] + 1e-8)).astype(np.float32)
-                            
-                            mul_chunks_train.append(mul_chunk)
-                            div_chunks_train.append(div_chunk)
-                        
-                        X_train[f'{col1}_mul_{col2}'] = pd.concat(mul_chunks_train)
-                        X_train[f'{col1}_div_{col2}'] = pd.concat(div_chunks_train)
-                        
-                        # 테스트 데이터 청크 처리
-                        mul_chunks_test = []
-                        div_chunks_test = []
-                        
-                        for start_idx in range(0, len(X_test), chunk_size):
-                            end_idx = min(start_idx + chunk_size, len(X_test))
-                            chunk = X_test.iloc[start_idx:end_idx]
-                            
-                            mul_chunk = (chunk[col1] * chunk[col2]).astype(np.float32)
-                            div_chunk = (chunk[col1] / (chunk[col2] + 1e-8)).astype(np.float32)
-                            
-                            mul_chunks_test.append(mul_chunk)
-                            div_chunks_test.append(div_chunk)
-                        
-                        X_test[f'{col1}_mul_{col2}'] = pd.concat(mul_chunks_test)
-                        X_test[f'{col1}_div_{col2}'] = pd.concat(div_chunks_test)
+                    # 메모리 체크
+                    if self.get_memory_usage() > 50:
+                        logger.warning("메모리 한계로 상호작용 피처 생성 중단")
+                        break
                     
-                    else:
-                        # 작은 데이터는 일반 처리
-                        X_train[f'{col1}_mul_{col2}'] = (X_train[col1] * X_train[col2]).astype(np.float32)
-                        X_train[f'{col1}_div_{col2}'] = (X_train[col1] / (X_train[col2] + 1e-8)).astype(np.float32)
-                        
-                        X_test[f'{col1}_mul_{col2}'] = (X_test[col1] * X_test[col2]).astype(np.float32)
-                        X_test[f'{col1}_div_{col2}'] = (X_test[col1] / (X_test[col2] + 1e-8)).astype(np.float32)
+                    # 곱셈 피처만 생성 (나눗셈은 제외)
+                    X_train[f'{col1}_x_{col2}'] = (X_train[col1] * X_train[col2]).astype('float32')
+                    X_test[f'{col1}_x_{col2}'] = (X_test[col1] * X_test[col2]).astype('float32')
                     
-                    self.generated_features.extend([f'{col1}_mul_{col2}', f'{col1}_div_{col2}'])
-                    interaction_count += 2
+                    self.generated_features.append(f'{col1}_x_{col2}')
+                    interaction_count += 1
                     
-                    # 메모리 정리 (매 50개 피처마다)
-                    if interaction_count % 50 == 0:
+                    # 메모리 정리
+                    if interaction_count % 10 == 0:
                         gc.collect()
-                        memory_usage_gb = X_train.memory_usage(deep=True).sum() / (1024**3)
-                        logger.info(f"상호작용 피처 진행률: {interaction_count}/{max_interactions}, 메모리: {memory_usage_gb:.2f} GB")
+                        current_mem = self.get_memory_usage()
+                        logger.info(f"상호작용 피처 진행: {interaction_count}/{max_interactions}, 메모리: {current_mem:.2f} GB")
                 
                 except Exception as e:
-                    logger.warning(f"{col1}, {col2} 상호작용 피처 생성 실패: {str(e)}")
+                    logger.warning(f"{col1}, {col2} 상호작용 피처 실패: {str(e)}")
                     continue
         
-        # 최종 메모리 정리
-        gc.collect()
-        final_memory = X_train.memory_usage(deep=True).sum() / (1024**3)
-        
-        logger.info(f"상호작용 피처 생성 완료 - 생성된 피처: {interaction_count}개")
-        logger.info(f"메모리 사용량: {final_memory:.2f} GB")
-        
+        logger.info(f"상호작용 피처 생성 완료: {interaction_count}개")
         return X_train, X_test
     
-    def _create_aggregation_features(self, 
-                                   X_train: pd.DataFrame, 
-                                   X_test: pd.DataFrame, 
-                                   y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """메모리 효율적 집계 피처 생성"""
-        logger.info("집계 피처 생성 시작")
+    def _final_optimization(self, 
+                          X_train: pd.DataFrame, 
+                          X_test: pd.DataFrame, 
+                          y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """최종 최적화"""
+        logger.info("최종 최적화 시작")
         
-        # 범주형으로 인코딩된 피처들을 그룹화 키로 사용
-        categorical_encoded_cols = [col for col in X_train.columns 
-                                  if 'label_encoded' in col or 'target_encoded' in col]
+        # 데이터 타입 최적화
+        for col in X_train.columns:
+            if X_train[col].dtype == 'int64':
+                if X_train[col].min() >= 0:
+                    if X_train[col].max() < 65535:
+                        X_train[col] = X_train[col].astype('uint16')
+                        X_test[col] = X_test[col].astype('uint16')
+            elif X_train[col].dtype == 'float64':
+                X_train[col] = X_train[col].astype('float32')
+                X_test[col] = X_test[col].astype('float32')
         
-        numeric_cols = X_train.select_dtypes(include=[np.number]).columns
-        numeric_cols = [col for col in numeric_cols if col not in categorical_encoded_cols]
+        # 메모리 기반 피처 선택
+        current_memory = self.get_memory_usage()
         
-        # 상위 3개 범주형 피처만 사용 (메모리 고려)
-        group_cols = categorical_encoded_cols[:3]
-        
-        for group_col in group_cols:
-            if group_col not in X_train.columns:
-                continue
+        if current_memory > 55 or X_train.shape[1] > 1000:
+            logger.info("메모리 절약을 위한 피처 선택 수행")
             
+            # 간단한 피처 선택
             try:
-                logger.info(f"{group_col} 기준 집계 피처 생성")
+                # 분산 기반 필터링
+                variances = X_train.var()
+                high_var_features = variances[variances > 1e-6].index.tolist()
                 
-                # 그룹별 수치형 피처 집계 (상위 5개만)
-                for num_col in numeric_cols[:5]:
-                    try:
-                        # 평균
-                        group_mean = X_train.groupby(group_col)[num_col].mean()
-                        X_train[f'{group_col}_{num_col}_mean'] = X_train[group_col].map(group_mean).astype(np.float32)
-                        X_test[f'{group_col}_{num_col}_mean'] = X_test[group_col].map(group_mean).fillna(group_mean.mean()).astype(np.float32)
-                        
-                        # 표준편차
-                        group_std = X_train.groupby(group_col)[num_col].std()
-                        X_train[f'{group_col}_{num_col}_std'] = X_train[group_col].map(group_std).astype(np.float32)
-                        X_test[f'{group_col}_{num_col}_std'] = X_test[group_col].map(group_std).fillna(group_std.mean()).astype(np.float32)
-                        
-                        self.generated_features.extend([
-                            f'{group_col}_{num_col}_mean',
-                            f'{group_col}_{num_col}_std'
-                        ])
-                        
-                    except Exception as e:
-                        logger.warning(f"{group_col}, {num_col} 집계 피처 생성 실패: {str(e)}")
-                        continue
-                
-                # 그룹별 타겟 통계
-                try:
-                    group_target_count = y_train.groupby(X_train[group_col]).count()
-                    
-                    X_train[f'{group_col}_target_count'] = X_train[group_col].map(group_target_count).astype(np.int32)
-                    X_test[f'{group_col}_target_count'] = X_test[group_col].map(group_target_count).fillna(group_target_count.mean()).astype(np.int32)
-                    
-                    self.generated_features.append(f'{group_col}_target_count')
-                    
-                except Exception as e:
-                    logger.warning(f"{group_col} 타겟 집계 피처 생성 실패: {str(e)}")
+                if len(high_var_features) < X_train.shape[1]:
+                    X_train = X_train[high_var_features]
+                    X_test = X_test[high_var_features]
+                    logger.info(f"분산 기반 피처 선택: {len(high_var_features)}개 유지")
                 
             except Exception as e:
-                logger.warning(f"{group_col} 전체 집계 피처 생성 실패: {str(e)}")
-                continue
+                logger.warning(f"피처 선택 실패: {str(e)}")
         
-        logger.info(f"집계 피처 생성 완료")
+        # 메모리 정리
+        gc.collect()
+        
+        logger.info("최종 최적화 완료")
         return X_train, X_test
-    
-    def _create_statistical_features(self, 
-                                   X_train: pd.DataFrame, 
-                                   X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """통계적 피처 생성"""
-        logger.info("통계적 피처 생성 시작")
-        
-        try:
-            numeric_cols = X_train.select_dtypes(include=[np.number]).columns
-            
-            # 행별 통계 피처 (메모리 효율적)
-            X_train['row_sum'] = X_train[numeric_cols].sum(axis=1).astype(np.float32)
-            X_train['row_mean'] = X_train[numeric_cols].mean(axis=1).astype(np.float32)
-            X_train['row_std'] = X_train[numeric_cols].std(axis=1).astype(np.float32)
-            X_train['row_min'] = X_train[numeric_cols].min(axis=1).astype(np.float32)
-            X_train['row_max'] = X_train[numeric_cols].max(axis=1).astype(np.float32)
-            X_train['row_median'] = X_train[numeric_cols].median(axis=1).astype(np.float32)
-            
-            X_test['row_sum'] = X_test[numeric_cols].sum(axis=1).astype(np.float32)
-            X_test['row_mean'] = X_test[numeric_cols].mean(axis=1).astype(np.float32)
-            X_test['row_std'] = X_test[numeric_cols].std(axis=1).astype(np.float32)
-            X_test['row_min'] = X_test[numeric_cols].min(axis=1).astype(np.float32)
-            X_test['row_max'] = X_test[numeric_cols].max(axis=1).astype(np.float32)
-            X_test['row_median'] = X_test[numeric_cols].median(axis=1).astype(np.float32)
-            
-            row_features = ['row_sum', 'row_mean', 'row_std', 'row_min', 'row_max', 'row_median']
-            self.generated_features.extend(row_features)
-            
-            # NaN 값 처리
-            for feature in row_features:
-                X_train[feature] = X_train[feature].fillna(0)
-                X_test[feature] = X_test[feature].fillna(0)
-                
-        except Exception as e:
-            logger.warning(f"통계적 피처 생성 실패: {str(e)}")
-        
-        logger.info(f"통계적 피처 생성 완료")
-        return X_train, X_test
-    
-    def _scale_features(self, 
-                       X_train: pd.DataFrame, 
-                       X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """피처 스케일링"""
-        logger.info("피처 스케일링 시작")
-        
-        try:
-            numeric_cols = X_train.select_dtypes(include=[np.number]).columns
-            
-            # 표준화
-            scaler = StandardScaler()
-            X_train_scaled = X_train.copy()
-            X_test_scaled = X_test.copy()
-            
-            X_train_scaled[numeric_cols] = scaler.fit_transform(X_train[numeric_cols]).astype(np.float32)
-            X_test_scaled[numeric_cols] = scaler.transform(X_test[numeric_cols]).astype(np.float32)
-            
-            self.scalers['standard'] = scaler
-            
-        except Exception as e:
-            logger.warning(f"피처 스케일링 실패: {str(e)}")
-            return X_train, X_test
-        
-        logger.info(f"피처 스케일링 완료")
-        return X_train_scaled, X_test_scaled
-    
-    def _select_features(self, 
-                        X_train: pd.DataFrame, 
-                        X_test: pd.DataFrame, 
-                        y_train: pd.Series,
-                        k: int = 2000) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """피처 선택 (64GB RAM 고려)"""
-        logger.info("피처 선택 시작")
-        
-        try:
-            # 피처 수가 k보다 적으면 전체 사용
-            if X_train.shape[1] <= k:
-                logger.info(f"피처 수({X_train.shape[1]})가 k({k})보다 적어 전체 피처 사용")
-                return X_train, X_test
-            
-            logger.info(f"피처 선택: {X_train.shape[1]} → {k}개")
-            
-            # 상호정보량 기반 피처 선택
-            selector = SelectKBest(score_func=mutual_info_classif, k=k)
-            
-            X_train_selected = pd.DataFrame(
-                selector.fit_transform(X_train, y_train),
-                columns=X_train.columns[selector.get_support()],
-                index=X_train.index
-            )
-            
-            X_test_selected = pd.DataFrame(
-                selector.transform(X_test),
-                columns=X_test.columns[selector.get_support()],
-                index=X_test.index
-            )
-            
-            logger.info(f"피처 선택 완료 - 선택된 피처: {X_train_selected.shape[1]}개")
-            return X_train_selected, X_test_selected
-            
-        except Exception as e:
-            logger.warning(f"피처 선택 실패: {str(e)}")
-            return X_train, X_test
     
     def get_feature_importance_summary(self) -> Dict[str, Any]:
         """피처 중요도 요약 정보"""
@@ -591,8 +418,10 @@ class FeatureEngineer:
             'total_generated_features': len(self.generated_features),
             'generated_features': self.generated_features,
             'encoders_count': {
-                'target_encoders': len(self.target_encoders),
                 'label_encoders': len(self.label_encoders),
                 'scalers': len(self.scalers)
             }
         }
+
+# 기존 FeatureEngineer 클래스를 최적화된 버전으로 교체
+FeatureEngineer = MemoryOptimizedFeatureEngineer
