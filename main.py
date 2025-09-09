@@ -22,7 +22,7 @@ from models import ModelFactory
 def setup_logging():
     """로깅 설정"""
     logger = Config.setup_logging()
-    logger.info("=== 토스 NEXT ML Challenge CTR 모델 파이프라인 시작 ===")
+    logger.info("=== CTR 모델 파이프라인 시작 ===")
     return logger
 
 def load_and_preprocess_data(config: Config) -> tuple:
@@ -320,7 +320,7 @@ def main():
     """메인 실행 함수"""
     
     # 인자 파싱
-    parser = argparse.ArgumentParser(description="토스 CTR 모델 파이프라인")
+    parser = argparse.ArgumentParser(description="CTR 모델 파이프라인")
     parser.add_argument("--mode", choices=["train", "inference", "evaluate"], 
                        default="train", help="실행 모드")
     parser.add_argument("--config", type=str, help="설정 파일 경로")
