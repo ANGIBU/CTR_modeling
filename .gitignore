@@ -7,3 +7,10 @@
 
 # .gitignore 파일은 항상 포함
 !.gitignore
+# VSCode 설정 및 확장 파일 제외
+.vscode/
+__pycache__/
+*.pyc
+logs/
+models/
+output/
