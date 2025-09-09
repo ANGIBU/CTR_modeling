@@ -169,22 +169,128 @@ class DataLoader:
     
     def train_test_split_data(self, 
                             df: pd.DataFrame, 
-                            test_size: float = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-        """학습/검증 데이터 분할"""
+                            test_size: float = None,
+                            target_col: str = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+        """학습/검증 데이터 분할 (개선된 버전)"""
+        logger.info("학습/검증 데이터 분할 시작")
+        
         if test_size is None:
             test_size = self.config.TEST_SIZE
         
-        X = df[self.feature_columns]
-        y = df[self.target_column]
+        if target_col is None:
+            target_col = self.target_column
         
-        X_train, X_val, y_train, y_val = train_test_split(
-            X, y, 
-            test_size=test_size, 
-            random_state=self.config.RANDOM_STATE,
-            stratify=y
-        )
+        # 타겟 컬럼 존재 확인
+        if target_col not in df.columns:
+            raise ValueError(f"타겟 컬럼 '{target_col}'이 데이터에 없습니다. 사용 가능한 컬럼: {list(df.columns)}")
         
-        logger.info(f"데이터 분할 완료 - 학습: {X_train.shape}, 검증: {X_val.shape}")
+        # 피처 컬럼 동적 계산 (타겟 제외)
+        feature_columns = [col for col in df.columns if col != target_col and col is not None]
+        
+        # None 값이나 빈 문자열 제거
+        feature_columns = [col for col in feature_columns if col is not None and str(col).strip() != '']
+        
+        # 실제 존재하는 컬럼만 선택
+        existing_feature_columns = [col for col in feature_columns if col in df.columns]
+        
+        if len(existing_feature_columns) == 0:
+            raise ValueError("사용 가능한 피처 컬럼이 없습니다.")
+        
+        logger.info(f"피처 컬럼 수: {len(existing_feature_columns)}")
+        logger.info(f"타겟 컬럼: {target_col}")
+        
+        # 데이터 분할
+        X = df[existing_feature_columns]
+        y = df[target_col]
+        
+        # 결측치 확인
+        if X.isnull().any().any():
+            logger.warning("피처 데이터에 결측치가 있습니다. 0으로 대치합니다.")
+            X = X.fillna(0)
+        
+        if y.isnull().any():
+            logger.warning("타겟 데이터에 결측치가 있습니다.")
+            # 결측치가 있는 행 제거
+            valid_indices = ~y.isnull()
+            X = X[valid_indices]
+            y = y[valid_indices]
+        
+        # 데이터 분할 수행
+        try:
+            X_train, X_val, y_train, y_val = train_test_split(
+                X, y, 
+                test_size=test_size, 
+                random_state=self.config.RANDOM_STATE,
+                stratify=y
+            )
+            
+            logger.info(f"데이터 분할 완료 - 학습: {X_train.shape}, 검증: {X_val.shape}")
+            
+            return X_train, X_val, y_train, y_val
+            
+        except Exception as e:
+            logger.error(f"데이터 분할 실패: {str(e)}")
+            logger.error(f"X 형태: {X.shape}, y 형태: {y.shape}")
+            logger.error(f"y 유니크 값: {y.unique()}")
+            raise
+    
+    def safe_train_test_split(self, 
+                             X: pd.DataFrame, 
+                             y: pd.Series, 
+                             test_size: float = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+        """안전한 데이터 분할 (별도 함수)"""
+        logger.info("안전한 데이터 분할 시작")
+        
+        if test_size is None:
+            test_size = self.config.TEST_SIZE
+        
+        # 입력 데이터 검증
+        if X is None or y is None:
+            raise ValueError("X 또는 y가 None입니다.")
+        
+        if len(X) != len(y):
+            raise ValueError(f"X와 y의 길이가 다릅니다. X: {len(X)}, y: {len(y)}")
+        
+        # 결측치 처리
+        if X.isnull().any().any():
+            logger.warning("X에 결측치가 있습니다. 0으로 대치합니다.")
+            X = X.fillna(0)
+        
+        if y.isnull().any():
+            logger.warning("y에 결측치가 있습니다. 해당 행을 제거합니다.")
+            valid_indices = ~y.isnull()
+            X = X[valid_indices]
+            y = y[valid_indices]
+        
+        # 데이터 타입 확인
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X)
+        if not isinstance(y, pd.Series):
+            y = pd.Series(y)
+        
+        try:
+            # 계층화 분할 시도
+            X_train, X_val, y_train, y_val = train_test_split(
+                X, y, 
+                test_size=test_size, 
+                random_state=self.config.RANDOM_STATE,
+                stratify=y
+            )
+            
+            logger.info(f"계층화 분할 완료 - 학습: {X_train.shape}, 검증: {X_val.shape}")
+            
+        except Exception as e:
+            logger.warning(f"계층화 분할 실패: {str(e)}. 일반 분할로 진행합니다.")
+            
+            # 일반 분할
+            X_train, X_val, y_train, y_val = train_test_split(
+                X, y, 
+                test_size=test_size, 
+                random_state=self.config.RANDOM_STATE
+            )
+            
+            logger.info(f"일반 분할 완료 - 학습: {X_train.shape}, 검증: {X_val.shape}")
+        
         return X_train, X_val, y_train, y_val
     
     def load_submission_template(self) -> pd.DataFrame:

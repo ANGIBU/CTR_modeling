@@ -145,6 +145,36 @@ def feature_engineering_pipeline(train_df: pd.DataFrame,
         # 타겟 변수 분리
         y_train = train_df['clicked']
         
+        # 피처 엔지니어링 결과 검증
+        logger.info("피처 엔지니어링 결과 검증 시작")
+        
+        # 결측치 확인
+        if X_train.isnull().any().any():
+            logger.warning("X_train에 결측치 발견, 0으로 대치")
+            X_train = X_train.fillna(0)
+        
+        if X_test.isnull().any().any():
+            logger.warning("X_test에 결측치 발견, 0으로 대치")
+            X_test = X_test.fillna(0)
+        
+        # 무한값 확인
+        if np.isinf(X_train.values).any():
+            logger.warning("X_train에 무한값 발견, 클리핑 처리")
+            X_train = X_train.replace([np.inf, -np.inf], [1e6, -1e6])
+        
+        if np.isinf(X_test.values).any():
+            logger.warning("X_test에 무한값 발견, 클리핑 처리")
+            X_test = X_test.replace([np.inf, -np.inf], [1e6, -1e6])
+        
+        # 컬럼명 검증 (None 값 제거)
+        valid_columns = [col for col in X_train.columns if col is not None and str(col).strip() != '']
+        if len(valid_columns) != len(X_train.columns):
+            logger.warning(f"잘못된 컬럼명 발견: {len(X_train.columns) - len(valid_columns)}개")
+            X_train = X_train[valid_columns]
+            X_test = X_test[valid_columns]
+        
+        logger.info("피처 엔지니어링 결과 검증 완료")
+        
         # 메모리 정리
         del train_df, test_df
         gc.collect()
