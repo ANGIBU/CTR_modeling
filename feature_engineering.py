@@ -107,6 +107,12 @@ class FeatureEngineer:
         categorical_cols = X_train.select_dtypes(include=['object', 'category']).columns
         
         for col in categorical_cols:
+            # categorical 타입을 object로 변환
+            if X_train[col].dtype.name == 'category':
+                X_train[col] = X_train[col].astype(str)
+            if X_test[col].dtype.name == 'category':
+                X_test[col] = X_test[col].astype(str)
+            
             # 빈도 기반 필터링
             freq_threshold = self.config.FEATURE_CONFIG['frequency_threshold']
             value_counts = X_train[col].value_counts()
@@ -155,10 +161,16 @@ class FeatureEngineer:
             self.label_encoders[col] = le
             self.generated_features.append(f'{col}_label_encoded')
             
-            # 빈도 인코딩
+            # 빈도 인코딩 (categorical 타입 문제 해결)
             freq_map = X_train[col].value_counts().to_dict()
+            
+            # 학습 데이터 빈도 인코딩
             X_train[f'{col}_frequency'] = X_train[col].map(freq_map)
-            X_test[f'{col}_frequency'] = X_test[col].map(freq_map).fillna(0)
+            
+            # 테스트 데이터 빈도 인코딩 (없는 값은 0으로 처리)
+            test_freq = X_test[col].map(freq_map)
+            X_test[f'{col}_frequency'] = test_freq.fillna(0).astype('int64')
+            
             self.generated_features.append(f'{col}_frequency')
         
         # 원본 범주형 컬럼 제거
