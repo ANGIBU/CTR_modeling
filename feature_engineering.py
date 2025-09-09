@@ -222,8 +222,8 @@ class FeatureEngineer:
                                              X_train: pd.DataFrame, 
                                              X_test: pd.DataFrame, 
                                              y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """대용량 데이터를 위한 성능 보존 최적화 인코딩"""
-        logger.info("성능 보존 최적화 인코딩 시작")
+        """대용량 데이터를 위한 최적화된 범주형 피처 인코딩"""
+        logger.info("최적화된 범주형 피처 인코딩 시작")
         
         categorical_cols = X_train.select_dtypes(include=['object', 'category']).columns
         
@@ -231,74 +231,40 @@ class FeatureEngineer:
             try:
                 logger.info(f"{col} 컬럼 최적화 인코딩 시작 (유니크값: {X_train[col].nunique()}개)")
                 
-                # categorical 타입 변환
+                # categorical 타입을 object로 변환
                 if X_train[col].dtype.name == 'category':
                     X_train[col] = X_train[col].astype(str)
                 if X_test[col].dtype.name == 'category':
                     X_test[col] = X_test[col].astype(str)
                 
-                # 1. 샘플링 기반 타겟 인코딩 (성능 보존)
-                if X_train[col].nunique() > 2 and len(X_train) > 100000:
-                    # 10% 샘플로 타겟 인코딩 학습 (속도 10배 향상, 성능 손실 최소)
-                    sample_size = max(100000, len(X_train) // 10)
-                    sample_idx = np.random.choice(len(X_train), sample_size, replace=False)
-                    
-                    X_sample = X_train.iloc[sample_idx]
-                    y_sample = y_train.iloc[sample_idx]
-                    
-                    logger.info(f"{col}: 샘플링 기반 타겟 인코딩 ({sample_size:,}개 샘플)")
-                    
-                    train_target_enc, test_target_enc, target_map = self._manual_target_encoding(
-                        X_sample[col], X_test[col], y_sample,
-                        smoothing=self.config.FEATURE_CONFIG['target_encoding_smoothing']
-                    )
-                    
-                    # 전체 데이터에 적용
-                    X_train[f'{col}_target_encoded'] = X_train[col].map(target_map).fillna(y_train.mean())
-                    X_test[f'{col}_target_encoded'] = test_target_enc
-                    
-                    self.target_encoders[col] = target_map
-                    self.generated_features.append(f'{col}_target_encoded')
+                # 1. 상위 빈도 카테고리만 유지 (메모리 절약)
+                top_categories = X_train[col].value_counts().head(50).index  # 상위 50개만
+                X_train[col] = X_train[col].where(X_train[col].isin(top_categories), 'other')
+                X_test[col] = X_test[col].where(X_test[col].isin(top_categories), 'other')
                 
-                # 2. 메모리 효율적 Label Encoding
+                # 2. Label Encoding만 수행 (타겟 인코딩은 너무 무거움)
                 le = LabelEncoder()
-                unique_values = pd.concat([X_train[col], X_test[col]]).unique()
-                le.fit(unique_values.astype(str))
+                X_train[f'{col}_label_encoded'] = le.fit_transform(X_train[col].astype(str))
                 
-                X_train[f'{col}_label_encoded'] = le.transform(X_train[col].astype(str))
-                X_test[f'{col}_label_encoded'] = le.transform(X_test[col].astype(str))
+                # 테스트 데이터 변환
+                test_encoded = []
+                for val in X_test[col].astype(str):
+                    if val in le.classes_:
+                        test_encoded.append(le.transform([val])[0])
+                    else:
+                        test_encoded.append(-1)
                 
+                X_test[f'{col}_label_encoded'] = test_encoded
                 self.label_encoders[col] = le
                 self.generated_features.append(f'{col}_label_encoded')
                 
-                # 3. 청크 단위 빈도 인코딩 (메모리 절약)
-                chunk_size = 1000000  # 100만 행씩 처리
-                
-                if len(X_train) > chunk_size:
-                    logger.info(f"{col}: 청크 단위 빈도 인코딩")
-                    
-                    # 전체 빈도 계산 (한 번만)
-                    freq_map = X_train[col].value_counts().to_dict()
-                    
-                    # 청크 단위로 매핑
-                    train_freq_chunks = []
-                    for i in range(0, len(X_train), chunk_size):
-                        chunk = X_train[col].iloc[i:i+chunk_size]
-                        train_freq_chunks.append(chunk.map(freq_map))
-                    
-                    X_train[f'{col}_frequency'] = pd.concat(train_freq_chunks)
-                    X_test[f'{col}_frequency'] = X_test[col].map(freq_map).fillna(0)
-                else:
-                    # 작은 데이터는 기존 방식
-                    freq_map = X_train[col].value_counts().to_dict()
-                    X_train[f'{col}_frequency'] = X_train[col].map(freq_map)
-                    X_test[f'{col}_frequency'] = X_test[col].map(freq_map).fillna(0)
-                
-                # 메모리 타입 최적화
-                X_train[f'{col}_frequency'] = X_train[f'{col}_frequency'].astype('int32')
-                X_test[f'{col}_frequency'] = X_test[f'{col}_frequency'].astype('int32')
-                
+                # 3. 간단한 빈도 인코딩
+                freq_map = X_train[col].value_counts().to_dict()
+                X_train[f'{col}_frequency'] = X_train[col].map(freq_map)
+                test_freq = X_test[col].map(freq_map)
+                X_test[f'{col}_frequency'] = test_freq.fillna(0).astype('int32')  # int32로 메모리 절약
                 self.generated_features.append(f'{col}_frequency')
+                
                 logger.info(f"{col} 컬럼 최적화 인코딩 완료")
                 
             except Exception as e:
@@ -312,7 +278,7 @@ class FeatureEngineer:
         except Exception as e:
             logger.warning(f"범주형 컬럼 제거 실패: {str(e)}")
         
-        logger.info(f"성능 보존 최적화 인코딩 완료 - 생성된 피처: {len(self.generated_features)}개")
+        logger.info(f"최적화된 범주형 피처 인코딩 완료 - 생성된 피처: {len(self.generated_features)}개")
         return X_train, X_test
     
     def _create_numerical_features(self, 
