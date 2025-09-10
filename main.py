@@ -474,8 +474,9 @@ def safe_pipeline_execution(args, config: Config, logger):
 def generate_predictions(trainer: ModelTrainer,
                         ensemble_manager: EnsembleManager,
                         X_test: pd.DataFrame,
-                        config: Config) -> pd.DataFrame:
-    """최종 예측 생성 (데이터 검증 강화)"""
+                        config: Config,
+                        test_sample_indices: Optional[np.ndarray] = None) -> pd.DataFrame:
+    """최종 예측 생성 (샘플링 모드 대응)"""
     logger = logging.getLogger(__name__)
     logger.info("최종 예측 생성 시작")
     
@@ -483,6 +484,11 @@ def generate_predictions(trainer: ModelTrainer,
         # 제출 템플릿 로딩
         data_loader = DataLoader(config)
         submission = data_loader.load_submission_template()
+        
+        # 샘플링 모드 확인
+        is_sampled = len(X_test) != len(submission)
+        if is_sampled:
+            logger.info(f"샘플링 모드 감지: X_test={len(X_test)}, submission={len(submission)}")
         
         # X_test 최종 검증
         logger.info("예측 전 X_test 데이터 검증 시작")
@@ -545,12 +551,30 @@ def generate_predictions(trainer: ModelTrainer,
             else:
                 raise ValueError("사용 가능한 모델이 없습니다.")
         
-        # 제출 파일 생성
-        submission['clicked'] = predictions
+        # 샘플링 모드에 따른 제출 파일 생성
+        if is_sampled:
+            logger.info("샘플링 모드: 기본값으로 초기화 후 샘플 예측값만 할당")
+            # 전체를 기본값(예: 평균 CTR)으로 초기화
+            default_ctr = 0.0191  # 로그에서 확인된 전체 CTR
+            submission['clicked'] = default_ctr
+            
+            # 샘플링된 인덱스가 있으면 해당 위치에만 예측값 할당
+            if test_sample_indices is not None:
+                submission.iloc[test_sample_indices, submission.columns.get_loc('clicked')] = predictions
+                logger.info(f"샘플링된 {len(test_sample_indices)}개 위치에 예측값 할당")
+            else:
+                # 인덱스 정보가 없으면 처음 N개에 할당
+                submission.iloc[:len(predictions), submission.columns.get_loc('clicked')] = predictions
+                logger.info(f"처음 {len(predictions)}개 위치에 예측값 할당")
+        else:
+            # 일반 모드: 전체 예측값 할당
+            submission['clicked'] = predictions
+            logger.info("전체 예측값 할당 완료")
         
         # 예측값 범위 확인
         logger.info(f"예측값 범위: {predictions.min():.4f} ~ {predictions.max():.4f}")
         logger.info(f"예측 평균: {predictions.mean():.4f}")
+        logger.info(f"최종 submission 평균: {submission['clicked'].mean():.4f}")
         
         # 제출 파일 저장
         output_path = config.OUTPUT_DIR / "submission.csv"
