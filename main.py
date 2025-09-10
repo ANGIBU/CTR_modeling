@@ -576,8 +576,8 @@ def generate_predictions(trainer: ModelTrainer,
         logger.info(f"예측 평균: {predictions.mean():.4f}")
         logger.info(f"최종 submission 평균: {submission['clicked'].mean():.4f}")
         
-        # 제출 파일 저장
-        output_path = config.OUTPUT_DIR / "submission.csv"
+        # 제출 파일 저장 (메인 디렉터리)
+        output_path = config.BASE_DIR / "submission.csv"
         submission.to_csv(output_path, index=False)
         logger.info(f"제출 파일 저장: {output_path}")
         
