@@ -196,19 +196,6 @@ class ModelTrainer:
                     'early_stopping_rounds': 100
                 }
             
-            elif model_type.lower() == 'catboost':
-                params = {
-                    'loss_function': 'Logloss',
-                    'eval_metric': 'Logloss',
-                    'depth': trial.suggest_int('depth', 4, 10),
-                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
-                    'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1, 10),
-                    'random_seed': self.config.RANDOM_STATE,
-                    'iterations': 1000,
-                    'early_stopping_rounds': 100,
-                    'verbose': False
-                }
-            
             elif model_type.lower() == 'deepctr':
                 hidden_dims_options = [
                     [256, 128, 64],
@@ -271,7 +258,7 @@ class ModelTrainer:
         """모든 모델 학습"""
         
         if model_types is None:
-            model_types = ['lightgbm', 'xgboost', 'catboost', 'deepctr']
+            model_types = ['lightgbm', 'xgboost']  # CatBoost 제거
         
         logger.info(f"모든 모델 학습 시작: {model_types}")
         
@@ -404,7 +391,8 @@ class TrainingPipeline:
         logger.info("전체 학습 파이프라인 시작")
         pipeline_start_time = time.time()
         
-        model_types = ['lightgbm', 'xgboost', 'catboost']
+        # CatBoost 제거, LightGBM과 XGBoost만 사용
+        model_types = ['lightgbm', 'xgboost']
         
         # 1. 하이퍼파라미터 튜닝 (옵션)
         if tune_hyperparameters:
