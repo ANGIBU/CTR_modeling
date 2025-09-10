@@ -33,7 +33,6 @@ class ModelCache:
         """캐시에서 값 조회"""
         with self.lock:
             if key in self.cache:
-                # LRU 업데이트
                 self.cache.move_to_end(key)
                 self.hit_count += 1
                 return self.cache[key]
@@ -48,7 +47,6 @@ class ModelCache:
                 self.cache.move_to_end(key)
             else:
                 if len(self.cache) >= self.max_size:
-                    # 가장 오래된 항목 제거
                     self.cache.popitem(last=False)
             
             self.cache[key] = value
@@ -184,6 +182,63 @@ class RealTimeInferenceEngine:
             logger.error(f"모델 로딩 실패: {str(e)}")
             return False
     
+    def _adjust_feature_count(self, df: pd.DataFrame) -> pd.DataFrame:
+        """모델이 기대하는 피처 수에 맞춤"""
+        try:
+            # 첫 번째 모델의 기대 피처 수 확인
+            expected_features = None
+            
+            for model_name, model in self.models.items():
+                try:
+                    if hasattr(model, 'model'):
+                        # LightGBM
+                        if hasattr(model.model, 'feature_name'):
+                            expected_features = len(model.model.feature_name())
+                            break
+                        # XGBoost
+                        elif hasattr(model.model, 'get_booster'):
+                            expected_features = model.model.get_booster().num_features()
+                            break
+                        # 기타 sklearn 스타일
+                        elif hasattr(model.model, 'n_features_in_'):
+                            expected_features = model.model.n_features_in_
+                            break
+                    # BaseModel 직접 확인
+                    elif hasattr(model, 'n_features_in_'):
+                        expected_features = model.n_features_in_
+                        break
+                except:
+                    continue
+            
+            if expected_features is None:
+                logger.warning("모델의 기대 피처 수를 확인할 수 없습니다")
+                return df
+                
+            current_features = df.shape[1]
+            
+            if current_features < expected_features:
+                # 부족한 피처를 0으로 채움
+                missing_count = expected_features - current_features
+                logger.info(f"부족한 피처 {missing_count}개를 0으로 채움")
+                
+                for i in range(missing_count):
+                    df[f'feature_{current_features + i}'] = 0.0
+                    
+            elif current_features > expected_features:
+                # 초과하는 피처 제거
+                excess_count = current_features - expected_features
+                logger.info(f"초과하는 피처 {excess_count}개 제거")
+                
+                # 컬럼명을 정렬하여 일관성 유지
+                columns_sorted = sorted(df.columns)
+                df = df[columns_sorted[:expected_features]]
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"피처 수 조정 실패: {str(e)}")
+            return df
+    
     def preprocess_input(self, input_data: Dict[str, Any]) -> pd.DataFrame:
         """입력 데이터 전처리 (수치형으로 변환)"""
         try:
@@ -225,6 +280,9 @@ class RealTimeInferenceEngine:
                 except:
                     df[col] = 0.0
             
+            # 모델이 기대하는 피처 수에 맞춤
+            df = self._adjust_feature_count(df)
+            
             return df
             
         except Exception as e:
@@ -260,10 +318,7 @@ class RealTimeInferenceEngine:
             model = self.models[model_name]
             
             # 피처 수가 부족한 경우 기본값으로 채움
-            required_features = getattr(model, 'n_features_in_', None)
-            if required_features and df.shape[1] < required_features:
-                for i in range(df.shape[1], required_features):
-                    df[f'dummy_feature_{i}'] = 0.0
+            df = self._adjust_feature_count(df)
             
             # 예측 수행
             prediction_proba = model.predict_proba(df)[0]
