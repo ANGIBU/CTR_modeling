@@ -433,9 +433,29 @@ def generate_predictions(trainer: ModelTrainer,
         logger.info(f"검증 완료 - X_test 형태: {X_test.shape}")
         logger.info(f"검증 완료 - X_test 데이터 타입: {X_test.dtypes.value_counts().to_dict()}")
         
-        # 앙상블 예측 사용 (가능한 경우)
+        # 모델 피처 수 요구사항 확인 및 맞춤
         if ensemble_manager and ensemble_manager.best_ensemble is not None:
             logger.info("앙상블 모델로 예측 수행")
+            
+            # 기본 모델들의 피처 수 확인
+            expected_features = None
+            for model_name, model in ensemble_manager.base_models.items():
+                try:
+                    # LightGBM 모델의 피처 수 확인
+                    if hasattr(model, 'model') and hasattr(model.model, 'feature_name'):
+                        expected_features = len(model.model.feature_name())
+                        break
+                    elif hasattr(model, 'model') and hasattr(model.model, 'n_features_in_'):
+                        expected_features = model.model.n_features_in_
+                        break
+                except:
+                    continue
+            
+            if expected_features and expected_features != X_test.shape[1]:
+                logger.warning(f"피처 수 불일치: 모델 기대 {expected_features}, 실제 {X_test.shape[1]}")
+                X_test = _fix_feature_count(X_test, expected_features)
+                logger.info(f"피처 수 보정 완료: {X_test.shape[1]}")
+            
             predictions = ensemble_manager.predict_with_best_ensemble(X_test)
         else:
             # 최고 성능 단일 모델 사용
@@ -451,6 +471,24 @@ def generate_predictions(trainer: ModelTrainer,
             if best_model_name:
                 best_model = trainer.trained_models[best_model_name]['model']
                 logger.info(f"사용할 모델: {best_model_name}")
+                
+                # 모델이 기대하는 피처 수 확인
+                expected_features = None
+                try:
+                    if hasattr(best_model, 'model') and hasattr(best_model.model, 'feature_name'):
+                        expected_features = len(best_model.model.feature_name())
+                    elif hasattr(best_model, 'model') and hasattr(best_model.model, 'n_features_in_'):
+                        expected_features = best_model.model.n_features_in_
+                    elif hasattr(best_model, 'n_features_in_'):
+                        expected_features = best_model.n_features_in_
+                except:
+                    pass
+                
+                if expected_features and expected_features != X_test.shape[1]:
+                    logger.warning(f"피처 수 불일치: 모델 기대 {expected_features}, 실제 {X_test.shape[1]}")
+                    X_test = _fix_feature_count(X_test, expected_features)
+                    logger.info(f"피처 수 보정 완료: {X_test.shape[1]}")
+                
                 predictions = best_model.predict_proba(X_test)
             else:
                 raise ValueError("사용 가능한 모델이 없습니다.")
@@ -495,6 +533,31 @@ def generate_predictions(trainer: ModelTrainer,
             logger.error(f"X_test 데이터 타입: {X_test.dtypes.value_counts().to_dict()}")
             logger.error(f"X_test 컬럼 샘플: {list(X_test.columns[:10])}")
         raise
+
+
+def _fix_feature_count(X_test: pd.DataFrame, expected_features: int) -> pd.DataFrame:
+    """피처 수를 모델이 기대하는 수에 맞춤"""
+    logger = logging.getLogger(__name__)
+    
+    current_features = X_test.shape[1]
+    
+    if current_features < expected_features:
+        # 부족한 피처를 0으로 채움
+        missing_count = expected_features - current_features
+        logger.info(f"부족한 피처 {missing_count}개를 0으로 채움")
+        
+        for i in range(missing_count):
+            X_test[f'missing_feature_{i}'] = 0.0
+            
+    elif current_features > expected_features:
+        # 초과하는 피처 제거 (마지막 컬럼들부터)
+        excess_count = current_features - expected_features
+        logger.info(f"초과하는 피처 {excess_count}개 제거")
+        
+        cols_to_remove = X_test.columns[-excess_count:]
+        X_test = X_test.drop(columns=cols_to_remove)
+    
+    return X_test
 
 def evaluation_pipeline(trainer: ModelTrainer,
                        X_val: pd.DataFrame,
