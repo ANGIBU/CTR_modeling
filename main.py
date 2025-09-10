@@ -131,7 +131,7 @@ def feature_engineering_pipeline(train_df: pd.DataFrame,
         initial_memory = get_memory_usage()
         logger.info(f"피처 엔지니어링 시작 메모리: {initial_memory:.2f} GB")
         
-        if initial_memory > memory_limit * 0.8:  # 80% 사용 시 경고
+        if initial_memory > memory_limit * 0.8:
             logger.warning(f"높은 메모리 사용량으로 인한 제한적 피처 엔지니어링 수행")
         
         # 피처 엔지니어 초기화
@@ -148,79 +148,8 @@ def feature_engineering_pipeline(train_df: pd.DataFrame,
         # 피처 엔지니어링 결과 검증
         logger.info("피처 엔지니어링 결과 검증 시작")
         
-        # 컬럼명 검증 (None 값 제거)
-        valid_columns = [col for col in X_train.columns if col is not None and str(col).strip() != '']
-        if len(valid_columns) != len(X_train.columns):
-            logger.warning(f"잘못된 컬럼명 발견: {len(X_train.columns) - len(valid_columns)}개")
-            X_train = X_train[valid_columns]
-            X_test = X_test[valid_columns]
-        
-        # 데이터 타입 통일 (수치형으로 변환)
-        logger.info("데이터 타입 통일 시작")
-        for col in X_train.columns:
-            try:
-                # 문자열이나 카테고리 타입을 수치형으로 변환
-                if X_train[col].dtype == 'object' or X_train[col].dtype.name == 'category':
-                    logger.info(f"{col}: {X_train[col].dtype} → 수치형 변환")
-                    
-                    # 카테고리 타입인 경우 코드로 변환
-                    if X_train[col].dtype.name == 'category':
-                        X_train[col] = X_train[col].cat.codes.astype('float32')
-                        X_test[col] = X_test[col].cat.codes.astype('float32')
-                    else:
-                        # 문자열을 수치형으로 변환 시도
-                        X_train[col] = pd.to_numeric(X_train[col], errors='coerce').astype('float32')
-                        X_test[col] = pd.to_numeric(X_test[col], errors='coerce').astype('float32')
-                
-                # 다른 수치형 타입을 float32로 통일
-                elif X_train[col].dtype in ['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64']:
-                    X_train[col] = X_train[col].astype('float32')
-                    X_test[col] = X_test[col].astype('float32')
-                elif X_train[col].dtype == 'float64':
-                    X_train[col] = X_train[col].astype('float32')
-                    X_test[col] = X_test[col].astype('float32')
-                    
-            except Exception as e:
-                logger.warning(f"{col} 데이터 타입 변환 실패: {str(e)}")
-        
-        # 결측치 확인 및 처리
-        if X_train.isnull().any().any():
-            logger.warning("X_train에 결측치 발견, 0으로 대치")
-            X_train = X_train.fillna(0)
-        
-        if X_test.isnull().any().any():
-            logger.warning("X_test에 결측치 발견, 0으로 대치")
-            X_test = X_test.fillna(0)
-        
-        # 무한값 확인 및 처리 (수치형 컬럼만)
-        try:
-            # 수치형 컬럼만 선택
-            numeric_columns = X_train.select_dtypes(include=[np.number]).columns
-            
-            if len(numeric_columns) > 0:
-                # X_train 무한값 처리
-                inf_mask_train = np.isinf(X_train[numeric_columns].values)
-                if inf_mask_train.any():
-                    logger.warning("X_train에 무한값 발견, 클리핑 처리")
-                    X_train[numeric_columns] = X_train[numeric_columns].replace([np.inf, -np.inf], [1e6, -1e6])
-                
-                # X_test 무한값 처리
-                inf_mask_test = np.isinf(X_test[numeric_columns].values)
-                if inf_mask_test.any():
-                    logger.warning("X_test에 무한값 발견, 클리핑 처리")
-                    X_test[numeric_columns] = X_test[numeric_columns].replace([np.inf, -np.inf], [1e6, -1e6])
-            
-        except Exception as e:
-            logger.warning(f"무한값 처리 중 오류: {str(e)}")
-            # 안전한 방식으로 무한값 처리
-            X_train = X_train.replace([np.inf, -np.inf], [1e6, -1e6])
-            X_test = X_test.replace([np.inf, -np.inf], [1e6, -1e6])
-        
-        # 최종 데이터 타입 확인
-        logger.info(f"X_train 최종 데이터 타입 분포: {X_train.dtypes.value_counts().to_dict()}")
-        logger.info(f"X_test 최종 데이터 타입 분포: {X_test.dtypes.value_counts().to_dict()}")
-        
-        logger.info("피처 엔지니어링 결과 검증 완료")
+        # 최종 데이터 검증 및 정리
+        X_train, X_test = validate_and_clean_final_data(X_train, X_test)
         
         # 메모리 정리
         del train_df, test_df
@@ -248,6 +177,101 @@ def feature_engineering_pipeline(train_df: pd.DataFrame,
         gc.collect()
         raise
 
+def validate_and_clean_final_data(X_train: pd.DataFrame, X_test: pd.DataFrame) -> tuple:
+    """최종 데이터 검증 및 정리"""
+    logger = logging.getLogger(__name__)
+    logger.info("최종 데이터 검증 및 정리 시작")
+    
+    # 1. 컬럼명 검증 (None 값 제거)
+    valid_columns = [col for col in X_train.columns if col is not None and str(col).strip() != '']
+    if len(valid_columns) != len(X_train.columns):
+        logger.warning(f"잘못된 컬럼명 발견: {len(X_train.columns) - len(valid_columns)}개")
+        X_train = X_train[valid_columns]
+        X_test = X_test[valid_columns]
+    
+    # 2. object 타입 컬럼 강제 제거
+    object_cols_train = X_train.select_dtypes(include=['object']).columns.tolist()
+    object_cols_test = X_test.select_dtypes(include=['object']).columns.tolist()
+    all_object_cols = list(set(object_cols_train + object_cols_test))
+    
+    if all_object_cols:
+        logger.warning(f"object 타입 컬럼 발견하여 제거: {all_object_cols}")
+        X_train = X_train.drop(columns=all_object_cols, errors='ignore')
+        X_test = X_test.drop(columns=all_object_cols, errors='ignore')
+    
+    # 3. 데이터 타입 강제 통일
+    for col in X_train.columns:
+        try:
+            # 문자열이나 카테고리 타입을 수치형으로 변환
+            if X_train[col].dtype == 'object' or X_train[col].dtype.name == 'category':
+                logger.warning(f"{col}: {X_train[col].dtype} → 수치형 변환")
+                
+                # 카테고리 타입인 경우 코드로 변환
+                if X_train[col].dtype.name == 'category':
+                    X_train[col] = X_train[col].cat.codes.astype('float32')
+                    X_test[col] = X_test[col].cat.codes.astype('float32')
+                else:
+                    # 문자열을 수치형으로 변환 시도
+                    X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0).astype('float32')
+                    X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0).astype('float32')
+            
+            # 다른 수치형 타입을 float32로 통일
+            elif X_train[col].dtype in ['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64']:
+                X_train[col] = X_train[col].astype('float32')
+                X_test[col] = X_test[col].astype('float32')
+            elif X_train[col].dtype == 'float64':
+                X_train[col] = X_train[col].astype('float32')
+                X_test[col] = X_test[col].astype('float32')
+                
+        except Exception as e:
+            logger.warning(f"{col} 데이터 타입 변환 실패: {str(e)}")
+            # 변환 실패한 컬럼은 제거
+            X_train = X_train.drop(columns=[col], errors='ignore')
+            X_test = X_test.drop(columns=[col], errors='ignore')
+    
+    # 4. 결측치 및 무한값 처리
+    if X_train.isnull().any().any():
+        logger.warning("X_train에 결측치 발견, 0으로 대치")
+        X_train = X_train.fillna(0)
+    
+    if X_test.isnull().any().any():
+        logger.warning("X_test에 결측치 발견, 0으로 대치")
+        X_test = X_test.fillna(0)
+    
+    # 무한값 처리
+    try:
+        # 수치형 컬럼만 선택
+        numeric_columns = X_train.select_dtypes(include=[np.number]).columns
+        
+        if len(numeric_columns) > 0:
+            # X_train 무한값 처리
+            X_train[numeric_columns] = X_train[numeric_columns].replace([np.inf, -np.inf], [1e6, -1e6])
+            X_test[numeric_columns] = X_test[numeric_columns].replace([np.inf, -np.inf], [1e6, -1e6])
+        
+    except Exception as e:
+        logger.warning(f"무한값 처리 중 오류: {str(e)}")
+        # 안전한 방식으로 무한값 처리
+        X_train = X_train.replace([np.inf, -np.inf], [1e6, -1e6])
+        X_test = X_test.replace([np.inf, -np.inf], [1e6, -1e6])
+    
+    # 5. 최종 데이터 타입 확인
+    logger.info(f"X_train 최종 데이터 타입 분포: {X_train.dtypes.value_counts().to_dict()}")
+    logger.info(f"X_test 최종 데이터 타입 분포: {X_test.dtypes.value_counts().to_dict()}")
+    
+    # 6. object 타입이 남아있는지 최종 확인
+    final_object_cols_train = X_train.select_dtypes(include=['object']).columns.tolist()
+    final_object_cols_test = X_test.select_dtypes(include=['object']).columns.tolist()
+    
+    if final_object_cols_train or final_object_cols_test:
+        logger.error(f"최종 검증에서 object 타입 발견! train: {final_object_cols_train}, test: {final_object_cols_test}")
+        all_remaining_object_cols = list(set(final_object_cols_train + final_object_cols_test))
+        X_train = X_train.drop(columns=all_remaining_object_cols, errors='ignore')
+        X_test = X_test.drop(columns=all_remaining_object_cols, errors='ignore')
+        logger.info(f"남은 object 컬럼 강제 제거: {all_remaining_object_cols}")
+    
+    logger.info("최종 데이터 검증 및 정리 완료")
+    return X_train, X_test
+
 @memory_monitor_decorator
 def model_training_pipeline(X_train: pd.DataFrame,
                            y_train: pd.Series,
@@ -266,8 +290,8 @@ def model_training_pipeline(X_train: pd.DataFrame,
             logger.info("메모리 안전 모드로 학습 수행")
             
             # 데이터 크기 줄이기
-            if len(X_train) > 5000000:  # 500만 행 초과
-                sample_size = 3000000  # 300만 행으로 제한
+            if len(X_train) > 5000000:
+                sample_size = 3000000
                 sample_indices = np.random.choice(len(X_train), sample_size, replace=False)
                 X_train = X_train.iloc[sample_indices]
                 y_train = y_train.iloc[sample_indices]
@@ -296,7 +320,7 @@ def model_training_pipeline(X_train: pd.DataFrame,
             X_train_split, y_train_split,
             X_val_split, y_val_split,
             tune_hyperparameters=tune_hyperparameters,
-            n_trials=30 if tune_hyperparameters else 0  # 튜닝 시도 횟수 제한
+            n_trials=30 if tune_hyperparameters else 0
         )
         
         # 결과 출력
@@ -336,10 +360,10 @@ def ensemble_pipeline(trainer: ModelTrainer,
         
         # 메모리 안전 모드에서는 제한적 앙상블만 생성
         if memory_usage > 50 or memory_safe_mode:
-            ensemble_types = ['weighted']  # 가장 메모리 효율적인 앙상블만
+            ensemble_types = ['weighted']
             logger.info("메모리 절약을 위해 가중 블렌딩 앙상블만 생성")
         else:
-            ensemble_types = ['weighted', 'rank']  # 스태킹은 메모리를 많이 사용하므로 제외
+            ensemble_types = ['weighted', 'rank']
         
         for ensemble_type in ensemble_types:
             try:
@@ -372,7 +396,7 @@ def ensemble_pipeline(trainer: ModelTrainer,
 def safe_pipeline_execution(args, config: Config, logger):
     """안전한 파이프라인 실행 (메모리 모니터링 포함)"""
     
-    memory_limit = 55.0  # GB
+    memory_limit = 55.0
     memory_safe_mode = False
     
     try:
@@ -381,7 +405,7 @@ def safe_pipeline_execution(args, config: Config, logger):
         
         # 메모리 체크
         current_memory = get_memory_usage()
-        if current_memory > memory_limit * 0.7:  # 70% 사용 시 안전 모드 활성화
+        if current_memory > memory_limit * 0.7:
             memory_safe_mode = True
             logger.warning(f"메모리 안전 모드 활성화: {current_memory:.2f} GB")
         
@@ -422,7 +446,7 @@ def safe_pipeline_execution(args, config: Config, logger):
         # 5. 평가
         evaluation_pipeline(trainer, X_val, y_val, config)
         
-        # 6. 최종 예측
+        # 6. 최종 예측 (데이터 검증 강화)
         submission = generate_predictions(trainer, ensemble_manager, X_test, config)
         
         # 7. 추론 시스템 설정 (메모리 여유가 있을 때만)
@@ -451,7 +475,7 @@ def generate_predictions(trainer: ModelTrainer,
                         ensemble_manager: EnsembleManager,
                         X_test: pd.DataFrame,
                         config: Config) -> pd.DataFrame:
-    """최종 예측 생성"""
+    """최종 예측 생성 (데이터 검증 강화)"""
     logger = logging.getLogger(__name__)
     logger.info("최종 예측 생성 시작")
     
@@ -459,6 +483,45 @@ def generate_predictions(trainer: ModelTrainer,
         # 제출 템플릿 로딩
         data_loader = DataLoader(config)
         submission = data_loader.load_submission_template()
+        
+        # X_test 최종 검증
+        logger.info("예측 전 X_test 데이터 검증 시작")
+        
+        # object 타입 컬럼 확인 및 제거
+        object_columns = X_test.select_dtypes(include=['object']).columns.tolist()
+        if object_columns:
+            logger.error(f"X_test에 object 타입 컬럼 발견! 제거 진행: {object_columns}")
+            X_test = X_test.drop(columns=object_columns)
+        
+        # 데이터 타입 재확인
+        logger.info(f"예측 전 X_test 데이터 타입: {X_test.dtypes.value_counts().to_dict()}")
+        
+        # 모든 컬럼이 수치형인지 확인
+        non_numeric_columns = []
+        for col in X_test.columns:
+            if not np.issubdtype(X_test[col].dtype, np.number):
+                non_numeric_columns.append(col)
+        
+        if non_numeric_columns:
+            logger.error(f"비수치형 컬럼 발견하여 제거: {non_numeric_columns}")
+            X_test = X_test.drop(columns=non_numeric_columns)
+        
+        # 결측치 및 무한값 최종 처리
+        if X_test.isnull().any().any():
+            logger.warning("예측 전 X_test 결측치 처리")
+            X_test = X_test.fillna(0)
+        
+        if np.isinf(X_test.values).any():
+            logger.warning("예측 전 X_test 무한값 처리")
+            X_test = X_test.replace([np.inf, -np.inf], [1e6, -1e6])
+        
+        # 데이터 타입을 float32로 통일
+        for col in X_test.columns:
+            if X_test[col].dtype != 'float32':
+                X_test[col] = X_test[col].astype('float32')
+        
+        logger.info(f"검증 완료 - X_test 형태: {X_test.shape}")
+        logger.info(f"검증 완료 - X_test 데이터 타입: {X_test.dtypes.value_counts().to_dict()}")
         
         # 앙상블 예측 사용 (가능한 경우)
         if ensemble_manager and ensemble_manager.best_ensemble is not None:
@@ -477,6 +540,7 @@ def generate_predictions(trainer: ModelTrainer,
             
             if best_model_name:
                 best_model = trainer.trained_models[best_model_name]['model']
+                logger.info(f"사용할 모델: {best_model_name}")
                 predictions = best_model.predict_proba(X_test)
             else:
                 raise ValueError("사용 가능한 모델이 없습니다.")
@@ -498,6 +562,10 @@ def generate_predictions(trainer: ModelTrainer,
         
     except Exception as e:
         logger.error(f"예측 생성 실패: {str(e)}")
+        logger.error(f"X_test 정보 - 형태: {X_test.shape if 'X_test' in locals() else 'N/A'}")
+        if 'X_test' in locals():
+            logger.error(f"X_test 데이터 타입: {X_test.dtypes.value_counts().to_dict()}")
+            logger.error(f"X_test 컬럼 샘플: {list(X_test.columns[:10])}")
         raise
 
 def evaluation_pipeline(trainer: ModelTrainer,
@@ -528,7 +596,7 @@ def evaluation_pipeline(trainer: ModelTrainer,
         reporter = EvaluationReporter()
         report = reporter.generate_comprehensive_report(
             models_predictions, y_val,
-            output_dir=None  # 메모리 절약을 위해 차트 생성 생략
+            output_dir=None
         )
         
         # 보고서 저장
