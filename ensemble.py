@@ -68,9 +68,27 @@ class WeightedBlending(BaseEnsemble):
         """가중치 최적화"""
         logger.info("가중 블렌딩 앙상블 학습 시작")
         
+        # 실제 사용 가능한 모델명으로 가중치 매핑
+        available_models = list(base_predictions.keys())
+        logger.info(f"사용 가능한 모델: {available_models}")
+        
         if self.weights:
-            # 사전 정의된 가중치 사용
-            self.optimized_weights = self.weights.copy()
+            # 사전 정의된 가중치를 실제 모델명으로 매핑
+            mapped_weights = {}
+            for model_name in available_models:
+                if 'lightgbm' in model_name or 'lgb' in model_name:
+                    mapped_weights[model_name] = self.weights.get('lgbm', 0.4)
+                elif 'xgboost' in model_name or 'xgb' in model_name:
+                    mapped_weights[model_name] = self.weights.get('xgb', 0.3)
+                elif 'catboost' in model_name or 'cat' in model_name:
+                    mapped_weights[model_name] = self.weights.get('cat', 0.2)
+                elif 'deepctr' in model_name or 'nn' in model_name:
+                    mapped_weights[model_name] = self.weights.get('nn', 0.1)
+                else:
+                    # 기본값으로 균등 가중치
+                    mapped_weights[model_name] = 1.0 / len(available_models)
+            
+            self.optimized_weights = mapped_weights
         else:
             # 가중치 최적화
             self.optimized_weights = self._optimize_weights(base_predictions, y)
@@ -79,6 +97,9 @@ class WeightedBlending(BaseEnsemble):
         total_weight = sum(self.optimized_weights.values())
         if total_weight > 0:
             self.optimized_weights = {k: v/total_weight for k, v in self.optimized_weights.items()}
+        else:
+            # 모든 가중치가 0인 경우 균등 가중치
+            self.optimized_weights = {k: 1.0/len(available_models) for k in available_models}
         
         self.is_fitted = True
         logger.info(f"최적화된 가중치: {self.optimized_weights}")
@@ -115,7 +136,13 @@ class WeightedBlending(BaseEnsemble):
         study = optuna.create_study(direction='maximize')
         study.optimize(objective, n_trials=100, show_progress_bar=False)
         
-        return study.best_params
+        # 결과를 실제 모델명으로 매핑
+        optimized_weights = {}
+        for param_name, weight in study.best_params.items():
+            model_name = param_name.replace('weight_', '')
+            optimized_weights[model_name] = weight
+        
+        return optimized_weights
     
     def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
         """가중 블렌딩 예측"""
@@ -342,7 +369,14 @@ class EnsembleManager:
         """앙상블 생성"""
         
         if ensemble_type == 'weighted':
-            weights = kwargs.get('weights', self.config.ENSEMBLE_CONFIG['blend_weights'])
+            # 실제 모델명을 기반으로 가중치 설정
+            default_weights = {
+                'lgbm': 0.4,
+                'xgb': 0.3, 
+                'cat': 0.2,
+                'nn': 0.1
+            }
+            weights = kwargs.get('weights', default_weights)
             ensemble = WeightedBlending(weights)
         
         elif ensemble_type == 'stacking':
@@ -434,6 +468,10 @@ class EnsembleManager:
                 ensemble_type = best_ensemble_name.replace('ensemble_', '')
                 self.best_ensemble = self.ensembles[ensemble_type]
                 logger.info(f"최고 성능 앙상블: {ensemble_type} (점수: {best_score:.4f})")
+            else:
+                # 기본 모델이 더 좋은 경우 앙상블을 사용하지 않음
+                logger.info(f"기본 모델이 더 우수함: {best_ensemble_name} (점수: {best_score:.4f})")
+                self.best_ensemble = None
         
         self.ensemble_results = results
         return results
@@ -441,7 +479,21 @@ class EnsembleManager:
     def predict_with_best_ensemble(self, X: pd.DataFrame) -> np.ndarray:
         """최고 성능 앙상블로 예측"""
         if self.best_ensemble is None:
-            raise ValueError("최고 성능 앙상블이 선택되지 않았습니다.")
+            # 앙상블이 없으면 최고 성능 기본 모델 사용
+            best_model_name = None
+            best_score = 0
+            
+            # 기본 모델 중 최고 성능 찾기
+            for result_name, score in self.ensemble_results.items():
+                if result_name.startswith('base_') and score > best_score:
+                    best_score = score
+                    best_model_name = result_name.replace('base_', '')
+            
+            if best_model_name and best_model_name in self.base_models:
+                logger.info(f"최고 성능 기본 모델 사용: {best_model_name}")
+                return self.base_models[best_model_name].predict_proba(X)
+            else:
+                raise ValueError("사용 가능한 모델이 없습니다.")
         
         # 기본 모델들의 예측
         base_predictions = {}
@@ -471,16 +523,15 @@ class EnsembleManager:
                 logger.info(f"{ensemble_type} 앙상블 저장: {ensemble_path}")
         
         # 최고 성능 앙상블 정보 저장
-        if self.best_ensemble:
-            best_info = {
-                'best_ensemble_type': self.best_ensemble.name,
-                'ensemble_results': self.ensemble_results
-            }
-            
-            import json
-            info_path = output_dir / "best_ensemble_info.json"
-            with open(info_path, 'w') as f:
-                json.dump(best_info, f, indent=2)
+        best_info = {
+            'best_ensemble_type': self.best_ensemble.name if self.best_ensemble else None,
+            'ensemble_results': self.ensemble_results
+        }
+        
+        import json
+        info_path = output_dir / "best_ensemble_info.json"
+        with open(info_path, 'w') as f:
+            json.dump(best_info, f, indent=2)
     
     def load_ensembles(self, input_dir: Path = None):
         """앙상블 로딩"""
@@ -514,7 +565,7 @@ class EnsembleManager:
                     best_info = json.load(f)
                 
                 best_type = best_info['best_ensemble_type']
-                if best_type in self.ensembles:
+                if best_type and best_type in self.ensembles:
                     self.best_ensemble = self.ensembles[best_type]
                     self.ensemble_results = best_info.get('ensemble_results', {})
                 

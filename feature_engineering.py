@@ -384,50 +384,131 @@ class MemoryOptimizedFeatureEngineer:
         # 메모리 기반 제한
         current_memory = self.get_memory_usage()
         if current_memory > 25:
-            max_interactions = 10
-            max_cols = 5
-        elif current_memory > 20:
-            max_interactions = 20
+            max_interactions = 15
             max_cols = 6
-        else:
-            max_interactions = 30
+        elif current_memory > 20:
+            max_interactions = 35
             max_cols = 8
+        else:
+            max_interactions = 50
+            max_cols = 10
         
-        important_cols = safe_numeric_cols[:max_cols]
+        # 중요한 피처 그룹별로 선별
+        important_groups = {
+            'feat_e': [col for col in safe_numeric_cols if col.startswith('feat_e')],
+            'feat_d': [col for col in safe_numeric_cols if col.startswith('feat_d')],
+            'feat_c': [col for col in safe_numeric_cols if col.startswith('feat_c')],
+            'feat_b': [col for col in safe_numeric_cols if col.startswith('feat_b')],
+            'history_b': [col for col in safe_numeric_cols if col.startswith('history_b')]
+        }
+        
+        # 각 그룹에서 상위 컬럼만 선택
+        important_cols = []
+        for group_name, group_cols in important_groups.items():
+            if group_cols:
+                # 분산이 큰 컬럼 우선 선택
+                try:
+                    variances = X_train[group_cols].var()
+                    top_cols = variances.nlargest(min(2, len(group_cols))).index.tolist()
+                    important_cols.extend(top_cols)
+                except:
+                    important_cols.extend(group_cols[:2])
+        
+        # 전체에서 상위 컬럼만 사용
+        important_cols = important_cols[:max_cols]
         interaction_count = 0
         
-        logger.info(f"상호작용 피처 제한: {max_interactions}개, 컬럼: {max_cols}개")
+        logger.info(f"상호작용 피처 제한: {max_interactions}개, 컬럼: {len(important_cols)}개")
         
-        for i, col1 in enumerate(important_cols):
+        # 1. 그룹 내 상호작용
+        for group_name, group_cols in important_groups.items():
             if interaction_count >= max_interactions:
                 break
             
-            for j, col2 in enumerate(important_cols[i+1:], i+1):
+            group_important = [col for col in group_cols if col in important_cols]
+            if len(group_important) >= 2:
+                for i in range(min(2, len(group_important))):
+                    for j in range(i+1, min(3, len(group_important))):
+                        if interaction_count >= max_interactions:
+                            break
+                        
+                        col1, col2 = group_important[i], group_important[j]
+                        try:
+                            # 메모리 체크
+                            if self.get_memory_usage() > 35:
+                                logger.warning("메모리 한계로 상호작용 피처 생성 중단")
+                                break
+                            
+                            # 곱셈 피처
+                            X_train[f'{col1}_x_{col2}'] = (X_train[col1] * X_train[col2]).astype('float32')
+                            X_test[f'{col1}_x_{col2}'] = (X_test[col1] * X_test[col2]).astype('float32')
+                            self.generated_features.append(f'{col1}_x_{col2}')
+                            interaction_count += 1
+                            
+                        except Exception as e:
+                            logger.warning(f"{col1}, {col2} 상호작용 피처 실패: {str(e)}")
+                            continue
+        
+        # 2. 그룹 간 상호작용 (중요한 것만)
+        if interaction_count < max_interactions and self.get_memory_usage() < 33:
+            cross_group_pairs = [
+                ('feat_e', 'feat_d'),
+                ('feat_c', 'feat_b'), 
+                ('feat_e', 'history_b'),
+                ('feat_d', 'history_b')
+            ]
+            
+            for group1, group2 in cross_group_pairs:
                 if interaction_count >= max_interactions:
                     break
                 
-                try:
-                    # 메모리 체크
-                    if self.get_memory_usage() > 35:
-                        logger.warning("메모리 한계로 상호작용 피처 생성 중단")
+                cols1 = [col for col in important_groups.get(group1, []) if col in important_cols]
+                cols2 = [col for col in important_groups.get(group2, []) if col in important_cols]
+                
+                if cols1 and cols2:
+                    col1 = cols1[0]  # 각 그룹에서 첫 번째 컬럼만
+                    col2 = cols2[0]
+                    
+                    try:
+                        X_train[f'{col1}_x_{col2}'] = (X_train[col1] * X_train[col2]).astype('float32')
+                        X_test[f'{col1}_x_{col2}'] = (X_test[col1] * X_test[col2]).astype('float32')
+                        self.generated_features.append(f'{col1}_x_{col2}')
+                        interaction_count += 1
+                        
+                    except Exception as e:
+                        logger.warning(f"{col1}, {col2} 그룹간 상호작용 피처 실패: {str(e)}")
+                        continue
+        
+        # 3. 비율 피처 (나눗셈)
+        if interaction_count < max_interactions and self.get_memory_usage() < 32:
+            for i, col1 in enumerate(important_cols[:5]):
+                for j, col2 in enumerate(important_cols[i+1:6], i+1):
+                    if interaction_count >= max_interactions:
                         break
                     
-                    # 곱셈 피처만 생성
-                    X_train[f'{col1}_x_{col2}'] = (X_train[col1] * X_train[col2]).astype('float32')
-                    X_test[f'{col1}_x_{col2}'] = (X_test[col1] * X_test[col2]).astype('float32')
-                    
-                    self.generated_features.append(f'{col1}_x_{col2}')
-                    interaction_count += 1
-                    
-                    # 메모리 정리
-                    if interaction_count % 10 == 0:
-                        gc.collect()
-                        current_mem = self.get_memory_usage()
-                        logger.info(f"상호작용 피처 진행: {interaction_count}/{max_interactions}, 메모리: {current_mem:.2f} GB")
-                
-                except Exception as e:
-                    logger.warning(f"{col1}, {col2} 상호작용 피처 실패: {str(e)}")
-                    continue
+                    try:
+                        # 0으로 나누기 방지
+                        ratio = X_train[col1] / (X_train[col2] + 1e-8)
+                        ratio_test = X_test[col1] / (X_test[col2] + 1e-8)
+                        
+                        # 무한값 처리
+                        ratio = np.clip(ratio, -1e6, 1e6)
+                        ratio_test = np.clip(ratio_test, -1e6, 1e6)
+                        
+                        X_train[f'{col1}_div_{col2}'] = ratio.astype('float32')
+                        X_test[f'{col1}_div_{col2}'] = ratio_test.astype('float32')
+                        self.generated_features.append(f'{col1}_div_{col2}')
+                        interaction_count += 1
+                        
+                    except Exception as e:
+                        logger.warning(f"{col1}, {col2} 비율 피처 실패: {str(e)}")
+                        continue
+        
+        # 메모리 정리
+        if interaction_count % 10 == 0:
+            gc.collect()
+            current_mem = self.get_memory_usage()
+            logger.info(f"상호작용 피처 진행: {interaction_count}/{max_interactions}, 메모리: {current_mem:.2f} GB")
         
         logger.info(f"상호작용 피처 생성 완료: {interaction_count}개")
         return X_train, X_test

@@ -121,6 +121,23 @@ class RealTimeInferenceEngine:
             'cache_hit_rate': 0.0
         }
         self.lock = threading.Lock()
+        
+        # 추론용 기본 피처 설정
+        self.default_numeric_features = [
+            'feat_e_1', 'feat_e_3', 'feat_e_4', 'feat_e_5', 'feat_e_6', 'feat_e_7',
+            'feat_e_8', 'feat_e_9', 'feat_e_10', 'feat_d_1', 'feat_d_2', 'feat_d_3',
+            'feat_d_4', 'feat_d_5', 'feat_d_6', 'feat_c_1', 'feat_c_2', 'feat_c_3',
+            'feat_c_4', 'feat_c_5', 'feat_c_6', 'feat_c_7', 'feat_c_8',
+            'feat_b_1', 'feat_b_2', 'feat_b_3', 'feat_b_4', 'feat_b_5', 'feat_b_6'
+        ]
+        
+        # 추론 시 카테고리 매핑
+        self.category_mappings = {
+            'gender': {'male': 1, 'female': 2, 'unknown': 0},
+            'age_group': {'18-24': 1, '25-34': 2, '35-44': 3, '45-54': 4, '55-64': 5, '65+': 6, 'unknown': 0},
+            'device': {'mobile': 1, 'desktop': 2, 'tablet': 3, 'unknown': 0},
+            'page': {'home': 1, 'search': 2, 'product': 3, 'checkout': 4, 'unknown': 0}
+        }
     
     def load_models(self, model_dir: Path = None) -> bool:
         """저장된 모델들 로딩"""
@@ -168,7 +185,7 @@ class RealTimeInferenceEngine:
             return False
     
     def preprocess_input(self, input_data: Dict[str, Any]) -> pd.DataFrame:
-        """입력 데이터 전처리"""
+        """입력 데이터 전처리 (수치형으로 변환)"""
         try:
             # DataFrame으로 변환
             if isinstance(input_data, dict):
@@ -178,12 +195,35 @@ class RealTimeInferenceEngine:
             else:
                 df = input_data.copy()
             
-            # 기본 전처리만 수행 (실시간 성능 고려)
+            # 범주형 데이터를 수치형으로 변환
             for col in df.columns:
                 if df[col].dtype == 'object':
-                    df[col] = df[col].fillna('unknown')
+                    if col in self.category_mappings:
+                        # 사전 정의된 매핑 사용
+                        df[col] = df[col].map(self.category_mappings[col]).fillna(0)
+                    else:
+                        # 문자열을 해시값으로 변환
+                        try:
+                            df[col] = pd.to_numeric(df[col], errors='coerce')
+                            if df[col].isnull().any():
+                                # 수치 변환 실패 시 해시 사용
+                                df[col] = df[col].astype(str).apply(lambda x: hash(str(x)) % 1000000)
+                        except:
+                            df[col] = 0
                 else:
                     df[col] = df[col].fillna(0)
+            
+            # 기본 피처들 추가 (없는 경우)
+            for feature in self.default_numeric_features:
+                if feature not in df.columns:
+                    df[feature] = 0.0
+            
+            # 데이터 타입을 float32로 통일
+            for col in df.columns:
+                try:
+                    df[col] = df[col].astype('float32')
+                except:
+                    df[col] = 0.0
             
             return df
             
@@ -218,6 +258,12 @@ class RealTimeInferenceEngine:
                 raise ValueError(f"모델 '{model_name}'을 찾을 수 없습니다.")
             
             model = self.models[model_name]
+            
+            # 피처 수가 부족한 경우 기본값으로 채움
+            required_features = getattr(model, 'n_features_in_', None)
+            if required_features and df.shape[1] < required_features:
+                for i in range(df.shape[1], required_features):
+                    df[f'dummy_feature_{i}'] = 0.0
             
             # 예측 수행
             prediction_proba = model.predict_proba(df)[0]
@@ -398,15 +444,53 @@ class CTRPredictionAPI:
         self.api_stats['api_calls'] += 1
         
         try:
-            # 입력 데이터 구성
-            input_data = {
-                'user_id': user_id,
-                'ad_id': ad_id
+            # 입력 데이터 구성 (모든 값을 수치형으로 처리)
+            input_data = {}
+            
+            # 사용자 ID를 해시값으로 변환
+            try:
+                input_data['user_hash'] = hash(str(user_id)) % 1000000
+            except:
+                input_data['user_hash'] = 0
+            
+            # 광고 ID를 해시값으로 변환
+            try:
+                input_data['ad_hash'] = hash(str(ad_id)) % 1000000
+            except:
+                input_data['ad_hash'] = 0
+            
+            # 컨텍스트 추가 (수치형으로 변환)
+            if context:
+                for key, value in context.items():
+                    try:
+                        # 숫자로 변환 시도
+                        input_data[key] = float(value)
+                    except:
+                        # 변환 실패 시 해시값 사용
+                        input_data[key] = hash(str(value)) % 1000
+            
+            # 기본 피처들 추가
+            default_features = {
+                'feat_e_1': 65.0,
+                'feat_e_3': 5.0,
+                'feat_e_4': -0.05,
+                'feat_e_5': -0.02,
+                'feat_e_6': -0.04,
+                'feat_e_7': 21.0,
+                'feat_e_8': -172.0,
+                'feat_e_9': -10.0,
+                'feat_e_10': -270.0,
+                'feat_d_1': 0.39,
+                'feat_d_2': 1.93,
+                'feat_d_3': 1.76,
+                'feat_d_4': 6.0,
+                'feat_d_5': -0.29,
+                'feat_d_6': -0.41
             }
             
-            # 컨텍스트 추가
-            if context:
-                input_data.update(context)
+            for key, value in default_features.items():
+                if key not in input_data:
+                    input_data[key] = value
             
             # 예측 수행
             result = self.engine.predict_single(input_data, model_name)
@@ -461,14 +545,23 @@ class CTRPredictionAPI:
         # 입력 데이터 변환
         input_data = []
         for req in requests:
-            input_item = {
-                'user_id': req.get('user_id', ''),
-                'ad_id': req.get('ad_id', '')
-            }
+            input_item = {}
+            
+            # 기본 정보
+            try:
+                input_item['user_hash'] = hash(str(req.get('user_id', ''))) % 1000000
+                input_item['ad_hash'] = hash(str(req.get('ad_id', ''))) % 1000000
+            except:
+                input_item['user_hash'] = 0
+                input_item['ad_hash'] = 0
             
             # 추가 컨텍스트
             context = req.get('context', {})
-            input_item.update(context)
+            for key, value in context.items():
+                try:
+                    input_item[key] = float(value)
+                except:
+                    input_item[key] = hash(str(value)) % 1000
             
             input_data.append(input_item)
         
@@ -549,7 +642,7 @@ if __name__ == "__main__":
         test_prediction = service.predict_ctr(
             user_id="test_user_123",
             ad_id="test_ad_456",
-            context={'page_type': 'home', 'device': 'mobile'}
+            context={'device': 'mobile', 'page': 'home'}
         )
         
         print("예측 결과:", json.dumps(test_prediction, indent=2))
