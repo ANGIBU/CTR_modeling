@@ -16,7 +16,7 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 class MemoryOptimizedFeatureEngineer:
-    """극한 메모리 최적화 피처 엔지니어링 클래스"""
+    """메모리 최적화 피처 엔지니어링 클래스"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -38,8 +38,8 @@ class MemoryOptimizedFeatureEngineer:
                           train_df: pd.DataFrame, 
                           test_df: pd.DataFrame, 
                           target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """극한 메모리 최적화 피처 엔지니어링 파이프라인"""
-        logger.info("극한 메모리 최적화 피처 엔지니어링 시작")
+        """메모리 최적화 피처 엔지니어링 파이프라인"""
+        logger.info("메모리 최적화 피처 엔지니어링 시작")
         
         # 학습 데이터에서 타겟 분리
         X_train = train_df.drop(columns=[target_col])
@@ -53,29 +53,29 @@ class MemoryOptimizedFeatureEngineer:
         # 컬럼 타입 사전 분류
         self._classify_columns(X_train)
         
-        # 1. ID성 컬럼 강화 제거
+        # 1. ID성 컬럼 제거
         X_train, X_test = self._remove_id_columns_enhanced(X_train, X_test)
         
         # 2. 기본 피처 정리
         X_train, X_test = self._clean_basic_features(X_train, X_test)
         
-        # 3. 범주형 피처 인코딩 (극한 최적화)
+        # 3. 범주형 피처 인코딩
         X_train, X_test = self._encode_categorical_features_optimized(X_train, X_test, y_train)
         
-        # 4. 수치형 피처 생성 (제한적)
+        # 4. 수치형 피처 생성
         X_train, X_test = self._create_numerical_features_limited(X_train, X_test)
         
         # 5. 메모리 체크 후 조건부 상호작용 피처
         current_memory = self.get_memory_usage()
         logger.info(f"상호작용 피처 생성 전 메모리: {current_memory:.2f} GB")
         
-        if current_memory < 45:
+        if current_memory < 35:
             X_train, X_test = self._create_minimal_interaction_features(X_train, X_test)
         else:
             logger.warning("메모리 부족으로 상호작용 피처 생성 건너뛰기")
         
         # 6. 최종 데이터 정리 및 검증
-        X_train, X_test = self._final_data_cleanup(X_train, X_test, y_train)
+        X_train, X_test = self._final_data_cleanup_safe(X_train, X_test, y_train)
         
         # 최종 상태
         final_memory = self.get_memory_usage()
@@ -87,8 +87,8 @@ class MemoryOptimizedFeatureEngineer:
     def _remove_id_columns_enhanced(self, 
                                   X_train: pd.DataFrame, 
                                   X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """강화된 ID성 컬럼 제거"""
-        logger.info("강화된 ID성 컬럼 제거 시작")
+        """ID성 컬럼 제거"""
+        logger.info("ID성 컬럼 제거 시작")
         
         # 명시적 ID 컬럼들
         explicit_id_columns = ['ID', 'id', 'seq', 'user_id', 'ad_id', 'session_id', 'request_id']
@@ -104,7 +104,7 @@ class MemoryOptimizedFeatureEngineer:
                 pattern_id_columns.append(col)
         
         # 유니크 비율 기반 ID 컬럼 탐지 (샘플링)
-        sample_size = min(100000, len(X_train))
+        sample_size = min(50000, len(X_train))
         if len(X_train) > sample_size:
             sample_indices = np.random.choice(len(X_train), sample_size, replace=False)
             sample_data = X_train.iloc[sample_indices]
@@ -115,7 +115,7 @@ class MemoryOptimizedFeatureEngineer:
         for col in X_train.columns:
             try:
                 unique_ratio = sample_data[col].nunique() / len(sample_data)
-                if unique_ratio > 0.7:  # 70% 이상 유니크
+                if unique_ratio > 0.8:
                     high_cardinality_columns.append(col)
                     logger.info(f"{col}: ID성 컬럼 후보 (유니크 비율: {unique_ratio:.3f})")
             except:
@@ -143,7 +143,7 @@ class MemoryOptimizedFeatureEngineer:
     
     def _classify_columns(self, df: pd.DataFrame):
         """컬럼 타입 분류"""
-        logger.info("컬럼 타입 수동 분류 시작")
+        logger.info("컬럼 타입 분류 시작")
         
         self.numeric_columns = []
         self.categorical_columns = []
@@ -158,9 +158,8 @@ class MemoryOptimizedFeatureEngineer:
                 self.categorical_columns.append(col)
             else:
                 # 샘플링해서 타입 확인
-                sample = df[col].dropna().iloc[:1000] if len(df[col].dropna()) > 0 else df[col].iloc[:1000]
-                
                 try:
+                    sample = df[col].dropna().iloc[:1000] if len(df[col].dropna()) > 0 else df[col].iloc[:1000]
                     pd.to_numeric(sample)
                     self.numeric_columns.append(col)
                 except:
@@ -206,8 +205,8 @@ class MemoryOptimizedFeatureEngineer:
                                              X_train: pd.DataFrame, 
                                              X_test: pd.DataFrame, 
                                              y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """극한 최적화 범주형 피처 인코딩"""
-        logger.info("극한 최적화 범주형 피처 인코딩 시작")
+        """메모리 최적화 범주형 피처 인코딩"""
+        logger.info("메모리 최적화 범주형 피처 인코딩 시작")
         
         # 현재 남아있는 범주형 컬럼 재확인
         current_categorical_cols = []
@@ -224,7 +223,7 @@ class MemoryOptimizedFeatureEngineer:
                 unique_count = X_train[col].nunique()
                 
                 # 메모리 부족 방지
-                if memory_before > 50:
+                if memory_before > 35:
                     logger.warning(f"{col}: 메모리 부족으로 인코딩 스킵")
                     continue
                 
@@ -311,7 +310,7 @@ class MemoryOptimizedFeatureEngineer:
         
         # 메모리 체크
         current_memory = self.get_memory_usage()
-        if current_memory > 40:
+        if current_memory > 30:
             logger.warning("메모리 부족으로 수치형 피처 생성 제한")
             max_features = 5
         else:
@@ -329,7 +328,7 @@ class MemoryOptimizedFeatureEngineer:
         for col in current_numeric_cols[:max_features]:
             try:
                 # 메모리 체크
-                if self.get_memory_usage() > 45:
+                if self.get_memory_usage() > 35:
                     break
                 
                 # 로그 변환 (양수 데이터만)
@@ -384,15 +383,15 @@ class MemoryOptimizedFeatureEngineer:
         
         # 메모리 기반 제한
         current_memory = self.get_memory_usage()
-        if current_memory > 35:
+        if current_memory > 25:
             max_interactions = 10
             max_cols = 5
-        elif current_memory > 25:
+        elif current_memory > 20:
+            max_interactions = 20
+            max_cols = 6
+        else:
             max_interactions = 30
             max_cols = 8
-        else:
-            max_interactions = 50
-            max_cols = 10
         
         important_cols = safe_numeric_cols[:max_cols]
         interaction_count = 0
@@ -409,7 +408,7 @@ class MemoryOptimizedFeatureEngineer:
                 
                 try:
                     # 메모리 체크
-                    if self.get_memory_usage() > 50:
+                    if self.get_memory_usage() > 35:
                         logger.warning("메모리 한계로 상호작용 피처 생성 중단")
                         break
                     
@@ -433,12 +432,12 @@ class MemoryOptimizedFeatureEngineer:
         logger.info(f"상호작용 피처 생성 완료: {interaction_count}개")
         return X_train, X_test
     
-    def _final_data_cleanup(self, 
-                          X_train: pd.DataFrame, 
-                          X_test: pd.DataFrame, 
-                          y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """최종 데이터 정리 및 검증"""
-        logger.info("최종 데이터 정리 시작")
+    def _final_data_cleanup_safe(self, 
+                               X_train: pd.DataFrame, 
+                               X_test: pd.DataFrame, 
+                               y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """안전한 최종 데이터 정리"""
+        logger.info("안전한 최종 데이터 정리 시작")
         
         # 1. 데이터 타입 강제 통일
         problematic_columns = []
@@ -451,14 +450,13 @@ class MemoryOptimizedFeatureEngineer:
                 
                 # object 타입 처리
                 if train_dtype == 'object' or test_dtype == 'object':
-                    logger.warning(f"{col}: object 타입 발견, 수치형으로 강제 변환")
+                    logger.warning(f"{col}: object 타입 발견, 수치형으로 변환")
                     
                     # 수치형 변환 시도
                     try:
                         X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0).astype('float32')
                         X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0).astype('float32')
                     except:
-                        # 변환 실패 시 제거 대상으로 추가
                         problematic_columns.append(col)
                         continue
                 
@@ -490,8 +488,7 @@ class MemoryOptimizedFeatureEngineer:
             X_test = X_test.drop(columns=problematic_columns, errors='ignore')
             self.removed_columns.extend(problematic_columns)
         
-        # 3. 결측치 및 무한값 처리
-        # 결측치 처리
+        # 3. 결측치 처리
         if X_train.isnull().any().any():
             logger.warning("X_train에 결측치 발견, 0으로 대치")
             X_train = X_train.fillna(0)
@@ -500,24 +497,28 @@ class MemoryOptimizedFeatureEngineer:
             logger.warning("X_test에 결측치 발견, 0으로 대치")
             X_test = X_test.fillna(0)
         
-        # 무한값 처리
+        # 4. 메모리 안전 무한값 처리
         try:
-            # X_train 무한값 처리
-            inf_mask_train = np.isinf(X_train.values)
-            if inf_mask_train.any():
-                logger.warning("X_train에 무한값 발견, 클리핑 처리")
-                X_train = X_train.replace([np.inf, -np.inf], [1e6, -1e6])
-            
-            # X_test 무한값 처리
-            inf_mask_test = np.isinf(X_test.values)
-            if inf_mask_test.any():
-                logger.warning("X_test에 무한값 발견, 클리핑 처리")
-                X_test = X_test.replace([np.inf, -np.inf], [1e6, -1e6])
+            # 컬럼별로 개별 처리
+            for col in X_train.columns:
+                try:
+                    # 개별 컬럼 무한값 확인 및 처리
+                    if np.isinf(X_train[col]).any():
+                        logger.warning(f"X_train {col}에 무한값 발견, 클리핑 처리")
+                        X_train[col] = X_train[col].replace([np.inf, -np.inf], [1e6, -1e6])
+                    
+                    if np.isinf(X_test[col]).any():
+                        logger.warning(f"X_test {col}에 무한값 발견, 클리핑 처리")
+                        X_test[col] = X_test[col].replace([np.inf, -np.inf], [1e6, -1e6])
+                        
+                except Exception as e:
+                    logger.warning(f"{col} 무한값 처리 실패: {str(e)}")
+                    continue
                 
         except Exception as e:
             logger.warning(f"무한값 처리 중 오류: {str(e)}")
         
-        # 4. 최종 검증
+        # 5. 최종 검증
         logger.info("최종 데이터 검증 시작")
         
         # 컬럼 일치성 확인
@@ -539,18 +540,23 @@ class MemoryOptimizedFeatureEngineer:
                 # 더 안전한 타입으로 통일
                 X_train[col] = X_train[col].astype('float32')
                 X_test[col] = X_test[col].astype('float32')
-            
-            # object 타입이 남아있는지 확인
-            if train_dtype == 'object' or test_dtype == 'object':
-                logger.error(f"{col}: object 타입이 여전히 남아있음!")
-                # 강제 제거
-                X_train = X_train.drop(columns=[col])
-                X_test = X_test.drop(columns=[col])
         
-        # 5. 메모리 기반 피처 선택
+        # object 타입이 남아있는지 확인
+        train_object_cols = X_train.select_dtypes(include=['object']).columns
+        test_object_cols = X_test.select_dtypes(include=['object']).columns
+        
+        if len(train_object_cols) > 0 or len(test_object_cols) > 0:
+            logger.error(f"object 타입 컬럼이 남아있습니다! train: {list(train_object_cols)}, test: {list(test_object_cols)}")
+            # 모든 object 컬럼 제거
+            all_object_cols = list(set(train_object_cols) | set(test_object_cols))
+            X_train = X_train.drop(columns=all_object_cols, errors='ignore')
+            X_test = X_test.drop(columns=all_object_cols, errors='ignore')
+            logger.info(f"object 컬럼 강제 제거: {all_object_cols}")
+        
+        # 6. 메모리 기반 피처 선택
         current_memory = self.get_memory_usage()
         
-        if current_memory > 55 or X_train.shape[1] > 1000:
+        if current_memory > 40 or X_train.shape[1] > 500:
             logger.info("메모리 절약을 위한 피처 선택 수행")
             
             try:
@@ -570,22 +576,10 @@ class MemoryOptimizedFeatureEngineer:
         logger.info(f"X_train 최종 데이터 타입: {X_train.dtypes.value_counts().to_dict()}")
         logger.info(f"X_test 최종 데이터 타입: {X_test.dtypes.value_counts().to_dict()}")
         
-        # object 타입이 남아있는지 최종 확인
-        train_object_cols = X_train.select_dtypes(include=['object']).columns
-        test_object_cols = X_test.select_dtypes(include=['object']).columns
-        
-        if len(train_object_cols) > 0 or len(test_object_cols) > 0:
-            logger.error(f"object 타입 컬럼이 남아있습니다! train: {list(train_object_cols)}, test: {list(test_object_cols)}")
-            # 모든 object 컬럼 제거
-            all_object_cols = list(set(train_object_cols) | set(test_object_cols))
-            X_train = X_train.drop(columns=all_object_cols, errors='ignore')
-            X_test = X_test.drop(columns=all_object_cols, errors='ignore')
-            logger.info(f"object 컬럼 강제 제거: {all_object_cols}")
-        
         # 메모리 정리
         gc.collect()
         
-        logger.info("최종 데이터 정리 완료")
+        logger.info("안전한 최종 데이터 정리 완료")
         return X_train, X_test
     
     def get_feature_importance_summary(self) -> Dict[str, Any]:
