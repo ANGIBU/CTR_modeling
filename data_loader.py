@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from typing import Tuple, Optional, Dict, Any
 import logging
+import gc
 from sklearn.model_selection import train_test_split, StratifiedKFold, TimeSeriesSplit
 from config import Config
 
@@ -47,6 +48,106 @@ class DataLoader:
             logger.error(f"데이터 로딩 실패: {str(e)}")
             raise
     
+    def load_data_chunked(self, 
+                         max_train_size: int = 1000000,
+                         max_test_size: int = 300000,
+                         chunk_size: int = 100000) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """메모리 효율적인 샘플링 기반 데이터 로딩"""
+        logger.info(f"샘플링 기반 데이터 로딩 시작 - 학습: {max_train_size:,}, 테스트: {max_test_size:,}")
+        
+        try:
+            # 학습 데이터 로딩 및 샘플링
+            logger.info("학습 데이터 로딩 시작")
+            
+            # 전체 파일 크기 확인을 위한 사전 로딩
+            train_sample = pd.read_parquet(self.config.TRAIN_PATH, nrows=1000)
+            logger.info(f"학습 데이터 사전 확인 완료")
+            del train_sample
+            gc.collect()
+            
+            # 전체 학습 데이터 로딩
+            logger.info("전체 학습 데이터 로딩 중")
+            train_df_full = pd.read_parquet(self.config.TRAIN_PATH)
+            logger.info(f"전체 학습 데이터 로딩 완료: {train_df_full.shape}")
+            
+            # 필요한 크기로 샘플링
+            if len(train_df_full) > max_train_size:
+                logger.info(f"학습 데이터 샘플링: {len(train_df_full):,} → {max_train_size:,}")
+                # 시간적 순서를 고려한 샘플링 (앞에서부터 선택)
+                train_df = train_df_full.iloc[:max_train_size].copy()
+                del train_df_full
+                gc.collect()
+            else:
+                train_df = train_df_full
+            
+            # 메모리 최적화
+            train_df = self._optimize_chunk_memory(train_df)
+            logger.info(f"학습 데이터 처리 완료: {train_df.shape}")
+            
+            # 테스트 데이터 로딩 및 샘플링
+            logger.info("테스트 데이터 로딩 시작")
+            
+            # 테스트 데이터 사전 확인
+            test_sample = pd.read_parquet(self.config.TEST_PATH, nrows=1000)
+            logger.info(f"테스트 데이터 사전 확인 완료")
+            del test_sample
+            gc.collect()
+            
+            # 전체 테스트 데이터 로딩
+            logger.info("전체 테스트 데이터 로딩 중")
+            test_df_full = pd.read_parquet(self.config.TEST_PATH)
+            logger.info(f"전체 테스트 데이터 로딩 완료: {test_df_full.shape}")
+            
+            # 필요한 크기로 샘플링
+            if len(test_df_full) > max_test_size:
+                logger.info(f"테스트 데이터 샘플링: {len(test_df_full):,} → {max_test_size:,}")
+                # 시간적 순서를 고려한 샘플링 (앞에서부터 선택)
+                test_df = test_df_full.iloc[:max_test_size].copy()
+                del test_df_full
+                gc.collect()
+            else:
+                test_df = test_df_full
+            
+            # 메모리 최적화
+            test_df = self._optimize_chunk_memory(test_df)
+            logger.info(f"테스트 데이터 처리 완료: {test_df.shape}")
+            
+            # 피처 컬럼 정의
+            self.feature_columns = [col for col in train_df.columns 
+                                  if col != self.target_column]
+            
+            # CTR 정보
+            if self.target_column in train_df.columns:
+                actual_ctr = train_df[self.target_column].mean()
+                logger.info(f"실제 CTR: {actual_ctr:.4f}")
+            
+            logger.info("샘플링 기반 데이터 로딩 완료")
+            return train_df, test_df
+            
+        except Exception as e:
+            logger.error(f"샘플링 데이터 로딩 실패: {str(e)}")
+            gc.collect()
+            raise
+    
+    def _optimize_chunk_memory(self, chunk: pd.DataFrame) -> pd.DataFrame:
+        """청크별 메모리 최적화"""
+        try:
+            # 데이터 타입 최적화
+            for col in chunk.columns:
+                if chunk[col].dtype == 'float64':
+                    chunk[col] = pd.to_numeric(chunk[col], downcast='float')
+                elif chunk[col].dtype in ['int64', 'int32']:
+                    chunk[col] = pd.to_numeric(chunk[col], downcast='integer')
+                elif chunk[col].dtype == 'object':
+                    # 범주형으로 변환 시도
+                    if chunk[col].nunique() / len(chunk) < 0.5:
+                        chunk[col] = chunk[col].astype('category')
+            
+            return chunk
+        except Exception as e:
+            logger.warning(f"청크 메모리 최적화 실패: {str(e)}")
+            return chunk
+    
     def basic_preprocessing(self, df: pd.DataFrame) -> pd.DataFrame:
         """기본 전처리 수행"""
         logger.info("기본 전처리 시작")
@@ -57,7 +158,7 @@ class DataLoader:
         # 결측치 확인
         missing_info = df_processed.isnull().sum()
         if missing_info.sum() > 0:
-            logger.warning(f"결측치 발견: \n{missing_info[missing_info > 0]}")
+            logger.warning(f"결측치 발견: {missing_info.sum()}개")
             
             # 수치형 변수: 중앙값으로 대치
             numeric_cols = df_processed.select_dtypes(include=[np.number]).columns
@@ -65,7 +166,6 @@ class DataLoader:
                 if df_processed[col].isnull().sum() > 0:
                     median_val = df_processed[col].median()
                     df_processed[col].fillna(median_val, inplace=True)
-                    logger.info(f"{col}: 결측치를 중앙값 {median_val}로 대치")
             
             # 범주형 변수: 최빈값으로 대치
             categorical_cols = df_processed.select_dtypes(include=['object', 'category']).columns
@@ -73,7 +173,6 @@ class DataLoader:
                 if df_processed[col].isnull().sum() > 0:
                     mode_val = df_processed[col].mode()[0] if len(df_processed[col].mode()) > 0 else 'unknown'
                     df_processed[col].fillna(mode_val, inplace=True)
-                    logger.info(f"{col}: 결측치를 최빈값 {mode_val}로 대치")
         
         # 데이터 타입 최적화
         df_processed = self._optimize_dtypes(df_processed)
@@ -178,6 +277,48 @@ class DataLoader:
         
         # CTR 데이터는 시간적 순서가 중요하므로 TimeSeriesSplit 사용
         return self.create_time_series_folds(X, y, n_splits)
+    
+    def memory_efficient_train_test_split(self,
+                                        X_train: pd.DataFrame,
+                                        y_train: pd.Series,
+                                        test_size: float = 0.2) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+        """메모리 효율적인 시간적 순서 기반 데이터 분할"""
+        logger.info("메모리 효율적인 데이터 분할 시작")
+        
+        try:
+            # 입력 검증
+            if len(X_train) != len(y_train):
+                raise ValueError(f"X와 y의 길이가 다릅니다. X: {len(X_train)}, y: {len(y_train)}")
+            
+            if len(X_train) == 0:
+                raise ValueError("분할할 데이터가 없습니다.")
+            
+            # 시간적 순서를 고려한 분할 인덱스 계산
+            split_idx = int(len(X_train) * (1 - test_size))
+            
+            logger.info(f"분할 인덱스: {split_idx}, 전체 크기: {len(X_train)}")
+            
+            # 분할 수행
+            X_train_split = X_train.iloc[:split_idx].copy()
+            X_val_split = X_train.iloc[split_idx:].copy()
+            y_train_split = y_train.iloc[:split_idx].copy()
+            y_val_split = y_train.iloc[split_idx:].copy()
+            
+            # 메모리 정리
+            del X_train, y_train
+            gc.collect()
+            
+            # 결과 검증
+            self._validate_split_results(X_train_split, X_val_split, y_train_split, y_val_split)
+            
+            logger.info(f"메모리 효율적 분할 완료 - 학습: {X_train_split.shape}, 검증: {X_val_split.shape}")
+            
+            return X_train_split, X_val_split, y_train_split, y_val_split
+            
+        except Exception as e:
+            logger.error(f"메모리 효율적 데이터 분할 실패: {str(e)}")
+            gc.collect()
+            raise
     
     def train_test_split_data(self, 
                             df: pd.DataFrame, 

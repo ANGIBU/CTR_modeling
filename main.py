@@ -25,6 +25,19 @@ def get_memory_usage() -> float:
     process = psutil.Process()
     return process.memory_info().rss / (1024**3)
 
+def get_available_memory() -> float:
+    """사용 가능한 메모리 (GB)"""
+    return psutil.virtual_memory().available / (1024**3)
+
+def force_memory_cleanup():
+    """강제 메모리 정리"""
+    gc.collect()
+    import ctypes
+    try:
+        ctypes.CDLL("kernel32.dll").SetProcessWorkingSetSize(-1, -1, -1)
+    except:
+        pass
+
 def setup_logging():
     """로깅 설정"""
     logger = Config.setup_logging()
@@ -35,61 +48,87 @@ def memory_monitor_decorator(func):
     """메모리 모니터링 데코레이터"""
     def wrapper(*args, **kwargs):
         memory_before = get_memory_usage()
+        available_before = get_available_memory()
         logger = logging.getLogger(__name__)
-        logger.info(f"{func.__name__} 시작 - 메모리: {memory_before:.2f} GB")
+        logger.info(f"{func.__name__} 시작 - 메모리: {memory_before:.2f} GB, 사용 가능: {available_before:.2f} GB")
         
         result = func(*args, **kwargs)
         
         memory_after = get_memory_usage()
-        logger.info(f"{func.__name__} 완료 - 메모리: {memory_after:.2f} GB (변화: {memory_after-memory_before:+.2f} GB)")
+        available_after = get_available_memory()
+        logger.info(f"{func.__name__} 완료 - 메모리: {memory_after:.2f} GB, 사용 가능: {available_after:.2f} GB")
+        
+        # 메모리 정리
+        if available_after < 10:
+            force_memory_cleanup()
         
         return result
     return wrapper
 
 @memory_monitor_decorator
-def load_and_preprocess_data(config: Config, memory_limit: float = 50.0) -> tuple:
-    """데이터 로딩 및 전처리"""
+def load_and_preprocess_data(config: Config, quick_mode: bool = False, memory_safe: bool = False) -> tuple:
+    """메모리 효율적인 데이터 로딩 및 전처리"""
     logger = logging.getLogger(__name__)
     logger.info("데이터 로딩 및 전처리 단계 시작")
     
     data_loader = DataLoader(config)
     
     try:
-        # 데이터 로딩
-        train_df, test_df = data_loader.load_data()
+        # 메모리 기반 샘플 크기 결정
+        available_memory = get_available_memory()
+        
+        if quick_mode:
+            # 빠른 모드: 매우 작은 샘플
+            max_train_size = 50000
+            max_test_size = 10000
+            logger.info(f"빠른 모드 활성화: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
+        elif memory_safe or available_memory < 20:
+            # 메모리 안전 모드
+            max_train_size = 200000
+            max_test_size = 50000
+            logger.info(f"메모리 안전 모드: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
+        else:
+            # 일반 모드
+            max_train_size = 1000000
+            max_test_size = 300000
+            logger.info(f"일반 모드: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
+        
+        # 청킹 기반 데이터 로딩
+        train_df, test_df = data_loader.load_data_chunked(
+            max_train_size=max_train_size,
+            max_test_size=max_test_size
+        )
         
         # 메모리 체크
-        memory_usage = get_memory_usage()
-        logger.info(f"데이터 로딩 후 메모리: {memory_usage:.2f} GB")
+        current_memory = get_memory_usage()
+        available_memory = get_available_memory()
+        logger.info(f"데이터 로딩 후 - 사용 메모리: {current_memory:.2f} GB, 사용 가능: {available_memory:.2f} GB")
         
-        if memory_usage > memory_limit:
-            logger.warning(f"메모리 사용량이 한계 초과: {memory_usage:.2f} GB > {memory_limit} GB")
+        # 메모리 부족 시 추가 샘플링
+        if available_memory < 15:
+            logger.warning(f"메모리 부족으로 추가 샘플링 수행")
+            sample_ratio = min(0.5, available_memory / 20)
             
-            # 데이터 샘플링으로 메모리 절약
             original_train_size = len(train_df)
             original_test_size = len(test_df)
             
-            sample_ratio = min(0.7, memory_limit / memory_usage)
+            train_sample_size = max(10000, int(len(train_df) * sample_ratio))
+            test_sample_size = max(5000, int(len(test_df) * sample_ratio))
             
-            train_sample_size = int(len(train_df) * sample_ratio)
-            test_sample_size = int(len(test_df) * sample_ratio)
+            train_df = train_df.sample(n=train_sample_size, random_state=42).reset_index(drop=True)
+            test_df = test_df.sample(n=test_sample_size, random_state=42).reset_index(drop=True)
             
-            train_df = train_df.sample(n=train_sample_size, random_state=42)
-            test_df = test_df.sample(n=test_sample_size, random_state=42)
+            logger.info(f"추가 샘플링 - 학습: {original_train_size:,} → {len(train_df):,}")
+            logger.info(f"추가 샘플링 - 테스트: {original_test_size:,} → {len(test_df):,}")
             
-            logger.info(f"메모리 절약을 위한 샘플링 수행")
-            logger.info(f"학습 데이터: {original_train_size:,} → {len(train_df):,}")
-            logger.info(f"테스트 데이터: {original_test_size:,} → {len(test_df):,}")
-            
-            # 메모리 정리
-            gc.collect()
+            force_memory_cleanup()
         
         # 데이터 요약 정보
         train_summary = data_loader.get_data_summary(train_df)
         test_summary = data_loader.get_data_summary(test_df)
         
-        logger.info(f"학습 데이터 요약: {train_summary['shape']}")
-        logger.info(f"테스트 데이터 요약: {test_summary['shape']}")
+        logger.info(f"최종 학습 데이터: {train_summary['shape']}")
+        logger.info(f"최종 테스트 데이터: {test_summary['shape']}")
         
         if 'target_distribution' in train_summary:
             ctr = train_summary['target_distribution']['ctr']
@@ -100,7 +139,7 @@ def load_and_preprocess_data(config: Config, memory_limit: float = 50.0) -> tupl
         validation_results = validator.validate_data_consistency(train_df, test_df)
         
         if validation_results['missing_in_test'] or validation_results['dtype_mismatches']:
-            logger.warning(f"데이터 일관성 문제 발견: {validation_results}")
+            logger.warning(f"데이터 일관성 문제: {len(validation_results['missing_in_test'])}개 누락, {len(validation_results['dtype_mismatches'])}개 타입 불일치")
         
         # 기본 전처리
         train_processed = data_loader.basic_preprocessing(train_df)
@@ -108,67 +147,62 @@ def load_and_preprocess_data(config: Config, memory_limit: float = 50.0) -> tupl
         
         # 메모리 정리
         del train_df, test_df
-        gc.collect()
+        force_memory_cleanup()
         
         logger.info("데이터 로딩 및 전처리 완료")
         return train_processed, test_processed, data_loader
         
     except Exception as e:
         logger.error(f"데이터 로딩 실패: {str(e)}")
+        force_memory_cleanup()
         raise
 
 @memory_monitor_decorator
 def feature_engineering_pipeline(train_df: pd.DataFrame, 
                                 test_df: pd.DataFrame,
                                 config: Config,
-                                memory_limit: float = 55.0) -> tuple:
-    """CTR 특화 피처 엔지니어링 파이프라인"""
+                                memory_limit: bool = False) -> tuple:
+    """메모리 효율적인 피처 엔지니어링"""
     logger = logging.getLogger(__name__)
     logger.info("피처 엔지니어링 단계 시작")
     
     try:
-        # 메모리 체크
-        initial_memory = get_memory_usage()
-        logger.info(f"피처 엔지니어링 시작 메모리: {initial_memory:.2f} GB")
+        available_memory = get_available_memory()
+        logger.info(f"피처 엔지니어링 시작 - 사용 가능 메모리: {available_memory:.2f} GB")
         
-        if initial_memory > memory_limit * 0.8:
-            logger.warning(f"높은 메모리 사용량으로 인한 제한적 피처 엔지니어링 수행")
+        # 메모리 기반 피처 생성 제한
+        if available_memory < 15 or memory_limit:
+            logger.info("제한적 피처 엔지니어링 모드")
+            feature_engineer = FeatureEngineer(config)
+            feature_engineer.set_memory_efficient_mode(True)
+        else:
+            feature_engineer = FeatureEngineer(config)
         
-        # CTR 특화 피처 엔지니어 초기화
-        feature_engineer = FeatureEngineer(config)
-        
-        # 피처 생성 (메모리 최적화됨)
+        # 피처 생성
         X_train, X_test = feature_engineer.create_all_features(
             train_df, test_df, target_col='clicked'
         )
         
         # 타겟 변수 분리
-        y_train = train_df['clicked']
+        y_train = train_df['clicked'].copy()
         
         # 메모리 정리
         del train_df, test_df
-        gc.collect()
+        force_memory_cleanup()
         
-        # 피처 정보 출력
+        # 피처 정보
         feature_summary = feature_engineer.get_feature_importance_summary()
         logger.info(f"생성된 피처 수: {feature_summary['total_generated_features']}")
         logger.info(f"최종 피처 차원: {X_train.shape}")
         
-        # 최종 메모리 체크
-        final_memory = get_memory_usage()
-        logger.info(f"피처 엔지니어링 완료 메모리: {final_memory:.2f} GB")
+        available_memory = get_available_memory()
+        logger.info(f"피처 엔지니어링 완료 - 사용 가능 메모리: {available_memory:.2f} GB")
         
-        if final_memory > memory_limit:
-            logger.error(f"메모리 한계 초과: {final_memory:.2f} GB > {memory_limit} GB")
-            raise MemoryError("메모리 부족으로 인한 파이프라인 중단")
-        
-        logger.info("피처 엔지니어링 완료")
         return X_train, X_test, y_train, feature_engineer
         
     except Exception as e:
         logger.error(f"피처 엔지니어링 실패: {str(e)}")
-        # 메모리 정리
-        gc.collect()
+        force_memory_cleanup()
         raise
 
 @memory_monitor_decorator
@@ -177,92 +211,84 @@ def model_training_pipeline(X_train: pd.DataFrame,
                            config: Config,
                            tune_hyperparameters: bool = True,
                            memory_safe_mode: bool = False) -> tuple:
-    """CTR 특화 모델 학습 파이프라인"""
+    """메모리 효율적인 모델 학습"""
     logger = logging.getLogger(__name__)
     logger.info("모델 학습 단계 시작")
     
     try:
-        # 메모리 체크
-        memory_usage = get_memory_usage()
+        available_memory = get_available_memory()
         
-        if memory_usage > 45 or memory_safe_mode:
+        # 메모리 기반 학습 모드 결정
+        if available_memory < 15 or memory_safe_mode:
             logger.info("메모리 안전 모드로 학습 수행")
             
-            # 데이터 크기 줄이기
-            if len(X_train) > 5000000:
-                sample_size = 3000000
+            # 데이터 크기 제한
+            if len(X_train) > 100000:
+                sample_size = 80000
                 sample_indices = np.random.choice(len(X_train), sample_size, replace=False)
-                X_train = X_train.iloc[sample_indices]
-                y_train = y_train.iloc[sample_indices]
+                X_train = X_train.iloc[sample_indices].reset_index(drop=True)
+                y_train = y_train.iloc[sample_indices].reset_index(drop=True)
                 logger.info(f"메모리 절약을 위한 학습 데이터 샘플링: {sample_size:,}개")
             
-            # 하이퍼파라미터 튜닝 비활성화
             tune_hyperparameters = False
             logger.info("메모리 절약을 위해 하이퍼파라미터 튜닝 비활성화")
         
         # 학습 파이프라인 초기화
         training_pipeline = TrainingPipeline(config)
         
-        # 시간적 순서를 고려한 데이터 분할
+        # 메모리 효율적인 데이터 분할
         data_loader = DataLoader(config)
-        X_train_split, X_val_split, y_train_split, y_val_split = \
-            data_loader.train_test_split_data(
-                pd.concat([X_train, y_train], axis=1)
-            )
+        split_result = data_loader.memory_efficient_train_test_split(X_train, y_train)
+        X_train_split, X_val_split, y_train_split, y_val_split = split_result
         
         # 메모리 정리
-        del X_train
-        gc.collect()
+        del X_train, y_train
+        force_memory_cleanup()
         
-        # CTR 특화 전체 학습 파이프라인 실행
+        # 전체 학습 파이프라인 실행
         pipeline_results = training_pipeline.run_full_pipeline(
             X_train_split, y_train_split,
             X_val_split, y_val_split,
             tune_hyperparameters=tune_hyperparameters,
-            n_trials=30 if tune_hyperparameters else 0
+            n_trials=20 if tune_hyperparameters else 0
         )
         
-        # 결과 출력
         logger.info(f"학습 완료된 모델 수: {pipeline_results['model_count']}")
         if 'best_model' in pipeline_results:
             best = pipeline_results['best_model']
             logger.info(f"최고 성능 모델: {best['name']} (Combined Score: {best['score']:.4f})")
         
-        logger.info("모델 학습 완료")
         return training_pipeline.trainer, X_val_split, y_val_split
         
     except Exception as e:
         logger.error(f"모델 학습 실패: {str(e)}")
-        gc.collect()
+        force_memory_cleanup()
         raise
 
 @memory_monitor_decorator
 def ensemble_pipeline(trainer: ModelTrainer,
                      X_val: pd.DataFrame,
                      y_val: pd.Series,
-                     config: Config,
-                     memory_safe_mode: bool = False) -> CTREnsembleManager:
-    """CTR 특화 앙상블 파이프라인"""
+                     config: Config) -> CTREnsembleManager:
+    """메모리 효율적인 앙상블"""
     logger = logging.getLogger(__name__)
     logger.info("앙상블 단계 시작")
     
     try:
-        # 메모리 체크
-        memory_usage = get_memory_usage()
+        available_memory = get_available_memory()
         
-        # CTR 특화 앙상블 매니저 초기화
         ensemble_manager = CTREnsembleManager(config)
         
         # 학습된 모델들 추가
         for model_name, model_info in trainer.trained_models.items():
             ensemble_manager.add_base_model(model_name, model_info['model'])
         
-        # 메모리 안전 모드에서는 제한적 앙상블만 생성
-        if memory_usage > 50 or memory_safe_mode:
-            ensemble_types = ['weighted']
-            logger.info("메모리 절약을 위해 가중 블렌딩 앙상블만 생성")
-        else:
+        # 메모리 상태에 따른 앙상블 타입 선택
+        if available_memory > 10:
             ensemble_types = ['weighted', 'rank']
+        else:
+            ensemble_types = ['weighted']
+            logger.info("메모리 절약을 위해 가중 블렌딩만 생성")
         
         for ensemble_type in ensemble_types:
             try:
@@ -274,71 +300,63 @@ def ensemble_pipeline(trainer: ModelTrainer,
         # 앙상블 학습
         ensemble_manager.train_all_ensembles(X_val, y_val)
         
-        # Combined Score 기준 앙상블 평가
+        # 앙상블 평가
         ensemble_results = ensemble_manager.evaluate_ensembles(X_val, y_val)
         
-        # 결과 출력
         for name, score in ensemble_results.items():
             logger.info(f"{name}: {score:.4f}")
         
         # 앙상블 저장
         ensemble_manager.save_ensembles()
         
-        logger.info("앙상블 파이프라인 완료")
         return ensemble_manager
         
     except Exception as e:
         logger.error(f"앙상블 파이프라인 실패: {str(e)}")
-        gc.collect()
+        force_memory_cleanup()
         raise
 
 def safe_pipeline_execution(args, config: Config, logger):
-    """안전한 파이프라인 실행 (메모리 모니터링 포함)"""
-    
-    memory_limit = 55.0
-    memory_safe_mode = False
+    """안전한 파이프라인 실행"""
     
     try:
+        # 초기 메모리 상태 확인
+        available_memory = get_available_memory()
+        logger.info(f"시작 시 사용 가능 메모리: {available_memory:.2f} GB")
+        
+        # 메모리 안전 모드 결정
+        memory_safe_mode = args.memory_safe or available_memory < 25
+        if memory_safe_mode:
+            logger.info("메모리 안전 모드 활성화")
+        
         # 1. 데이터 로딩 및 전처리
-        train_df, test_df, data_loader = load_and_preprocess_data(config, memory_limit)
+        train_df, test_df, data_loader = load_and_preprocess_data(
+            config, 
+            quick_mode=args.quick,
+            memory_safe=memory_safe_mode
+        )
         
-        # 메모리 체크
-        current_memory = get_memory_usage()
-        if current_memory > memory_limit * 0.7:
-            memory_safe_mode = True
-            logger.warning(f"메모리 안전 모드 활성화: {current_memory:.2f} GB")
-        
-        # 빠른 실행 모드 (샘플링)
-        if args.quick or memory_safe_mode:
-            logger.info("빠른 실행 모드: 데이터 샘플링")
-            train_sample_size = min(100000, len(train_df))
-            test_sample_size = min(50000, len(test_df))
-            
-            train_df = train_df.sample(n=train_sample_size, random_state=42)
-            test_df = test_df.sample(n=test_sample_size, random_state=42)
-            
-            logger.info(f"샘플링 크기 - 학습: {train_sample_size:,}, 테스트: {test_sample_size:,}")
-        
-        # 2. CTR 특화 피처 엔지니어링
+        # 2. 피처 엔지니어링
         X_train, X_test, y_train, feature_engineer = feature_engineering_pipeline(
-            train_df, test_df, config, memory_limit
+            train_df, test_df, config, memory_limit=memory_safe_mode
         )
         
         # 메모리 정리
         del train_df, test_df
-        gc.collect()
+        force_memory_cleanup()
         
-        # 3. CTR 특화 모델 학습
+        # 3. 모델 학습
         trainer, X_val, y_val = model_training_pipeline(
             X_train, y_train, config, 
             tune_hyperparameters=not args.no_tune and not memory_safe_mode,
             memory_safe_mode=memory_safe_mode
         )
         
-        # 4. CTR 특화 앙상블 (메모리 여유가 있을 때만)
+        # 4. 앙상블 (메모리 여유가 있을 때만)
+        available_memory = get_available_memory()
         ensemble_manager = None
-        if get_memory_usage() < memory_limit * 0.8:
-            ensemble_manager = ensemble_pipeline(trainer, X_val, y_val, config, memory_safe_mode)
+        if available_memory > 8:
+            ensemble_manager = ensemble_pipeline(trainer, X_val, y_val, config)
         else:
             logger.warning("메모리 부족으로 앙상블 단계 생략")
         
@@ -349,11 +367,12 @@ def safe_pipeline_execution(args, config: Config, logger):
         submission = generate_predictions(trainer, ensemble_manager, X_test, config)
         
         # 7. 추론 시스템 설정 (메모리 여유가 있을 때만)
-        if get_memory_usage() < memory_limit * 0.9:
+        available_memory = get_available_memory()
+        prediction_api = None
+        if available_memory > 5:
             prediction_api = inference_setup(config)
         else:
             logger.warning("메모리 부족으로 추론 시스템 설정 생략")
-            prediction_api = None
         
         return {
             'trainer': trainer,
@@ -364,17 +383,17 @@ def safe_pipeline_execution(args, config: Config, logger):
         
     except MemoryError as e:
         logger.error(f"메모리 부족 오류: {str(e)}")
-        logger.info("메모리 안전 모드로 재시도를 권장합니다.")
+        force_memory_cleanup()
         raise
     except Exception as e:
         logger.error(f"파이프라인 실행 중 오류: {str(e)}")
+        force_memory_cleanup()
         raise
 
 def generate_predictions(trainer: ModelTrainer,
                         ensemble_manager: CTREnsembleManager,
                         X_test: pd.DataFrame,
-                        config: Config,
-                        test_sample_indices: Optional[np.ndarray] = None) -> pd.DataFrame:
+                        config: Config) -> pd.DataFrame:
     """최종 예측 생성"""
     logger = logging.getLogger(__name__)
     logger.info("최종 예측 생성 시작")
@@ -387,58 +406,43 @@ def generate_predictions(trainer: ModelTrainer,
         # 샘플링 모드 확인
         is_sampled = len(X_test) != len(submission)
         if is_sampled:
-            logger.info(f"샘플링 모드 감지: X_test={len(X_test)}, submission={len(submission)}")
+            logger.info(f"샘플링 모드: X_test={len(X_test)}, submission={len(submission)}")
         
-        # X_test 최종 검증
-        logger.info("예측 전 X_test 데이터 검증 시작")
+        # X_test 데이터 검증
+        logger.info("예측 전 X_test 데이터 검증")
         
-        # object 타입 컬럼 확인 및 제거
+        # object 타입 컬럼 제거
         object_columns = X_test.select_dtypes(include=['object']).columns.tolist()
         if object_columns:
-            logger.error(f"X_test에 object 타입 컬럼 발견! 제거 진행: {object_columns}")
+            logger.warning(f"object 타입 컬럼 제거: {object_columns}")
             X_test = X_test.drop(columns=object_columns)
         
-        # 데이터 타입 재확인
-        logger.info(f"예측 전 X_test 데이터 타입: {X_test.dtypes.value_counts().to_dict()}")
-        
-        # 모든 컬럼이 수치형인지 확인
+        # 비수치형 컬럼 제거
         non_numeric_columns = []
         for col in X_test.columns:
             if not np.issubdtype(X_test[col].dtype, np.number):
                 non_numeric_columns.append(col)
         
         if non_numeric_columns:
-            logger.error(f"비수치형 컬럼 발견하여 제거: {non_numeric_columns}")
+            logger.warning(f"비수치형 컬럼 제거: {non_numeric_columns}")
             X_test = X_test.drop(columns=non_numeric_columns)
         
         # 결측치 및 무한값 처리
-        if X_test.isnull().any().any():
-            logger.warning("예측 전 X_test 결측치 처리")
-            X_test = X_test.fillna(0)
+        X_test = X_test.fillna(0)
+        X_test = X_test.replace([np.inf, -np.inf], [1e6, -1e6])
         
-        # 무한값 처리 (컬럼별로 안전하게)
-        for col in X_test.columns:
-            try:
-                if np.isinf(X_test[col]).any():
-                    logger.warning(f"예측 전 X_test {col} 무한값 처리")
-                    X_test[col] = X_test[col].replace([np.inf, -np.inf], [1e6, -1e6])
-            except:
-                continue
-        
-        # 데이터 타입을 float32로 통일
+        # 데이터 타입 통일
         for col in X_test.columns:
             if X_test[col].dtype != 'float32':
                 X_test[col] = X_test[col].astype('float32')
         
         logger.info(f"검증 완료 - X_test 형태: {X_test.shape}")
-        logger.info(f"검증 완료 - X_test 데이터 타입: {X_test.dtypes.value_counts().to_dict()}")
         
         # 모델 예측 수행
         if ensemble_manager and ensemble_manager.best_ensemble is not None:
             logger.info("앙상블 모델로 예측 수행")
             predictions = ensemble_manager.predict_with_best_ensemble(X_test)
         else:
-            # 최고 성능 단일 모델 사용
             logger.info("단일 모델로 예측 수행")
             best_model_name = None
             best_score = 0
@@ -455,45 +459,28 @@ def generate_predictions(trainer: ModelTrainer,
             else:
                 raise ValueError("사용 가능한 모델이 없습니다.")
         
-        # 샘플링 모드에 따른 제출 파일 생성
+        # 제출 파일 생성
         if is_sampled:
-            logger.info("샘플링 모드: 기본값으로 초기화 후 샘플 예측값만 할당")
-            # 전체를 기본값(실제 CTR)으로 초기화
+            logger.info("샘플링 모드: 기본값으로 초기화 후 샘플 예측값 할당")
             default_ctr = 0.0191
             submission['clicked'] = default_ctr
-            
-            # 샘플링된 인덱스가 있으면 해당 위치에만 예측값 할당
-            if test_sample_indices is not None:
-                submission.iloc[test_sample_indices, submission.columns.get_loc('clicked')] = predictions
-                logger.info(f"샘플링된 {len(test_sample_indices)}개 위치에 예측값 할당")
-            else:
-                # 인덱스 정보가 없으면 처음 N개에 할당
-                submission.iloc[:len(predictions), submission.columns.get_loc('clicked')] = predictions
-                logger.info(f"처음 {len(predictions)}개 위치에 예측값 할당")
+            submission.iloc[:len(predictions), submission.columns.get_loc('clicked')] = predictions
         else:
-            # 일반 모드: 전체 예측값 할당
             submission['clicked'] = predictions
-            logger.info("전체 예측값 할당 완료")
         
-        # 예측값 범위 확인
+        # 예측값 정보
         logger.info(f"예측값 범위: {predictions.min():.4f} ~ {predictions.max():.4f}")
         logger.info(f"예측 평균: {predictions.mean():.4f}")
-        logger.info(f"최종 submission 평균: {submission['clicked'].mean():.4f}")
         
-        # 제출 파일 저장 (메인 디렉터리)
+        # 제출 파일 저장
         output_path = config.BASE_DIR / "submission.csv"
         submission.to_csv(output_path, index=False)
         logger.info(f"제출 파일 저장: {output_path}")
         
-        logger.info("최종 예측 생성 완료")
         return submission
         
     except Exception as e:
         logger.error(f"예측 생성 실패: {str(e)}")
-        logger.error(f"X_test 정보 - 형태: {X_test.shape if 'X_test' in locals() else 'N/A'}")
-        if 'X_test' in locals():
-            logger.error(f"X_test 데이터 타입: {X_test.dtypes.value_counts().to_dict()}")
-            logger.error(f"X_test 컬럼 샘플: {list(X_test.columns[:10])}")
         raise
 
 def evaluation_pipeline(trainer: ModelTrainer,
@@ -513,14 +500,14 @@ def evaluation_pipeline(trainer: ModelTrainer,
             pred = model.predict_proba(X_val)
             models_predictions[model_name] = pred
         
-        # Combined Score 기준 모델 비교
+        # 모델 비교
         comparator = ModelComparator()
         comparison_df = comparator.compare_models(models_predictions, y_val)
         
         logger.info("모델 성능 비교:")
         logger.info(f"\n{comparison_df[['combined_score', 'ap', 'wll', 'auc', 'f1']].round(4)}")
         
-        # 종합 평가 보고서 생성
+        # 보고서 생성
         reporter = EvaluationReporter()
         report = reporter.generate_comprehensive_report(
             models_predictions, y_val,
@@ -533,7 +520,6 @@ def evaluation_pipeline(trainer: ModelTrainer,
             json.dump(report, f, indent=2, default=str)
         
         logger.info(f"평가 보고서 저장: {report_path}")
-        logger.info("평가 파이프라인 완료")
         
     except Exception as e:
         logger.error(f"평가 파이프라인 실패: {str(e)}")
@@ -545,19 +531,14 @@ def inference_setup(config: Config) -> CTRPredictionAPI:
     logger.info("추론 시스템 설정 시작")
     
     try:
-        # CTR 예측 API 초기화
         prediction_api = CTRPredictionAPI(config)
-        
-        # 모델 로딩
         success = prediction_api.initialize()
         
         if success:
-            # 상태 확인
             status = prediction_api.get_api_status()
             logger.info(f"추론 시스템 상태: {status['engine_status']['system_status']}")
             logger.info(f"로딩된 모델 수: {status['engine_status']['models_count']}")
             
-            # 테스트 예측
             test_result = prediction_api.predict_ctr(
                 user_id="test_user",
                 ad_id="test_ad",
@@ -565,8 +546,6 @@ def inference_setup(config: Config) -> CTRPredictionAPI:
             )
             
             logger.info(f"테스트 예측 결과: {test_result['ctr_prediction']:.4f}")
-            logger.info("추론 시스템 설정 완료")
-            
             return prediction_api
         else:
             logger.error("추론 시스템 초기화 실패")
@@ -603,20 +582,17 @@ def main():
     # 시작 시간 기록
     start_time = time.time()
     
-    # 초기 메모리 상태 확인
+    # 초기 메모리 상태
     initial_memory = get_memory_usage()
-    logger.info(f"시작 메모리 사용량: {initial_memory:.2f} GB")
+    available_memory = get_available_memory()
+    logger.info(f"시작 메모리: 사용 {initial_memory:.2f} GB, 사용 가능 {available_memory:.2f} GB")
     
     try:
         if args.mode == "train":
-            # 전체 학습 파이프라인 실행
             logger.info("=== 학습 모드 시작 ===")
-            
-            # 안전한 파이프라인 실행
             results = safe_pipeline_execution(args, config, logger)
             
         elif args.mode == "inference":
-            # 추론 모드
             logger.info("=== 추론 모드 시작 ===")
             prediction_api = inference_setup(config)
             
@@ -624,10 +600,7 @@ def main():
                 logger.info("추론 API 준비 완료")
             
         elif args.mode == "evaluate":
-            # 평가 모드
             logger.info("=== 평가 모드 시작 ===")
-            
-            # 저장된 모델 로딩 및 평가
             trainer = ModelTrainer(config)
             loaded_models = trainer.load_models()
             
@@ -636,13 +609,14 @@ def main():
             else:
                 logger.error("로딩할 모델이 없습니다.")
         
-        # 실행 시간 및 메모리 사용량 출력
+        # 실행 시간 및 메모리 사용량
         total_time = time.time() - start_time
         final_memory = get_memory_usage()
+        final_available = get_available_memory()
         memory_increase = final_memory - initial_memory
         
         logger.info(f"전체 파이프라인 실행 시간: {total_time:.2f}초")
-        logger.info(f"최대 메모리 사용량: {final_memory:.2f} GB")
+        logger.info(f"최종 메모리: 사용 {final_memory:.2f} GB, 사용 가능 {final_available:.2f} GB")
         logger.info(f"메모리 증가량: {memory_increase:+.2f} GB")
         logger.info("=== 파이프라인 완료 ===")
         
@@ -660,7 +634,7 @@ def main():
     
     finally:
         # 정리 작업
-        gc.collect()
+        force_memory_cleanup()
         final_memory = get_memory_usage()
         logger.info(f"정리 후 메모리: {final_memory:.2f} GB")
         logger.info("파이프라인 종료")
