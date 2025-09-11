@@ -45,8 +45,7 @@ def force_memory_cleanup():
 def setup_logging():
     """로깅 설정"""
     logger = Config.setup_logging()
-    logger.info("=== " \
-    "파이프라인 시작 ===")
+    logger.info("=== 파이프라인 시작 ===")
     return logger
 
 def memory_monitor_decorator(func):
