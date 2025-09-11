@@ -137,6 +137,9 @@ class CTRInferenceEngine:
         # CTR 예측용 기본 피처 설정
         self.default_numeric_features = self._get_default_features()
         
+        # 학습된 모델의 피처 순서 저장
+        self.expected_feature_columns = None
+        
         # CTR 예측용 카테고리 매핑
         self.category_mappings = {
             'gender': {'male': 1, 'female': 2, 'unknown': 0},
@@ -211,6 +214,12 @@ class CTRInferenceEngine:
                     
                     self.models[model_name] = model
                     logger.info(f"{model_name} 모델 로딩 완료")
+                    
+                    # 첫 번째 모델에서 피처 순서 추출
+                    if self.expected_feature_columns is None and hasattr(model, 'feature_names'):
+                        self.expected_feature_columns = model.feature_names
+                        logger.info(f"모델 피처 순서 설정: {len(self.expected_feature_columns)}개")
+                    
                 except Exception as e:
                     logger.error(f"{model_name} 모델 로딩 실패: {str(e)}")
                     continue
@@ -222,6 +231,13 @@ class CTRInferenceEngine:
                     with open(feature_engineer_path, 'rb') as f:
                         self.feature_engineer = pickle.load(f)
                     logger.info("피처 엔지니어 로딩 완료")
+                    
+                    # 피처 엔지니어에서 피처 순서 정보 추출
+                    if hasattr(self.feature_engineer, 'final_feature_columns'):
+                        if self.expected_feature_columns is None:
+                            self.expected_feature_columns = self.feature_engineer.final_feature_columns
+                            logger.info(f"피처 엔지니어에서 피처 순서 설정: {len(self.expected_feature_columns)}개")
+                    
                 except Exception as e:
                     logger.warning(f"피처 엔지니어 로딩 실패: {str(e)}")
                     self.feature_engineer = FeatureEngineer(self.config)
@@ -321,65 +337,26 @@ class CTRInferenceEngine:
             df = pd.DataFrame([self.default_numeric_features])
             return df.astype('float32')
     
-    def _adjust_feature_count(self, df: pd.DataFrame) -> pd.DataFrame:
-        """모델이 기대하는 피처 수에 맞춤"""
+    def _ensure_feature_consistency(self, df: pd.DataFrame) -> pd.DataFrame:
+        """모델 학습 시와 동일한 피처 순서 보장"""
         try:
-            # 첫 번째 모델의 기대 피처 수 확인
-            expected_features = None
-            
-            for model_name, model in self.models.items():
-                try:
-                    if hasattr(model, 'model'):
-                        # LightGBM
-                        if hasattr(model.model, 'feature_name'):
-                            expected_features = len(model.model.feature_name())
-                            break
-                        # XGBoost
-                        elif hasattr(model.model, 'get_booster'):
-                            expected_features = model.model.get_booster().num_features()
-                            break
-                        # CatBoost
-                        elif hasattr(model.model, 'feature_names_'):
-                            expected_features = len(model.model.feature_names_)
-                            break
-                        # 기타 sklearn 스타일
-                        elif hasattr(model.model, 'n_features_in_'):
-                            expected_features = model.model.n_features_in_
-                            break
-                    # BaseModel 직접 확인
-                    elif hasattr(model, 'n_features_in_'):
-                        expected_features = model.n_features_in_
-                        break
-                except:
-                    continue
-            
-            if expected_features is None:
-                logger.warning("모델의 기대 피처 수를 확인할 수 없습니다")
+            if self.expected_feature_columns is None:
+                logger.warning("예상 피처 순서 정보가 없습니다")
                 return df
-                
-            current_features = df.shape[1]
             
-            if current_features < expected_features:
-                # 부족한 피처를 0으로 채움
-                missing_count = expected_features - current_features
-                logger.info(f"부족한 피처 {missing_count}개를 0으로 채움")
-                
-                for i in range(missing_count):
-                    df[f'feature_{current_features + i}'] = 0.0
-                    
-            elif current_features > expected_features:
-                # 초과하는 피처 제거
-                excess_count = current_features - expected_features
-                logger.info(f"초과하는 피처 {excess_count}개 제거")
-                
-                # 컬럼명을 정렬하여 일관성 유지
-                columns_sorted = sorted(df.columns)
-                df = df[columns_sorted[:expected_features]]
+            # 누락된 피처를 0으로 채움
+            for feature in self.expected_feature_columns:
+                if feature not in df.columns:
+                    df[feature] = 0.0
             
+            # 학습 시와 동일한 순서로 재정렬
+            df = df[self.expected_feature_columns]
+            
+            logger.debug(f"피처 일관성 보장 완료: {df.shape}")
             return df
             
         except Exception as e:
-            logger.error(f"피처 수 조정 실패: {str(e)}")
+            logger.error(f"피처 일관성 보장 실패: {str(e)}")
             return df
     
     def predict_single(self, 
@@ -410,8 +387,8 @@ class CTRInferenceEngine:
             
             model = self.models[model_name]
             
-            # 피처 수 조정
-            df = self._adjust_feature_count(df)
+            # 피처 일관성 보장 (학습된 모델 기준)
+            df = self._ensure_feature_consistency(df)
             
             # CTR 예측 수행
             try:
@@ -521,8 +498,8 @@ class CTRInferenceEngine:
                 
                 model = self.models[model_name]
                 
-                # 피처 수 조정
-                combined_df = self._adjust_feature_count(combined_df)
+                # 피처 일관성 보장
+                combined_df = self._ensure_feature_consistency(combined_df)
                 
                 # 배치 예측
                 start_time = time.time()
@@ -645,7 +622,8 @@ class CTRInferenceEngine:
             'feature_engineer_loaded': self.feature_engineer is not None,
             'cache_size': len(self.feature_cache.user_features.cache),
             'system_status': 'healthy' if self.is_loaded else 'not_ready',
-            'ctr_baseline': self.ctr_baseline
+            'ctr_baseline': self.ctr_baseline,
+            'expected_features_count': len(self.expected_feature_columns) if self.expected_feature_columns else 0
         }
 
 class CTRPredictionAPI:

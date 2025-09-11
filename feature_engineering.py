@@ -31,6 +31,7 @@ class CTRFeatureEngineer:
         self.id_columns = []
         self.removed_columns = []
         self.final_feature_columns = []
+        self.original_feature_order = []  # 원본 피처 순서 저장
         
     def get_memory_usage(self) -> float:
         """현재 메모리 사용량 (GB)"""
@@ -48,6 +49,10 @@ class CTRFeatureEngineer:
         X_train = train_df.drop(columns=[target_col])
         y_train = train_df[target_col]
         X_test = test_df.copy()
+        
+        # 원본 피처 순서 저장 (알파벳 순으로 정렬하여 일관성 확보)
+        self.original_feature_order = sorted(X_train.columns.tolist())
+        logger.info(f"원본 피처 순서 저장: {len(self.original_feature_order)}개")
         
         # 초기 메모리 상태
         initial_memory = self.get_memory_usage()
@@ -81,8 +86,8 @@ class CTRFeatureEngineer:
         # 7. 최종 데이터 정리
         X_train, X_test = self._final_data_cleanup(X_train, X_test)
         
-        # 8. 피처 컬럼 순서 일치 보장
-        X_train, X_test = self._ensure_feature_consistency(X_train, X_test)
+        # 8. 피처 컬럼 순서 일치 보장 (원본 순서 기준)
+        X_train, X_test = self._ensure_consistent_feature_order(X_train, X_test)
         
         # 최종 상태
         final_memory = self.get_memory_usage()
@@ -547,23 +552,39 @@ class CTRFeatureEngineer:
         logger.info("최종 데이터 정리 완료")
         return X_train, X_test
     
-    def _ensure_feature_consistency(self, 
-                                   X_train: pd.DataFrame, 
-                                   X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """피처 일관성 보장"""
-        logger.info("피처 일관성 보장 시작")
+    def _ensure_consistent_feature_order(self, 
+                                        X_train: pd.DataFrame, 
+                                        X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """피처 순서 일관성 보장 (원본 순서 기준)"""
+        logger.info("피처 순서 일관성 보장 시작")
         
-        # 컬럼 순서 정렬
-        columns_sorted = sorted(X_train.columns)
-        X_train = X_train[columns_sorted]
-        X_test = X_test[columns_sorted]
+        # 현재 컬럼들을 원본 순서와 생성된 순서로 분류
+        current_columns = list(X_train.columns)
         
-        # 최종 피처 컬럼 순서 저장
-        self.final_feature_columns = list(X_train.columns)
+        # 원본 피처 중 남아있는 것들 (원본 순서 유지)
+        remaining_original = [col for col in self.original_feature_order if col in current_columns]
         
-        logger.info(f"피처 일관성 보장 완료 - 최종 피처 수: {X_train.shape[1]}")
+        # 생성된 피처들 (알파벳 순서로 정렬)
+        generated_cols = [col for col in current_columns if col not in self.original_feature_order]
+        generated_cols_sorted = sorted(generated_cols)
+        
+        # 최종 컬럼 순서: 원본 피처 + 생성된 피처 (정렬됨)
+        final_order = remaining_original + generated_cols_sorted
+        
+        # 순서 적용
+        X_train = X_train[final_order]
+        X_test = X_test[final_order]
+        
+        # 최종 피처 순서 저장
+        self.final_feature_columns = final_order
+        
+        logger.info(f"피처 순서 일관성 보장 완료 - 최종 순서: 원본 {len(remaining_original)}개 + 생성 {len(generated_cols_sorted)}개")
         
         return X_train, X_test
+    
+    def get_feature_columns_for_inference(self) -> List[str]:
+        """추론에 사용할 피처 컬럼 순서 반환"""
+        return self.final_feature_columns.copy()
     
     def get_feature_importance_summary(self) -> Dict[str, Any]:
         """피처 중요도 요약 정보"""
@@ -572,6 +593,7 @@ class CTRFeatureEngineer:
             'generated_features': self.generated_features,
             'removed_columns': self.removed_columns,
             'final_feature_columns': self.final_feature_columns,
+            'original_feature_order': self.original_feature_order,
             'id_columns_processed': self.id_columns,
             'encoders_count': {
                 'label_encoders': len(self.label_encoders),

@@ -35,6 +35,7 @@ class BaseModel(ABC):
         self.params = params or {}
         self.model = None
         self.is_fitted = False
+        self.feature_names = None  # 학습 시 피처 이름 저장
         
     @abstractmethod
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
@@ -51,6 +52,26 @@ class BaseModel(ABC):
         """이진 예측"""
         proba = self.predict_proba(X)
         return (proba >= 0.5).astype(int)
+    
+    def _ensure_feature_consistency(self, X: pd.DataFrame) -> pd.DataFrame:
+        """피처 일관성 보장"""
+        if self.feature_names is None:
+            return X
+        
+        # 학습 시와 동일한 피처 순서로 정렬
+        try:
+            # 누락된 피처가 있으면 0으로 채움
+            for feature in self.feature_names:
+                if feature not in X.columns:
+                    X[feature] = 0.0
+            
+            # 학습 시와 동일한 순서로 재정렬
+            X = X[self.feature_names]
+            
+            return X
+        except Exception as e:
+            logger.warning(f"피처 일관성 보장 실패: {str(e)}")
+            return X
 
 class LightGBMModel(BaseModel):
     """LightGBM 모델"""
@@ -65,6 +86,9 @@ class LightGBMModel(BaseModel):
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
         """LightGBM 모델 학습"""
         logger.info(f"{self.name} 모델 학습 시작")
+        
+        # 피처 이름 저장
+        self.feature_names = list(X_train.columns)
         
         # 학습 데이터셋 생성
         train_data = lgb.Dataset(X_train, label=y_train)
@@ -103,9 +127,12 @@ class LightGBMModel(BaseModel):
             raise ValueError("모델이 학습되지 않았습니다.")
         
         try:
+            # 피처 일관성 보장
+            X_processed = self._ensure_feature_consistency(X)
+            
             # best_iteration이 있으면 사용
             num_iteration = getattr(self.model, 'best_iteration', None)
-            proba = self.model.predict(X, num_iteration=num_iteration)
+            proba = self.model.predict(X_processed, num_iteration=num_iteration)
             
             # 확률값 클리핑
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
@@ -140,6 +167,9 @@ class XGBoostModel(BaseModel):
         """XGBoost 모델 학습"""
         logger.info(f"{self.name} 모델 학습 시작")
         
+        # 피처 이름 저장
+        self.feature_names = list(X_train.columns)
+        
         # 학습 데이터셋 생성
         dtrain = xgb.DMatrix(X_train, label=y_train)
         
@@ -169,7 +199,10 @@ class XGBoostModel(BaseModel):
             raise ValueError("모델이 학습되지 않았습니다.")
         
         try:
-            dtest = xgb.DMatrix(X)
+            # 피처 일관성 보장
+            X_processed = self._ensure_feature_consistency(X)
+            
+            dtest = xgb.DMatrix(X_processed)
             
             # best_iteration이 있으면 사용
             if hasattr(self.model, 'best_iteration') and self.model.best_iteration is not None:
@@ -209,18 +242,22 @@ class CatBoostModel(BaseModel):
         """CatBoost 모델 학습"""
         logger.info(f"{self.name} 모델 학습 시작")
         
+        # 피처 이름 저장
+        self.feature_names = list(X_train.columns)
+        
         # 검증 데이터 설정
         eval_set = None
         if X_val is not None and y_val is not None:
             eval_set = (X_val, y_val)
         
         try:
-            # 모델 학습
+            # 모델 학습 (피처명 자동 생성 비활성화)
             self.model.fit(
                 X_train, y_train,
                 eval_set=eval_set,
                 use_best_model=True if eval_set is not None else False,
-                plot=False
+                plot=False,
+                verbose=False
             )
             
             self.is_fitted = True
@@ -240,7 +277,13 @@ class CatBoostModel(BaseModel):
             raise ValueError("모델이 학습되지 않았습니다.")
         
         try:
-            proba = self.model.predict_proba(X)
+            # 피처 일관성 보장
+            X_processed = self._ensure_feature_consistency(X)
+            
+            # CatBoost 특별 처리: 피처명 없이 numpy 배열로 예측
+            X_array = X_processed.values
+            
+            proba = self.model.predict_proba(X_array)
             if proba.ndim == 2:
                 proba = proba[:, 1]
             
@@ -260,7 +303,14 @@ class CatBoostModel(BaseModel):
         
         try:
             importance = self.model.get_feature_importance()
-            feature_names = self.model.feature_names_
+            
+            # 피처명이 있으면 사용, 없으면 인덱스 기반
+            if hasattr(self.model, 'feature_names_') and self.model.feature_names_ is not None:
+                feature_names = self.model.feature_names_
+            elif self.feature_names is not None:
+                feature_names = self.feature_names
+            else:
+                feature_names = [f'feature_{i}' for i in range(len(importance))]
             
             return dict(zip(feature_names, importance))
         except:
@@ -319,6 +369,9 @@ class DeepCTRModel(BaseModel, nn.Module):
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
         """딥러닝 모델 학습"""
         logger.info(f"{self.name} 모델 학습 시작")
+        
+        # 피처 이름 저장
+        self.feature_names = list(X_train.columns)
         
         # 옵티마이저 초기화
         self.optimizer = optim.Adam(self.parameters(), lr=self.params['learning_rate'])
@@ -402,8 +455,11 @@ class DeepCTRModel(BaseModel, nn.Module):
             raise ValueError("모델이 학습되지 않았습니다.")
         
         try:
+            # 피처 일관성 보장
+            X_processed = self._ensure_feature_consistency(X)
+            
             self.eval()
-            X_tensor = torch.FloatTensor(X.values).to(self.device)
+            X_tensor = torch.FloatTensor(X_processed.values).to(self.device)
             
             with torch.no_grad():
                 outputs = self.forward(X_tensor)
@@ -439,6 +495,9 @@ class LogisticModel(BaseModel):
         """로지스틱 회귀 모델 학습"""
         logger.info(f"{self.name} 모델 학습 시작")
         
+        # 피처 이름 저장
+        self.feature_names = list(X_train.columns)
+        
         try:
             self.model.fit(X_train, y_train)
             self.is_fitted = True
@@ -455,7 +514,10 @@ class LogisticModel(BaseModel):
             raise ValueError("모델이 학습되지 않았습니다.")
         
         try:
-            proba = self.model.predict_proba(X)
+            # 피처 일관성 보장
+            X_processed = self._ensure_feature_consistency(X)
+            
+            proba = self.model.predict_proba(X_processed)
             if proba.ndim == 2:
                 proba = proba[:, 1]
             
