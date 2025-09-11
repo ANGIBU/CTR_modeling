@@ -134,15 +134,21 @@ class CTRFeatureEngineer:
             
             for col in common_columns:
                 try:
-                    train_dtype = X_train[col].dtype
-                    test_dtype = X_test[col].dtype
+                    train_dtype = str(X_train[col].dtype)
+                    test_dtype = str(X_test[col].dtype)
                     
                     # 타입이 다른 경우 통일
                     if train_dtype != test_dtype:
                         logger.info(f"{col}: 타입 불일치 - train: {train_dtype}, test: {test_dtype}")
                         
+                        # category 타입 특별 처리
+                        if 'category' in train_dtype or 'category' in test_dtype:
+                            # 둘 다 문자열로 변환
+                            X_train[col] = X_train[col].astype('str')
+                            X_test[col] = X_test[col].astype('str')
+                            logger.info(f"{col}: str로 통일")
                         # 수치형으로 변환 시도
-                        if pd.api.types.is_numeric_dtype(train_dtype) or pd.api.types.is_numeric_dtype(test_dtype):
+                        elif pd.api.types.is_numeric_dtype(X_train[col]) or pd.api.types.is_numeric_dtype(X_test[col]):
                             # 수치형으로 통일
                             X_train[col] = pd.to_numeric(X_train[col], errors='coerce').astype('float32')
                             X_test[col] = pd.to_numeric(X_test[col], errors='coerce').astype('float32')
@@ -158,22 +164,30 @@ class CTRFeatureEngineer:
                         # object 타입은 문자열로 명시적 변환
                         X_train[col] = X_train[col].astype('str')
                         X_test[col] = X_test[col].astype('str')
+                    elif 'category' in train_dtype:
+                        # category 타입은 문자열로 변환
+                        X_train[col] = X_train[col].astype('str')
+                        X_test[col] = X_test[col].astype('str')
                     elif train_dtype in ['int64', 'float64']:
                         # 큰 타입은 작은 타입으로 변환
                         if train_dtype == 'int64':
                             # 범위 확인 후 적절한 타입 선택
-                            min_val = min(X_train[col].min(), X_test[col].min())
-                            max_val = max(X_train[col].max(), X_test[col].max())
-                            
-                            if pd.isna(min_val) or pd.isna(max_val):
+                            try:
+                                min_val = min(X_train[col].min(), X_test[col].min())
+                                max_val = max(X_train[col].max(), X_test[col].max())
+                                
+                                if pd.isna(min_val) or pd.isna(max_val):
+                                    X_train[col] = X_train[col].astype('float32')
+                                    X_test[col] = X_test[col].astype('float32')
+                                elif min_val >= 0 and max_val < 65535:
+                                    X_train[col] = X_train[col].astype('uint16')
+                                    X_test[col] = X_test[col].astype('uint16')
+                                else:
+                                    X_train[col] = X_train[col].astype('int32')
+                                    X_test[col] = X_test[col].astype('int32')
+                            except:
                                 X_train[col] = X_train[col].astype('float32')
                                 X_test[col] = X_test[col].astype('float32')
-                            elif min_val >= 0 and max_val < 65535:
-                                X_train[col] = X_train[col].astype('uint16')
-                                X_test[col] = X_test[col].astype('uint16')
-                            else:
-                                X_train[col] = X_train[col].astype('int32')
-                                X_test[col] = X_test[col].astype('int32')
                         else:  # float64
                             X_train[col] = X_train[col].astype('float32')
                             X_test[col] = X_test[col].astype('float32')
@@ -233,32 +247,36 @@ class CTRFeatureEngineer:
         for col in self.id_columns:
             if col in X_train.columns:
                 try:
+                    # 안전한 문자열 변환
+                    train_values = X_train[col].astype(str).fillna('unknown')
+                    test_values = X_test[col].astype(str).fillna('unknown')
+                    
                     # 메모리 효율 모드에서는 해시만 생성
                     if self.memory_efficient_mode:
-                        X_train[f'{col}_hash'] = X_train[col].astype(str).apply(
-                            lambda x: hash(x) % 100000
+                        X_train[f'{col}_hash'] = train_values.apply(
+                            lambda x: hash(str(x)) % 100000
                         ).astype('int32')
                         
-                        X_test[f'{col}_hash'] = X_test[col].astype(str).apply(
-                            lambda x: hash(x) % 100000
+                        X_test[f'{col}_hash'] = test_values.apply(
+                            lambda x: hash(str(x)) % 100000
                         ).astype('int32')
                         
                         self.generated_features.append(f'{col}_hash')
                         logger.info(f"{col}: 해시 인코딩 완료 (효율 모드)")
                     else:
                         # 일반 모드에서는 해시 + 카운트
-                        X_train[f'{col}_hash'] = X_train[col].astype(str).apply(
-                            lambda x: int(hashlib.md5(x.encode()).hexdigest(), 16) % 1000000
+                        X_train[f'{col}_hash'] = train_values.apply(
+                            lambda x: int(hashlib.md5(str(x).encode()).hexdigest(), 16) % 1000000
                         ).astype('int32')
                         
-                        X_test[f'{col}_hash'] = X_test[col].astype(str).apply(
-                            lambda x: int(hashlib.md5(x.encode()).hexdigest(), 16) % 1000000
+                        X_test[f'{col}_hash'] = test_values.apply(
+                            lambda x: int(hashlib.md5(str(x).encode()).hexdigest(), 16) % 1000000
                         ).astype('int32')
                         
                         # 카운트 인코딩
-                        value_counts = X_train[col].value_counts()
-                        X_train[f'{col}_count'] = X_train[col].map(value_counts).fillna(0).astype('int16')
-                        X_test[f'{col}_count'] = X_test[col].map(value_counts).fillna(0).astype('int16')
+                        value_counts = train_values.value_counts()
+                        X_train[f'{col}_count'] = train_values.map(value_counts).fillna(0).astype('int16')
+                        X_test[f'{col}_count'] = test_values.map(value_counts).fillna(0).astype('int16')
                         
                         self.generated_features.extend([f'{col}_hash', f'{col}_count'])
                         logger.info(f"{col}: 해시 및 카운트 인코딩 완료")
@@ -316,44 +334,36 @@ class CTRFeatureEngineer:
         # 현재 남아있는 범주형 컬럼 재확인
         current_categorical_cols = []
         for col in X_train.columns:
-            if str(X_train[col].dtype) in ['object', 'category', 'string']:
+            dtype_str = str(X_train[col].dtype)
+            if dtype_str in ['object', 'category', 'string'] or X_train[col].dtype.name == 'category':
                 current_categorical_cols.append(col)
         
         for col in current_categorical_cols:
             try:
-                # Categorical 타입 처리
-                if X_train[col].dtype.name == 'category':
-                    # 카테고리에 'missing' 추가
-                    current_categories = X_train[col].cat.categories.tolist()
-                    if 'missing' not in current_categories:
-                        X_train[col] = X_train[col].cat.add_categories(['missing'])
-                    if 'missing' not in X_test[col].cat.categories:
-                        X_test[col] = X_test[col].cat.add_categories(['missing'])
-                
-                # 결측치 처리
-                X_train[col] = X_train[col].fillna('missing')
-                X_test[col] = X_test[col].fillna('missing')
+                # 안전한 문자열 변환
+                train_values = X_train[col].astype('str').fillna('missing')
+                test_values = X_test[col].astype('str').fillna('missing')
                 
                 # 고카디널리티 처리
-                unique_count = X_train[col].nunique()
+                unique_count = len(train_values.unique())
                 max_categories = 100 if self.memory_efficient_mode else 500
                 
                 if unique_count > max_categories:
-                    top_categories = X_train[col].value_counts().head(max_categories).index
-                    X_train[col] = X_train[col].where(X_train[col].isin(top_categories), 'other')
-                    X_test[col] = X_test[col].where(X_test[col].isin(top_categories), 'other')
+                    top_categories = train_values.value_counts().head(max_categories).index
+                    train_values = train_values.where(train_values.isin(top_categories), 'other')
+                    test_values = test_values.where(test_values.isin(top_categories), 'other')
                     logger.info(f"{col}: 고카디널리티 - 상위 {max_categories}개만 유지")
                 
                 # Label Encoding
                 try:
                     le = LabelEncoder()
-                    le.fit(X_train[col].astype(str))
+                    le.fit(train_values)
                     
-                    X_train[f'{col}_encoded'] = le.transform(X_train[col].astype(str)).astype('int16')
+                    X_train[f'{col}_encoded'] = le.transform(train_values).astype('int16')
                     
                     # 테스트 데이터의 미지 카테고리 처리
                     test_encoded = []
-                    for val in X_test[col].astype(str):
+                    for val in test_values:
                         if val in le.classes_:
                             test_encoded.append(le.transform([val])[0])
                         else:
@@ -370,9 +380,9 @@ class CTRFeatureEngineer:
                 
                 # 빈도 인코딩
                 try:
-                    freq_map = X_train[col].value_counts().to_dict()
-                    X_train[f'{col}_freq'] = X_train[col].map(freq_map).fillna(0).astype('int16')
-                    X_test[f'{col}_freq'] = X_test[col].map(freq_map).fillna(0).astype('int16')
+                    freq_map = train_values.value_counts().to_dict()
+                    X_train[f'{col}_freq'] = train_values.map(freq_map).fillna(0).astype('int16')
+                    X_test[f'{col}_freq'] = test_values.map(freq_map).fillna(0).astype('int16')
                     self.generated_features.append(f'{col}_freq')
                     
                 except Exception as e:
@@ -381,13 +391,18 @@ class CTRFeatureEngineer:
                 # 타겟 인코딩 (메모리 효율 모드에서는 스킵)
                 if not self.memory_efficient_mode and len(X_train) > 10000:
                     try:
-                        X_train[f'{col}_target'] = self._safe_target_encoding(
-                            X_train[col], y_train, smoothing=self.config.FEATURE_CONFIG['target_encoding_smoothing']
-                        ).astype('float32')
+                        target_encoding = self._safe_target_encoding(
+                            train_values, y_train, smoothing=self.config.FEATURE_CONFIG['target_encoding_smoothing']
+                        )
+                        X_train[f'{col}_target'] = target_encoding.astype('float32')
                         
-                        target_map = X_train.groupby(col)[f'{col}_target'].mean().to_dict()
+                        target_map = pd.DataFrame({
+                            'category': train_values,
+                            'target': target_encoding
+                        }).groupby('category')['target'].mean().to_dict()
+                        
                         global_mean = y_train.mean()
-                        X_test[f'{col}_target'] = X_test[col].map(target_map).fillna(global_mean).astype('float32')
+                        X_test[f'{col}_target'] = test_values.map(target_map).fillna(global_mean).astype('float32')
                         
                         self.generated_features.append(f'{col}_target')
                         
@@ -426,7 +441,12 @@ class CTRFeatureEngineer:
         
         for train_idx, val_idx in kf.split(series):
             # 훈련 세트에서 타겟 평균 계산
-            train_stats = pd.Series(target.iloc[train_idx], index=series.iloc[train_idx]).groupby(series.iloc[train_idx]).agg(['mean', 'count'])
+            train_stats = pd.DataFrame({
+                'category': series.iloc[train_idx],
+                'target': target.iloc[train_idx]
+            }).groupby('category').agg({'target': ['mean', 'count']})
+            
+            train_stats.columns = ['mean', 'count']
             
             # 스무딩 적용
             smoothed_means = (train_stats['mean'] * train_stats['count'] + global_mean * smoothing) / (train_stats['count'] + smoothing)
@@ -514,7 +534,7 @@ class CTRFeatureEngineer:
                     break
                 
                 # 로그 변환
-                if (X_train[col] > 0).all():
+                if (X_train[col] > 0).all() and (X_test[col] > 0).all():
                     X_train[f'{col}_log'] = np.log1p(X_train[col]).astype('float32')
                     X_test[f'{col}_log'] = np.log1p(X_test[col]).astype('float32')
                     self.generated_features.append(f'{col}_log')

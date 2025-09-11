@@ -628,29 +628,41 @@ class DataValidator:
         dtype_mismatches = []
         
         for col in common_cols:
-            if train_df[col].dtype != test_df[col].dtype:
+            train_dtype = str(train_df[col].dtype)
+            test_dtype = str(test_df[col].dtype)
+            
+            # category와 object 타입은 동일하게 처리
+            if train_dtype == 'category' and test_dtype == 'object':
+                continue
+            if train_dtype == 'object' and test_dtype == 'category':
+                continue
+                
+            if train_dtype != test_dtype:
                 dtype_mismatches.append({
                     'column': col,
-                    'train_dtype': str(train_df[col].dtype),
-                    'test_dtype': str(test_df[col].dtype)
+                    'train_dtype': train_dtype,
+                    'test_dtype': test_dtype
                 })
         
         validation_results['dtype_mismatches'] = dtype_mismatches
         
         # 범위 일관성 검증 (수치형 변수)
         range_issues = []
-        numeric_cols = [col for col in common_cols if train_df[col].dtype in ['int64', 'float64']]
+        numeric_cols = [col for col in common_cols if train_df[col].dtype in ['int64', 'float64', 'int32', 'float32']]
         
         for col in numeric_cols:
-            train_min, train_max = train_df[col].min(), train_df[col].max()
-            test_min, test_max = test_df[col].min(), test_df[col].max()
-            
-            if test_min < train_min or test_max > train_max:
-                range_issues.append({
-                    'column': col,
-                    'train_range': [train_min, train_max],
-                    'test_range': [test_min, test_max]
-                })
+            try:
+                train_min, train_max = train_df[col].min(), train_df[col].max()
+                test_min, test_max = test_df[col].min(), test_df[col].max()
+                
+                if test_min < train_min or test_max > train_max:
+                    range_issues.append({
+                        'column': col,
+                        'train_range': [train_min, train_max],
+                        'test_range': [test_min, test_max]
+                    })
+            except:
+                continue
         
         validation_results['range_issues'] = range_issues
         
@@ -666,13 +678,16 @@ class DataValidator:
         high_correlation_features = []
         
         for col in feature_cols:
-            if df[col].dtype in ['int64', 'float64']:
-                corr = abs(df[col].corr(df[target_col]))
-                if corr > 0.95:
-                    high_correlation_features.append({
-                        'feature': col,
-                        'correlation': corr
-                    })
+            if df[col].dtype in ['int64', 'float64', 'int32', 'float32']:
+                try:
+                    corr = abs(df[col].corr(df[target_col]))
+                    if corr > 0.95:
+                        high_correlation_features.append({
+                            'feature': col,
+                            'correlation': corr
+                        })
+                except:
+                    continue
         
         leakage_results['high_correlation_features'] = high_correlation_features
         
