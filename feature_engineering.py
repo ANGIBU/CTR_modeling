@@ -80,35 +80,38 @@ class CTRFeatureEngineer:
         # 컬럼 타입 분류
         self._classify_columns(X_train)
         
-        # 1. ID 피처 처리
+        # 1. 기본 데이터 타입 통일
+        X_train, X_test = self._unify_data_types(X_train, X_test)
+        
+        # 2. ID 피처 처리
         X_train, X_test = self._process_id_features(X_train, X_test)
         
-        # 2. 기본 피처 정리
+        # 3. 기본 피처 정리
         X_train, X_test = self._clean_basic_features(X_train, X_test)
         
-        # 3. 범주형 피처 인코딩
+        # 4. 범주형 피처 인코딩
         X_train, X_test = self._encode_categorical_features(X_train, X_test, y_train)
         
-        # 4. 수치형 피처 생성 (메모리 모드에 따라)
+        # 5. 수치형 피처 생성 (메모리 모드에 따라)
         if self.memory_efficient_mode:
             X_train, X_test = self._create_essential_features_only(X_train, X_test)
         else:
             X_train, X_test = self._create_numerical_features(X_train, X_test)
         
-        # 5. CTR 특화 피처 생성
+        # 6. CTR 특화 피처 생성
         X_train, X_test = self._create_ctr_features(X_train, X_test, y_train)
         
-        # 6. 상호작용 피처 생성 (메모리 여유가 있을 때만)
+        # 7. 상호작용 피처 생성 (메모리 여유가 있을 때만)
         available_memory = self.get_available_memory()
         if available_memory > 8 and not self.memory_efficient_mode:
             X_train, X_test = self._create_interaction_features(X_train, X_test)
         else:
             logger.info("메모리 절약을 위해 상호작용 피처 생성 건너뛰기")
         
-        # 7. 최종 데이터 정리
+        # 8. 최종 데이터 정리
         X_train, X_test = self._final_data_cleanup(X_train, X_test)
         
-        # 8. 피처 컬럼 순서 일치 보장
+        # 9. 피처 컬럼 순서 일치 보장
         X_train, X_test = self._ensure_consistent_feature_order(X_train, X_test)
         
         # 최종 상태
@@ -116,6 +119,79 @@ class CTRFeatureEngineer:
         final_available = self.get_available_memory()
         logger.info(f"최종 메모리: 사용 {final_memory:.2f} GB, 사용 가능 {final_available:.2f} GB")
         logger.info(f"피처 엔지니어링 완료 - 최종 피처 수: {X_train.shape[1]}")
+        
+        return X_train, X_test
+    
+    def _unify_data_types(self, 
+                         X_train: pd.DataFrame, 
+                         X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """기본 데이터 타입 통일"""
+        logger.info("데이터 타입 통일 시작")
+        
+        try:
+            # 공통 컬럼만 처리
+            common_columns = list(set(X_train.columns) & set(X_test.columns))
+            
+            for col in common_columns:
+                try:
+                    train_dtype = X_train[col].dtype
+                    test_dtype = X_test[col].dtype
+                    
+                    # 타입이 다른 경우 통일
+                    if train_dtype != test_dtype:
+                        logger.info(f"{col}: 타입 불일치 - train: {train_dtype}, test: {test_dtype}")
+                        
+                        # 수치형으로 변환 시도
+                        if pd.api.types.is_numeric_dtype(train_dtype) or pd.api.types.is_numeric_dtype(test_dtype):
+                            # 수치형으로 통일
+                            X_train[col] = pd.to_numeric(X_train[col], errors='coerce').astype('float32')
+                            X_test[col] = pd.to_numeric(X_test[col], errors='coerce').astype('float32')
+                            logger.info(f"{col}: float32로 통일")
+                        else:
+                            # 문자열로 통일
+                            X_train[col] = X_train[col].astype('str')
+                            X_test[col] = X_test[col].astype('str')
+                            logger.info(f"{col}: str로 통일")
+                    
+                    # 동일한 타입이어도 최적화
+                    elif train_dtype == 'object':
+                        # object 타입은 문자열로 명시적 변환
+                        X_train[col] = X_train[col].astype('str')
+                        X_test[col] = X_test[col].astype('str')
+                    elif train_dtype in ['int64', 'float64']:
+                        # 큰 타입은 작은 타입으로 변환
+                        if train_dtype == 'int64':
+                            # 범위 확인 후 적절한 타입 선택
+                            min_val = min(X_train[col].min(), X_test[col].min())
+                            max_val = max(X_train[col].max(), X_test[col].max())
+                            
+                            if pd.isna(min_val) or pd.isna(max_val):
+                                X_train[col] = X_train[col].astype('float32')
+                                X_test[col] = X_test[col].astype('float32')
+                            elif min_val >= 0 and max_val < 65535:
+                                X_train[col] = X_train[col].astype('uint16')
+                                X_test[col] = X_test[col].astype('uint16')
+                            else:
+                                X_train[col] = X_train[col].astype('int32')
+                                X_test[col] = X_test[col].astype('int32')
+                        else:  # float64
+                            X_train[col] = X_train[col].astype('float32')
+                            X_test[col] = X_test[col].astype('float32')
+                
+                except Exception as e:
+                    logger.warning(f"{col} 타입 통일 실패: {str(e)}")
+                    # 실패 시 기본값으로 설정
+                    try:
+                        X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0).astype('float32')
+                        X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0).astype('float32')
+                    except:
+                        X_train[col] = X_train[col].astype('str')
+                        X_test[col] = X_test[col].astype('str')
+            
+            logger.info("데이터 타입 통일 완료")
+            
+        except Exception as e:
+            logger.error(f"데이터 타입 통일 전체 실패: {str(e)}")
         
         return X_train, X_test
     

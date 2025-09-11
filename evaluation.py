@@ -388,7 +388,14 @@ class EvaluationVisualizer:
     
     def __init__(self, figsize: Tuple[int, int] = (12, 8)):
         self.figsize = figsize
-        plt.style.use('seaborn-v0_8')
+        # matplotlib 스타일 설정 수정
+        try:
+            plt.style.use('seaborn-v0_8')
+        except:
+            try:
+                plt.style.use('seaborn')
+            except:
+                plt.style.use('default')
     
     def plot_roc_curves(self, 
                        models_predictions: Dict[str, np.ndarray],
