@@ -245,11 +245,20 @@ class CTRFeatureEngineer:
         
         for col in current_categorical_cols:
             try:
+                # Categorical 타입 처리
+                if X_train[col].dtype.name == 'category':
+                    # 카테고리에 'missing' 추가
+                    current_categories = X_train[col].cat.categories.tolist()
+                    if 'missing' not in current_categories:
+                        X_train[col] = X_train[col].cat.add_categories(['missing'])
+                    if 'missing' not in X_test[col].cat.categories:
+                        X_test[col] = X_test[col].cat.add_categories(['missing'])
+                
                 # 결측치 처리
                 X_train[col] = X_train[col].fillna('missing')
                 X_test[col] = X_test[col].fillna('missing')
                 
-                # 고카디널리티 처리 (메모리 효율 모드에서 더 강하게)
+                # 고카디널리티 처리
                 unique_count = X_train[col].nunique()
                 max_categories = 100 if self.memory_efficient_mode else 500
                 
@@ -336,7 +345,7 @@ class CTRFeatureEngineer:
         from sklearn.model_selection import KFold
         
         result = np.zeros(len(series))
-        kf = KFold(n_splits=3, shuffle=True, random_state=42)  # 메모리 절약을 위해 3폴드로 축소
+        kf = KFold(n_splits=3, shuffle=True, random_state=42)
         global_mean = target.mean()
         
         for train_idx, val_idx in kf.split(series):
@@ -357,12 +366,11 @@ class CTRFeatureEngineer:
         """메모리 효율 모드: 필수 피처만 생성"""
         logger.info("필수 피처만 생성 (메모리 효율 모드)")
         
-        # 현재 수치형 컬럼 재확인 (안전하게)
+        # 현재 수치형 컬럼 재확인
         current_numeric_cols = []
         for col in X_train.columns:
             try:
                 if pd.api.types.is_numeric_dtype(X_train[col]) and not pd.api.types.is_bool_dtype(X_train[col]):
-                    # NaN이 아닌 값들이 충분히 있는지 확인
                     if X_train[col].notna().sum() > len(X_train) * 0.5:
                         current_numeric_cols.append(col)
             except:
@@ -555,10 +563,10 @@ class CTRFeatureEngineer:
         important_features.extend(generated_numeric[:3])
         
         # 중복 제거
-        important_features = list(set(important_features))[:6]  # 메모리 절약을 위해 6개로 제한
+        important_features = list(set(important_features))[:6]
         
         interaction_count = 0
-        max_interactions = 10  # 메모리 절약을 위해 10개로 제한
+        max_interactions = 10
         
         # 곱셈 상호작용
         for i, col1 in enumerate(important_features):

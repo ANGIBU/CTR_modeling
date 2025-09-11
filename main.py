@@ -6,6 +6,7 @@ import time
 import json
 import gc
 import psutil
+import pickle
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -36,10 +37,8 @@ def force_memory_cleanup():
         # Windows 환경에서 안전한 메모리 정리
         import ctypes
         if hasattr(ctypes, 'windll'):
-            # Windows에서만 실행
             ctypes.windll.kernel32.SetProcessWorkingSetSize(-1, -1, -1)
     except Exception as e:
-        # 메모리 정리 실패해도 로깅하지 않음 (너무 빈번함)
         pass
 
 def setup_logging():
@@ -82,17 +81,14 @@ def load_and_preprocess_data(config: Config, quick_mode: bool = False, memory_sa
         available_memory = get_available_memory()
         
         if quick_mode:
-            # 빠른 모드: 매우 작은 샘플
             max_train_size = 50000
             max_test_size = 10000
             logger.info(f"빠른 모드 활성화: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
         elif memory_safe or available_memory < 20:
-            # 메모리 안전 모드
             max_train_size = 200000
             max_test_size = 50000
             logger.info(f"메모리 안전 모드: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
         else:
-            # 일반 모드
             max_train_size = 1000000
             max_test_size = 300000
             logger.info(f"일반 모드: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
@@ -190,6 +186,15 @@ def feature_engineering_pipeline(train_df: pd.DataFrame,
         # 타겟 변수 분리
         y_train = train_df['clicked'].copy()
         
+        # 피처 엔지니어 저장
+        feature_engineer_path = config.MODEL_DIR / "feature_engineer.pkl"
+        try:
+            with open(feature_engineer_path, 'wb') as f:
+                pickle.dump(feature_engineer, f)
+            logger.info(f"피처 엔지니어 저장 완료: {feature_engineer_path}")
+        except Exception as e:
+            logger.warning(f"피처 엔지니어 저장 실패: {str(e)}")
+        
         # 메모리 정리
         del train_df, test_df
         force_memory_cleanup()
@@ -245,7 +250,7 @@ def model_training_pipeline(X_train: pd.DataFrame,
         split_result = data_loader.memory_efficient_train_test_split(X_train, y_train)
         X_train_split, X_val_split, y_train_split, y_val_split = split_result
         
-        # 메모리 정리
+        # 원본 데이터 메모리 정리
         del X_train, y_train
         force_memory_cleanup()
         
