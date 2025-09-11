@@ -335,11 +335,27 @@ class ModelComparator:
             try:
                 scores = []
                 
+                # 인덱스 정렬 및 정리
+                if hasattr(y_true, 'values'):
+                    y_true_array = y_true.values
+                else:
+                    y_true_array = np.array(y_true)
+                
+                if hasattr(y_pred_proba, 'values'):
+                    y_pred_array = y_pred_proba.values
+                else:
+                    y_pred_array = np.array(y_pred_proba)
+                
+                # 배열 길이 맞추기
+                min_len = min(len(y_true_array), len(y_pred_array))
+                y_true_array = y_true_array[:min_len]
+                y_pred_array = y_pred_array[:min_len]
+                
                 for _ in range(n_bootstrap):
                     # 부트스트래핑 샘플링
-                    indices = np.random.choice(len(y_true), size=len(y_true), replace=True)
-                    y_true_bootstrap = y_true[indices]
-                    y_pred_bootstrap = y_pred_proba[indices]
+                    indices = np.random.choice(min_len, size=min_len, replace=True)
+                    y_true_bootstrap = y_true_array[indices]
+                    y_pred_bootstrap = y_pred_array[indices]
                     
                     # 점수 계산
                     score = self.metrics_calculator.combined_score(y_true_bootstrap, y_pred_bootstrap)
@@ -357,6 +373,13 @@ class ModelComparator:
                 
             except Exception as e:
                 logger.error(f"{model_name} 안정성 분석 실패: {str(e)}")
+                stability_results[model_name] = {
+                    'mean_score': 0.0,
+                    'std_score': 0.0,
+                    'ci_lower': 0.0,
+                    'ci_upper': 0.0,
+                    'stability_ratio': 0.0
+                }
         
         return stability_results
 

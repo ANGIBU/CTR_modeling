@@ -172,35 +172,60 @@ class DataLoader:
         """메모리 사용량 최적화를 위한 데이터 타입 변환"""
         logger.info("데이터 타입 최적화 시작")
         
-        # 정수형 최적화
-        int_cols = df.select_dtypes(include=['int64']).columns
-        for col in int_cols:
-            if df[col].min() >= 0:
-                if df[col].max() < 255:
-                    df[col] = df[col].astype('uint8')
-                elif df[col].max() < 65535:
-                    df[col] = df[col].astype('uint16')
-                elif df[col].max() < 4294967295:
-                    df[col] = df[col].astype('uint32')
-            else:
-                if df[col].min() > -128 and df[col].max() < 127:
-                    df[col] = df[col].astype('int8')
-                elif df[col].min() > -32768 and df[col].max() < 32767:
-                    df[col] = df[col].astype('int16')
-                elif df[col].min() > -2147483648 and df[col].max() < 2147483647:
-                    df[col] = df[col].astype('int32')
-        
-        # 실수형 최적화
-        float_cols = df.select_dtypes(include=['float64']).columns
-        for col in float_cols:
-            df[col] = pd.to_numeric(df[col], downcast='float')
-        
-        # 범주형 최적화
-        object_cols = df.select_dtypes(include=['object']).columns
-        for col in object_cols:
-            num_unique = df[col].nunique()
-            if num_unique < df.shape[0] * 0.5:
-                df[col] = df[col].astype('category')
+        try:
+            # 정수형 최적화 (안전하게)
+            int_cols = df.select_dtypes(include=['int64']).columns
+            for col in int_cols:
+                try:
+                    if df[col].isnull().any():
+                        # NaN이 있으면 float32로 변환
+                        df[col] = df[col].astype('float32')
+                        continue
+                    
+                    col_min, col_max = df[col].min(), df[col].max()
+                    if col_min >= 0:
+                        if col_max < 255:
+                            df[col] = df[col].astype('uint8')
+                        elif col_max < 65535:
+                            df[col] = df[col].astype('uint16')
+                        elif col_max < 4294967295:
+                            df[col] = df[col].astype('uint32')
+                    else:
+                        if col_min > -128 and col_max < 127:
+                            df[col] = df[col].astype('int8')
+                        elif col_min > -32768 and col_max < 32767:
+                            df[col] = df[col].astype('int16')
+                        elif col_min > -2147483648 and col_max < 2147483647:
+                            df[col] = df[col].astype('int32')
+                except Exception as e:
+                    logger.warning(f"{col} 정수형 최적화 실패: {str(e)}")
+                    continue
+            
+            # 실수형 최적화 (안전하게)
+            float_cols = df.select_dtypes(include=['float64']).columns
+            for col in float_cols:
+                try:
+                    df[col] = df[col].astype('float32')
+                except Exception as e:
+                    logger.warning(f"{col} 실수형 최적화 실패: {str(e)}")
+                    continue
+            
+            # 범주형 최적화 (안전하게)
+            object_cols = df.select_dtypes(include=['object']).columns
+            for col in object_cols:
+                try:
+                    num_unique = df[col].nunique()
+                    total_count = len(df)
+                    
+                    # 카디널리티가 낮고 메모리 절약이 예상될 때만 변환
+                    if num_unique < total_count * 0.3 and num_unique > 1:
+                        df[col] = df[col].astype('category')
+                except Exception as e:
+                    logger.warning(f"{col} 범주형 최적화 실패: {str(e)}")
+                    continue
+            
+        except Exception as e:
+            logger.error(f"데이터 타입 최적화 전체 실패: {str(e)}")
         
         logger.info("데이터 타입 최적화 완료")
         return df

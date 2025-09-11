@@ -32,10 +32,14 @@ def get_available_memory() -> float:
 def force_memory_cleanup():
     """강제 메모리 정리"""
     gc.collect()
-    import ctypes
     try:
-        ctypes.CDLL("kernel32.dll").SetProcessWorkingSetSize(-1, -1, -1)
-    except:
+        # Windows 환경에서 안전한 메모리 정리
+        import ctypes
+        if hasattr(ctypes, 'windll'):
+            # Windows에서만 실행
+            ctypes.windll.kernel32.SetProcessWorkingSetSize(-1, -1, -1)
+    except Exception as e:
+        # 메모리 정리 실패해도 로깅하지 않음 (너무 빈번함)
         pass
 
 def setup_logging():

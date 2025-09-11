@@ -357,22 +357,46 @@ class CTRFeatureEngineer:
         """메모리 효율 모드: 필수 피처만 생성"""
         logger.info("필수 피처만 생성 (메모리 효율 모드)")
         
-        # 현재 수치형 컬럼 재확인
+        # 현재 수치형 컬럼 재확인 (안전하게)
         current_numeric_cols = []
         for col in X_train.columns:
-            if X_train[col].dtype in ['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64',
-                                    'float16', 'float32', 'float64']:
-                current_numeric_cols.append(col)
+            try:
+                if pd.api.types.is_numeric_dtype(X_train[col]) and not pd.api.types.is_bool_dtype(X_train[col]):
+                    # NaN이 아닌 값들이 충분히 있는지 확인
+                    if X_train[col].notna().sum() > len(X_train) * 0.5:
+                        current_numeric_cols.append(col)
+            except:
+                continue
         
         # 중요한 컬럼만 선택 (최대 5개)
         selected_cols = current_numeric_cols[:5]
         
         for col in selected_cols:
             try:
+                # 데이터 유효성 검사
+                train_valid = X_train[col].notna()
+                test_valid = X_test[col].notna()
+                
+                if train_valid.sum() == 0 or test_valid.sum() == 0:
+                    continue
+                
                 # 로그 변환 (안전한 경우만)
-                if (X_train[col] > 0).all():
-                    X_train[f'{col}_log'] = np.log1p(X_train[col]).astype('float32')
-                    X_test[f'{col}_log'] = np.log1p(X_test[col]).astype('float32')
+                train_positive = (X_train[col] > 0) & train_valid
+                test_positive = (X_test[col] > 0) & test_valid
+                
+                if train_positive.sum() > len(X_train) * 0.8 and test_positive.sum() > len(X_test) * 0.8:
+                    X_train[f'{col}_log'] = np.where(
+                        train_positive,
+                        np.log1p(X_train[col]),
+                        0
+                    ).astype('float32')
+                    
+                    X_test[f'{col}_log'] = np.where(
+                        test_positive,
+                        np.log1p(X_test[col]),
+                        0
+                    ).astype('float32')
+                    
                     self.generated_features.append(f'{col}_log')
                 
             except Exception as e:
