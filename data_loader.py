@@ -59,12 +59,6 @@ class DataLoader:
             # 학습 데이터 로딩 및 샘플링
             logger.info("학습 데이터 로딩 시작")
             
-            # 전체 파일 크기 확인을 위한 사전 로딩
-            train_sample = pd.read_parquet(self.config.TRAIN_PATH, nrows=1000)
-            logger.info(f"학습 데이터 사전 확인 완료")
-            del train_sample
-            gc.collect()
-            
             # 전체 학습 데이터 로딩
             logger.info("전체 학습 데이터 로딩 중")
             train_df_full = pd.read_parquet(self.config.TRAIN_PATH)
@@ -86,12 +80,6 @@ class DataLoader:
             
             # 테스트 데이터 로딩 및 샘플링
             logger.info("테스트 데이터 로딩 시작")
-            
-            # 테스트 데이터 사전 확인
-            test_sample = pd.read_parquet(self.config.TEST_PATH, nrows=1000)
-            logger.info(f"테스트 데이터 사전 확인 완료")
-            del test_sample
-            gc.collect()
             
             # 전체 테스트 데이터 로딩
             logger.info("전체 테스트 데이터 로딩 중")
