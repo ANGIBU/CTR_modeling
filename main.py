@@ -16,7 +16,7 @@ from data_loader import DataLoader, DataValidator
 from feature_engineering import FeatureEngineer
 from training import ModelTrainer, TrainingPipeline
 from evaluation import CTRMetrics, ModelComparator, EvaluationReporter
-from ensemble import EnsembleManager
+from ensemble import CTREnsembleManager
 from inference import CTRPredictionAPI
 from models import ModelFactory
 
@@ -28,7 +28,7 @@ def get_memory_usage() -> float:
 def setup_logging():
     """로깅 설정"""
     logger = Config.setup_logging()
-    logger.info("=== 파이프라인 시작 ===")
+    logger.info("=== CTR 모델 파이프라인 시작 ===")
     return logger
 
 def memory_monitor_decorator(func):
@@ -48,7 +48,7 @@ def memory_monitor_decorator(func):
 
 @memory_monitor_decorator
 def load_and_preprocess_data(config: Config, memory_limit: float = 50.0) -> tuple:
-    """메모리 모니터링과 함께 데이터 로딩 및 전처리"""
+    """데이터 로딩 및 전처리"""
     logger = logging.getLogger(__name__)
     logger.info("데이터 로딩 및 전처리 단계 시작")
     
@@ -93,7 +93,7 @@ def load_and_preprocess_data(config: Config, memory_limit: float = 50.0) -> tupl
         
         if 'target_distribution' in train_summary:
             ctr = train_summary['target_distribution']['ctr']
-            logger.info(f"전체 CTR: {ctr:.4f}")
+            logger.info(f"실제 CTR: {ctr:.4f}")
         
         # 데이터 검증
         validator = DataValidator()
@@ -122,7 +122,7 @@ def feature_engineering_pipeline(train_df: pd.DataFrame,
                                 test_df: pd.DataFrame,
                                 config: Config,
                                 memory_limit: float = 55.0) -> tuple:
-    """메모리 제한을 고려한 피처 엔지니어링 파이프라인"""
+    """CTR 특화 피처 엔지니어링 파이프라인"""
     logger = logging.getLogger(__name__)
     logger.info("피처 엔지니어링 단계 시작")
     
@@ -134,7 +134,7 @@ def feature_engineering_pipeline(train_df: pd.DataFrame,
         if initial_memory > memory_limit * 0.8:
             logger.warning(f"높은 메모리 사용량으로 인한 제한적 피처 엔지니어링 수행")
         
-        # 피처 엔지니어 초기화
+        # CTR 특화 피처 엔지니어 초기화
         feature_engineer = FeatureEngineer(config)
         
         # 피처 생성 (메모리 최적화됨)
@@ -177,7 +177,7 @@ def model_training_pipeline(X_train: pd.DataFrame,
                            config: Config,
                            tune_hyperparameters: bool = True,
                            memory_safe_mode: bool = False) -> tuple:
-    """메모리 안전 모드를 포함한 모델 학습 파이프라인"""
+    """CTR 특화 모델 학습 파이프라인"""
     logger = logging.getLogger(__name__)
     logger.info("모델 학습 단계 시작")
     
@@ -203,7 +203,7 @@ def model_training_pipeline(X_train: pd.DataFrame,
         # 학습 파이프라인 초기화
         training_pipeline = TrainingPipeline(config)
         
-        # 데이터 분할
+        # 시간적 순서를 고려한 데이터 분할
         data_loader = DataLoader(config)
         X_train_split, X_val_split, y_train_split, y_val_split = \
             data_loader.train_test_split_data(
@@ -214,7 +214,7 @@ def model_training_pipeline(X_train: pd.DataFrame,
         del X_train
         gc.collect()
         
-        # 전체 학습 파이프라인 실행
+        # CTR 특화 전체 학습 파이프라인 실행
         pipeline_results = training_pipeline.run_full_pipeline(
             X_train_split, y_train_split,
             X_val_split, y_val_split,
@@ -226,7 +226,7 @@ def model_training_pipeline(X_train: pd.DataFrame,
         logger.info(f"학습 완료된 모델 수: {pipeline_results['model_count']}")
         if 'best_model' in pipeline_results:
             best = pipeline_results['best_model']
-            logger.info(f"최고 성능 모델: {best['name']} (점수: {best['score']:.4f})")
+            logger.info(f"최고 성능 모델: {best['name']} (Combined Score: {best['score']:.4f})")
         
         logger.info("모델 학습 완료")
         return training_pipeline.trainer, X_val_split, y_val_split
@@ -241,8 +241,8 @@ def ensemble_pipeline(trainer: ModelTrainer,
                      X_val: pd.DataFrame,
                      y_val: pd.Series,
                      config: Config,
-                     memory_safe_mode: bool = False) -> EnsembleManager:
-    """메모리 안전 모드 앙상블 파이프라인"""
+                     memory_safe_mode: bool = False) -> CTREnsembleManager:
+    """CTR 특화 앙상블 파이프라인"""
     logger = logging.getLogger(__name__)
     logger.info("앙상블 단계 시작")
     
@@ -250,8 +250,8 @@ def ensemble_pipeline(trainer: ModelTrainer,
         # 메모리 체크
         memory_usage = get_memory_usage()
         
-        # 앙상블 매니저 초기화
-        ensemble_manager = EnsembleManager(config)
+        # CTR 특화 앙상블 매니저 초기화
+        ensemble_manager = CTREnsembleManager(config)
         
         # 학습된 모델들 추가
         for model_name, model_info in trainer.trained_models.items():
@@ -274,7 +274,7 @@ def ensemble_pipeline(trainer: ModelTrainer,
         # 앙상블 학습
         ensemble_manager.train_all_ensembles(X_val, y_val)
         
-        # 앙상블 평가
+        # Combined Score 기준 앙상블 평가
         ensemble_results = ensemble_manager.evaluate_ensembles(X_val, y_val)
         
         # 결과 출력
@@ -319,7 +319,7 @@ def safe_pipeline_execution(args, config: Config, logger):
             
             logger.info(f"샘플링 크기 - 학습: {train_sample_size:,}, 테스트: {test_sample_size:,}")
         
-        # 2. 피처 엔지니어링
+        # 2. CTR 특화 피처 엔지니어링
         X_train, X_test, y_train, feature_engineer = feature_engineering_pipeline(
             train_df, test_df, config, memory_limit
         )
@@ -328,14 +328,14 @@ def safe_pipeline_execution(args, config: Config, logger):
         del train_df, test_df
         gc.collect()
         
-        # 3. 모델 학습
+        # 3. CTR 특화 모델 학습
         trainer, X_val, y_val = model_training_pipeline(
             X_train, y_train, config, 
             tune_hyperparameters=not args.no_tune and not memory_safe_mode,
             memory_safe_mode=memory_safe_mode
         )
         
-        # 4. 앙상블 (메모리 여유가 있을 때만)
+        # 4. CTR 특화 앙상블 (메모리 여유가 있을 때만)
         ensemble_manager = None
         if get_memory_usage() < memory_limit * 0.8:
             ensemble_manager = ensemble_pipeline(trainer, X_val, y_val, config, memory_safe_mode)
@@ -371,7 +371,7 @@ def safe_pipeline_execution(args, config: Config, logger):
         raise
 
 def generate_predictions(trainer: ModelTrainer,
-                        ensemble_manager: EnsembleManager,
+                        ensemble_manager: CTREnsembleManager,
                         X_test: pd.DataFrame,
                         config: Config,
                         test_sample_indices: Optional[np.ndarray] = None) -> pd.DataFrame:
@@ -433,29 +433,9 @@ def generate_predictions(trainer: ModelTrainer,
         logger.info(f"검증 완료 - X_test 형태: {X_test.shape}")
         logger.info(f"검증 완료 - X_test 데이터 타입: {X_test.dtypes.value_counts().to_dict()}")
         
-        # 모델 피처 수 요구사항 확인 및 맞춤
+        # 모델 예측 수행
         if ensemble_manager and ensemble_manager.best_ensemble is not None:
             logger.info("앙상블 모델로 예측 수행")
-            
-            # 기본 모델들의 피처 수 확인
-            expected_features = None
-            for model_name, model in ensemble_manager.base_models.items():
-                try:
-                    # LightGBM 모델의 피처 수 확인
-                    if hasattr(model, 'model') and hasattr(model.model, 'feature_name'):
-                        expected_features = len(model.model.feature_name())
-                        break
-                    elif hasattr(model, 'model') and hasattr(model.model, 'n_features_in_'):
-                        expected_features = model.model.n_features_in_
-                        break
-                except:
-                    continue
-            
-            if expected_features and expected_features != X_test.shape[1]:
-                logger.warning(f"피처 수 불일치: 모델 기대 {expected_features}, 실제 {X_test.shape[1]}")
-                X_test = _fix_feature_count(X_test, expected_features)
-                logger.info(f"피처 수 보정 완료: {X_test.shape[1]}")
-            
             predictions = ensemble_manager.predict_with_best_ensemble(X_test)
         else:
             # 최고 성능 단일 모델 사용
@@ -471,24 +451,6 @@ def generate_predictions(trainer: ModelTrainer,
             if best_model_name:
                 best_model = trainer.trained_models[best_model_name]['model']
                 logger.info(f"사용할 모델: {best_model_name}")
-                
-                # 모델이 기대하는 피처 수 확인
-                expected_features = None
-                try:
-                    if hasattr(best_model, 'model') and hasattr(best_model.model, 'feature_name'):
-                        expected_features = len(best_model.model.feature_name())
-                    elif hasattr(best_model, 'model') and hasattr(best_model.model, 'n_features_in_'):
-                        expected_features = best_model.model.n_features_in_
-                    elif hasattr(best_model, 'n_features_in_'):
-                        expected_features = best_model.n_features_in_
-                except:
-                    pass
-                
-                if expected_features and expected_features != X_test.shape[1]:
-                    logger.warning(f"피처 수 불일치: 모델 기대 {expected_features}, 실제 {X_test.shape[1]}")
-                    X_test = _fix_feature_count(X_test, expected_features)
-                    logger.info(f"피처 수 보정 완료: {X_test.shape[1]}")
-                
                 predictions = best_model.predict_proba(X_test)
             else:
                 raise ValueError("사용 가능한 모델이 없습니다.")
@@ -496,8 +458,8 @@ def generate_predictions(trainer: ModelTrainer,
         # 샘플링 모드에 따른 제출 파일 생성
         if is_sampled:
             logger.info("샘플링 모드: 기본값으로 초기화 후 샘플 예측값만 할당")
-            # 전체를 기본값(예: 평균 CTR)으로 초기화
-            default_ctr = 0.0191  # 로그에서 확인된 전체 CTR
+            # 전체를 기본값(실제 CTR)으로 초기화
+            default_ctr = 0.0191
             submission['clicked'] = default_ctr
             
             # 샘플링된 인덱스가 있으면 해당 위치에만 예측값 할당
@@ -534,31 +496,6 @@ def generate_predictions(trainer: ModelTrainer,
             logger.error(f"X_test 컬럼 샘플: {list(X_test.columns[:10])}")
         raise
 
-
-def _fix_feature_count(X_test: pd.DataFrame, expected_features: int) -> pd.DataFrame:
-    """피처 수를 모델이 기대하는 수에 맞춤"""
-    logger = logging.getLogger(__name__)
-    
-    current_features = X_test.shape[1]
-    
-    if current_features < expected_features:
-        # 부족한 피처를 0으로 채움
-        missing_count = expected_features - current_features
-        logger.info(f"부족한 피처 {missing_count}개를 0으로 채움")
-        
-        for i in range(missing_count):
-            X_test[f'missing_feature_{i}'] = 0.0
-            
-    elif current_features > expected_features:
-        # 초과하는 피처 제거 (마지막 컬럼들부터)
-        excess_count = current_features - expected_features
-        logger.info(f"초과하는 피처 {excess_count}개 제거")
-        
-        cols_to_remove = X_test.columns[-excess_count:]
-        X_test = X_test.drop(columns=cols_to_remove)
-    
-    return X_test
-
 def evaluation_pipeline(trainer: ModelTrainer,
                        X_val: pd.DataFrame,
                        y_val: pd.Series,
@@ -576,14 +513,14 @@ def evaluation_pipeline(trainer: ModelTrainer,
             pred = model.predict_proba(X_val)
             models_predictions[model_name] = pred
         
-        # 모델 비교
+        # Combined Score 기준 모델 비교
         comparator = ModelComparator()
         comparison_df = comparator.compare_models(models_predictions, y_val)
         
         logger.info("모델 성능 비교:")
         logger.info(f"\n{comparison_df[['combined_score', 'ap', 'wll', 'auc', 'f1']].round(4)}")
         
-        # 종합 평가 보고서 생성 (메모리 제한으로 차트 생성은 스킵)
+        # 종합 평가 보고서 생성
         reporter = EvaluationReporter()
         report = reporter.generate_comprehensive_report(
             models_predictions, y_val,

@@ -14,7 +14,7 @@ class Config:
     LOG_DIR = BASE_DIR / "logs"
     OUTPUT_DIR = BASE_DIR / "output"
     
-    # 데이터 파일 경로 (상대 경로로 수정)
+    # 데이터 파일 경로
     TRAIN_PATH = "./train.parquet"
     TEST_PATH = "./test.parquet"
     SUBMISSION_PATH = "./sample_submission.csv"
@@ -24,45 +24,56 @@ class Config:
     N_SPLITS = 5
     TEST_SIZE = 0.2
     
-    # LightGBM 기본 파라미터
+    # LightGBM 기본 파라미터 (CTR 특화)
     LGBM_PARAMS = {
         'objective': 'binary',
         'metric': 'binary_logloss',
         'boosting_type': 'gbdt',
-        'num_leaves': 31,
+        'num_leaves': 127,
         'learning_rate': 0.05,
         'feature_fraction': 0.9,
         'bagging_fraction': 0.8,
         'bagging_freq': 5,
+        'min_child_samples': 100,
+        'min_child_weight': 5,
+        'lambda_l1': 0.1,
+        'lambda_l2': 0.1,
         'verbose': -1,
         'random_state': RANDOM_STATE,
         'n_estimators': 1000,
-        'early_stopping_rounds': 100
+        'early_stopping_rounds': 100,
+        'is_unbalance': True
     }
     
-    # XGBoost 기본 파라미터
+    # XGBoost 기본 파라미터 (CTR 특화)
     XGB_PARAMS = {
         'objective': 'binary:logistic',
         'eval_metric': 'logloss',
-        'max_depth': 6,
+        'max_depth': 8,
         'learning_rate': 0.05,
         'subsample': 0.8,
         'colsample_bytree': 0.8,
+        'min_child_weight': 10,
+        'reg_alpha': 0.1,
+        'reg_lambda': 0.1,
+        'scale_pos_weight': 51.2,  # 1/0.0191 - 1
         'random_state': RANDOM_STATE,
         'n_estimators': 1000,
         'early_stopping_rounds': 100
     }
     
-    # CatBoost 기본 파라미터
+    # CatBoost 기본 파라미터 (CTR 특화)
     CAT_PARAMS = {
         'loss_function': 'Logloss',
         'eval_metric': 'Logloss',
-        'depth': 6,
+        'depth': 8,
         'learning_rate': 0.05,
         'iterations': 1000,
+        'l2_leaf_reg': 3,
         'random_seed': RANDOM_STATE,
         'early_stopping_rounds': 100,
-        'verbose': False
+        'verbose': False,
+        'auto_class_weights': 'Balanced'
     }
     
     # 신경망 모델 파라미터
@@ -81,14 +92,18 @@ class Config:
         'frequency_threshold': 10,
         'interaction_features': True,
         'time_features': True,
-        'statistical_features': True
+        'statistical_features': True,
+        'preserve_ids': True,  # ID 피처 보존
+        'id_hash_features': True  # ID 해시 피처 생성
     }
     
-    # 평가 설정
+    # 평가 설정 (실제 CTR 반영)
     EVALUATION_CONFIG = {
         'ap_weight': 0.5,
         'wll_weight': 0.5,
-        'class_weight_ratio': 0.5  # WLL에서 클래스 가중치
+        'actual_ctr': 0.0191,  # 실제 관찰된 CTR
+        'pos_weight': 0.0191,
+        'neg_weight': 0.9809
     }
     
     # 앙상블 설정
@@ -114,7 +129,7 @@ class Config:
     # 실시간 추론 설정
     INFERENCE_CONFIG = {
         'batch_size': 1000,
-        'timeout': 100,  # 밀리초
+        'timeout': 100,
         'cache_size': 10000,
         'model_version': 'v1.0'
     }

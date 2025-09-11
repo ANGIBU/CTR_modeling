@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import threading
 from collections import OrderedDict
+import hashlib
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -70,13 +71,14 @@ class ModelCache:
             'cache_size': len(self.cache)
         }
 
-class FeatureCache:
-    """피처 캐싱 시스템"""
+class CTRFeatureCache:
+    """CTR 예측용 피처 캐싱 시스템"""
     
     def __init__(self, max_size: int = 10000):
         self.user_features = ModelCache(max_size)
         self.ad_features = ModelCache(max_size)
         self.context_features = ModelCache(max_size)
+        self.interaction_features = ModelCache(max_size)
     
     def get_user_features(self, user_id: str) -> Optional[Dict[str, Any]]:
         """사용자 피처 조회"""
@@ -94,20 +96,31 @@ class FeatureCache:
         """광고 피처 캐싱"""
         self.ad_features.put(ad_id, features)
     
+    def get_interaction_features(self, user_id: str, ad_id: str) -> Optional[Dict[str, Any]]:
+        """사용자-광고 상호작용 피처 조회"""
+        interaction_key = f"{user_id}_{ad_id}"
+        return self.interaction_features.get(interaction_key)
+    
+    def cache_interaction_features(self, user_id: str, ad_id: str, features: Dict[str, Any]):
+        """사용자-광고 상호작용 피처 캐싱"""
+        interaction_key = f"{user_id}_{ad_id}"
+        self.interaction_features.put(interaction_key, features)
+    
     def clear_all(self):
         """모든 캐시 초기화"""
         self.user_features.clear()
         self.ad_features.clear()
         self.context_features.clear()
+        self.interaction_features.clear()
 
-class RealTimeInferenceEngine:
-    """실시간 추론 엔진"""
+class CTRInferenceEngine:
+    """CTR 예측 특화 실시간 추론 엔진"""
     
     def __init__(self, config: Config = Config):
         self.config = config
         self.models = {}
         self.feature_engineer = None
-        self.feature_cache = FeatureCache(
+        self.feature_cache = CTRFeatureCache(
             max_size=config.INFERENCE_CONFIG['cache_size']
         )
         self.is_loaded = False
@@ -116,25 +129,60 @@ class RealTimeInferenceEngine:
             'successful_predictions': 0,
             'failed_predictions': 0,
             'average_latency': 0.0,
-            'cache_hit_rate': 0.0
+            'cache_hit_rate': 0.0,
+            'ctr_predictions': []
         }
         self.lock = threading.Lock()
         
-        # 추론용 기본 피처 설정
-        self.default_numeric_features = [
-            'feat_e_1', 'feat_e_3', 'feat_e_4', 'feat_e_5', 'feat_e_6', 'feat_e_7',
-            'feat_e_8', 'feat_e_9', 'feat_e_10', 'feat_d_1', 'feat_d_2', 'feat_d_3',
-            'feat_d_4', 'feat_d_5', 'feat_d_6', 'feat_c_1', 'feat_c_2', 'feat_c_3',
-            'feat_c_4', 'feat_c_5', 'feat_c_6', 'feat_c_7', 'feat_c_8',
-            'feat_b_1', 'feat_b_2', 'feat_b_3', 'feat_b_4', 'feat_b_5', 'feat_b_6'
-        ]
+        # CTR 예측용 기본 피처 설정
+        self.default_numeric_features = self._get_default_features()
         
-        # 추론 시 카테고리 매핑
+        # CTR 예측용 카테고리 매핑
         self.category_mappings = {
             'gender': {'male': 1, 'female': 2, 'unknown': 0},
             'age_group': {'18-24': 1, '25-34': 2, '35-44': 3, '45-54': 4, '55-64': 5, '65+': 6, 'unknown': 0},
             'device': {'mobile': 1, 'desktop': 2, 'tablet': 3, 'unknown': 0},
-            'page': {'home': 1, 'search': 2, 'product': 3, 'checkout': 4, 'unknown': 0}
+            'page': {'home': 1, 'search': 2, 'product': 3, 'checkout': 4, 'category': 5, 'unknown': 0},
+            'time_of_day': {'morning': 1, 'afternoon': 2, 'evening': 3, 'night': 4, 'unknown': 0},
+            'day_of_week': {'monday': 1, 'tuesday': 2, 'wednesday': 3, 'thursday': 4, 
+                          'friday': 5, 'saturday': 6, 'sunday': 7, 'unknown': 0}
+        }
+        
+        # CTR 도메인 지식 기반 기본값
+        self.ctr_baseline = 0.0191  # 실제 관찰된 CTR
+    
+    def _get_default_features(self) -> Dict[str, float]:
+        """CTR 예측용 기본 피처 값"""
+        return {
+            'feat_e_1': 65.0,
+            'feat_e_3': 5.0,
+            'feat_e_4': -0.05,
+            'feat_e_5': -0.02,
+            'feat_e_6': -0.04,
+            'feat_e_7': 21.0,
+            'feat_e_8': -172.0,
+            'feat_e_9': -10.0,
+            'feat_e_10': -270.0,
+            'feat_d_1': 0.39,
+            'feat_d_2': 1.93,
+            'feat_d_3': 1.76,
+            'feat_d_4': 6.0,
+            'feat_d_5': -0.29,
+            'feat_d_6': -0.41,
+            'feat_c_1': 0.0,
+            'feat_c_2': 0.0,
+            'feat_c_3': 0.0,
+            'feat_c_4': 0.0,
+            'feat_c_5': 0.0,
+            'feat_c_6': 0.0,
+            'feat_c_7': 0.0,
+            'feat_c_8': 0.0,
+            'feat_b_1': 0.0,
+            'feat_b_2': 0.0,
+            'feat_b_3': 0.0,
+            'feat_b_4': 0.0,
+            'feat_b_5': 0.0,
+            'feat_b_6': 0.0
         }
     
     def load_models(self, model_dir: Path = None) -> bool:
@@ -157,30 +205,121 @@ class RealTimeInferenceEngine:
             for model_file in model_files:
                 model_name = model_file.stem.replace('_model', '')
                 
-                with open(model_file, 'rb') as f:
-                    model = pickle.load(f)
-                
-                self.models[model_name] = model
-                logger.info(f"{model_name} 모델 로딩 완료")
+                try:
+                    with open(model_file, 'rb') as f:
+                        model = pickle.load(f)
+                    
+                    self.models[model_name] = model
+                    logger.info(f"{model_name} 모델 로딩 완료")
+                except Exception as e:
+                    logger.error(f"{model_name} 모델 로딩 실패: {str(e)}")
+                    continue
             
             # 피처 엔지니어 로딩
             feature_engineer_path = model_dir / "feature_engineer.pkl"
             if feature_engineer_path.exists():
-                with open(feature_engineer_path, 'rb') as f:
-                    self.feature_engineer = pickle.load(f)
-                logger.info("피처 엔지니어 로딩 완료")
+                try:
+                    with open(feature_engineer_path, 'rb') as f:
+                        self.feature_engineer = pickle.load(f)
+                    logger.info("피처 엔지니어 로딩 완료")
+                except Exception as e:
+                    logger.warning(f"피처 엔지니어 로딩 실패: {str(e)}")
+                    self.feature_engineer = FeatureEngineer(self.config)
             else:
                 logger.warning("피처 엔지니어 파일이 없습니다. 새로 생성합니다.")
                 self.feature_engineer = FeatureEngineer(self.config)
             
-            self.is_loaded = True
+            self.is_loaded = len(self.models) > 0
             logger.info(f"총 {len(self.models)}개 모델 로딩 완료")
             
-            return True
+            return self.is_loaded
             
         except Exception as e:
             logger.error(f"모델 로딩 실패: {str(e)}")
             return False
+    
+    def _create_ctr_features(self, input_data: Dict[str, Any]) -> pd.DataFrame:
+        """CTR 예측용 피처 생성"""
+        try:
+            # 기본 피처로 초기화
+            features = self.default_numeric_features.copy()
+            
+            # 사용자 ID 해시 피처
+            if 'user_id' in input_data:
+                user_hash = int(hashlib.md5(str(input_data['user_id']).encode()).hexdigest(), 16) % 1000000
+                features['user_hash'] = user_hash
+                features['user_id_encoded'] = hash(str(input_data['user_id'])) % 10000
+            
+            # 광고 ID 해시 피처
+            if 'ad_id' in input_data:
+                ad_hash = int(hashlib.md5(str(input_data['ad_id']).encode()).hexdigest(), 16) % 1000000
+                features['ad_hash'] = ad_hash
+                features['ad_id_encoded'] = hash(str(input_data['ad_id'])) % 10000
+            
+            # 컨텍스트 피처 처리
+            context = input_data.get('context', {})
+            
+            # 디바이스 타입
+            device = context.get('device', 'unknown')
+            features['device_encoded'] = self.category_mappings['device'].get(device.lower(), 0)
+            
+            # 페이지 타입
+            page = context.get('page', 'unknown')
+            features['page_encoded'] = self.category_mappings['page'].get(page.lower(), 0)
+            
+            # 시간대 정보
+            hour = context.get('hour', 12)
+            features['hour'] = hour
+            features['is_morning'] = 1 if 6 <= hour < 12 else 0
+            features['is_afternoon'] = 1 if 12 <= hour < 18 else 0
+            features['is_evening'] = 1 if 18 <= hour < 22 else 0
+            features['is_night'] = 1 if hour >= 22 or hour < 6 else 0
+            
+            # 요일 정보
+            day_of_week = context.get('day_of_week', 'unknown')
+            features['day_of_week_encoded'] = self.category_mappings['day_of_week'].get(day_of_week.lower(), 0)
+            features['is_weekend'] = 1 if day_of_week.lower() in ['saturday', 'sunday'] else 0
+            
+            # 사용자-광고 상호작용 피처
+            if 'user_id' in input_data and 'ad_id' in input_data:
+                interaction_hash = hash(f"{input_data['user_id']}_{input_data['ad_id']}") % 100000
+                features['user_ad_interaction'] = interaction_hash
+            
+            # 세션 내 위치 (가상)
+            features['session_position'] = context.get('position', 1)
+            features['is_first_position'] = 1 if context.get('position', 1) == 1 else 0
+            
+            # 시간적 피처 (현재 시점 기준)
+            current_time = time.time()
+            features['time_index'] = (current_time % 86400) / 86400  # 하루 내 시간 비율
+            
+            # 추가 컨텍스트 피처들
+            for key, value in context.items():
+                if key not in ['device', 'page', 'hour', 'day_of_week', 'position']:
+                    try:
+                        # 수치형 변환 시도
+                        features[f'context_{key}'] = float(value)
+                    except:
+                        # 문자열은 해시로 변환
+                        features[f'context_{key}'] = hash(str(value)) % 1000
+            
+            # DataFrame 생성
+            df = pd.DataFrame([features])
+            
+            # 데이터 타입 통일
+            for col in df.columns:
+                try:
+                    df[col] = df[col].astype('float32')
+                except:
+                    df[col] = 0.0
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"CTR 피처 생성 실패: {str(e)}")
+            # 기본 피처만 반환
+            df = pd.DataFrame([self.default_numeric_features])
+            return df.astype('float32')
     
     def _adjust_feature_count(self, df: pd.DataFrame) -> pd.DataFrame:
         """모델이 기대하는 피처 수에 맞춤"""
@@ -198,6 +337,10 @@ class RealTimeInferenceEngine:
                         # XGBoost
                         elif hasattr(model.model, 'get_booster'):
                             expected_features = model.model.get_booster().num_features()
+                            break
+                        # CatBoost
+                        elif hasattr(model.model, 'feature_names_'):
+                            expected_features = len(model.model.feature_names_)
                             break
                         # 기타 sklearn 스타일
                         elif hasattr(model.model, 'n_features_in_'):
@@ -239,60 +382,10 @@ class RealTimeInferenceEngine:
             logger.error(f"피처 수 조정 실패: {str(e)}")
             return df
     
-    def preprocess_input(self, input_data: Dict[str, Any]) -> pd.DataFrame:
-        """입력 데이터 전처리 (수치형으로 변환)"""
-        try:
-            # DataFrame으로 변환
-            if isinstance(input_data, dict):
-                df = pd.DataFrame([input_data])
-            elif isinstance(input_data, list):
-                df = pd.DataFrame(input_data)
-            else:
-                df = input_data.copy()
-            
-            # 범주형 데이터를 수치형으로 변환
-            for col in df.columns:
-                if df[col].dtype == 'object':
-                    if col in self.category_mappings:
-                        # 사전 정의된 매핑 사용
-                        df[col] = df[col].map(self.category_mappings[col]).fillna(0)
-                    else:
-                        # 문자열을 해시값으로 변환
-                        try:
-                            df[col] = pd.to_numeric(df[col], errors='coerce')
-                            if df[col].isnull().any():
-                                # 수치 변환 실패 시 해시 사용
-                                df[col] = df[col].astype(str).apply(lambda x: hash(str(x)) % 1000000)
-                        except:
-                            df[col] = 0
-                else:
-                    df[col] = df[col].fillna(0)
-            
-            # 기본 피처들 추가 (없는 경우)
-            for feature in self.default_numeric_features:
-                if feature not in df.columns:
-                    df[feature] = 0.0
-            
-            # 데이터 타입을 float32로 통일
-            for col in df.columns:
-                try:
-                    df[col] = df[col].astype('float32')
-                except:
-                    df[col] = 0.0
-            
-            # 모델이 기대하는 피처 수에 맞춤
-            df = self._adjust_feature_count(df)
-            
-            return df
-            
-        except Exception as e:
-            logger.error(f"입력 데이터 전처리 실패: {str(e)}")
-            raise
-    
     def predict_single(self, 
                       input_data: Dict[str, Any],
                       model_name: Optional[str] = None) -> Dict[str, Any]:
-        """단일 샘플 예측"""
+        """단일 CTR 예측"""
         
         start_time = time.time()
         
@@ -304,8 +397,8 @@ class RealTimeInferenceEngine:
             if not self.is_loaded:
                 raise ValueError("모델이 로딩되지 않았습니다.")
             
-            # 전처리
-            df = self.preprocess_input(input_data)
+            # CTR 특화 피처 생성
+            df = self._create_ctr_features(input_data)
             
             # 모델 선택
             if model_name is None:
@@ -317,12 +410,36 @@ class RealTimeInferenceEngine:
             
             model = self.models[model_name]
             
-            # 피처 수가 부족한 경우 기본값으로 채움
+            # 피처 수 조정
             df = self._adjust_feature_count(df)
             
-            # 예측 수행
-            prediction_proba = model.predict_proba(df)[0]
+            # CTR 예측 수행
+            try:
+                prediction_proba = model.predict_proba(df)[0]
+                
+                # CTR 값 검증 및 보정
+                prediction_proba = max(0.0001, min(0.9999, prediction_proba))
+                
+            except Exception as e:
+                logger.warning(f"모델 예측 실패, 기본값 사용: {str(e)}")
+                prediction_proba = self.ctr_baseline
+            
             prediction_binary = int(prediction_proba >= 0.5)
+            
+            # CTR 예측 신뢰도 계산
+            confidence = abs(prediction_proba - 0.5) * 2
+            
+            # CTR 카테고리 분류
+            if prediction_proba < 0.01:
+                ctr_category = 'very_low'
+            elif prediction_proba < 0.02:
+                ctr_category = 'low'
+            elif prediction_proba < 0.05:
+                ctr_category = 'medium'
+            elif prediction_proba < 0.1:
+                ctr_category = 'high'
+            else:
+                ctr_category = 'very_high'
             
             # 응답 시간 계산
             latency = (time.time() - start_time) * 1000  # 밀리초
@@ -330,19 +447,26 @@ class RealTimeInferenceEngine:
             # 통계 업데이트
             with self.lock:
                 self.inference_stats['successful_predictions'] += 1
+                self.inference_stats['ctr_predictions'].append(prediction_proba)
+                # 최근 1000개만 유지
+                if len(self.inference_stats['ctr_predictions']) > 1000:
+                    self.inference_stats['ctr_predictions'] = self.inference_stats['ctr_predictions'][-1000:]
                 self._update_average_latency(latency)
             
             result = {
-                'click_probability': float(prediction_proba),
+                'ctr_prediction': float(prediction_proba),
                 'predicted_click': prediction_binary,
+                'confidence': float(confidence),
+                'ctr_category': ctr_category,
                 'model_used': model_name,
                 'latency_ms': latency,
+                'recommendation': 'show' if prediction_proba > self.ctr_baseline else 'skip',
                 'timestamp': time.time()
             }
             
             # 로그 (낮은 빈도로)
             if self.inference_stats['total_requests'] % 1000 == 0:
-                logger.info(f"예측 완료 (누적: {self.inference_stats['total_requests']}회)")
+                logger.info(f"CTR 예측 완료 (누적: {self.inference_stats['total_requests']}회)")
             
             return result
             
@@ -350,13 +474,16 @@ class RealTimeInferenceEngine:
             with self.lock:
                 self.inference_stats['failed_predictions'] += 1
             
-            logger.error(f"예측 실패: {str(e)}")
+            logger.error(f"CTR 예측 실패: {str(e)}")
             
             return {
-                'click_probability': 0.0,
+                'ctr_prediction': self.ctr_baseline,
                 'predicted_click': 0,
+                'confidence': 0.0,
+                'ctr_category': 'low',
                 'model_used': model_name or 'unknown',
                 'latency_ms': (time.time() - start_time) * 1000,
+                'recommendation': 'skip',
                 'error': str(e),
                 'timestamp': time.time()
             }
@@ -365,12 +492,12 @@ class RealTimeInferenceEngine:
                      input_data: List[Dict[str, Any]],
                      model_name: Optional[str] = None,
                      batch_size: int = None) -> List[Dict[str, Any]]:
-        """배치 예측"""
+        """배치 CTR 예측"""
         
         if batch_size is None:
             batch_size = self.config.INFERENCE_CONFIG['batch_size']
         
-        logger.info(f"배치 예측 시작: {len(input_data)}개 샘플")
+        logger.info(f"배치 CTR 예측 시작: {len(input_data)}개 샘플")
         
         results = []
         
@@ -379,8 +506,14 @@ class RealTimeInferenceEngine:
             batch = input_data[i:i + batch_size]
             
             try:
-                # DataFrame으로 변환
-                df = self.preprocess_input(batch)
+                # 배치 피처 생성
+                batch_features = []
+                for item in batch:
+                    df = self._create_ctr_features(item)
+                    batch_features.append(df)
+                
+                # DataFrame 결합
+                combined_df = pd.concat(batch_features, ignore_index=True)
                 
                 # 모델 선택
                 if model_name is None:
@@ -388,41 +521,71 @@ class RealTimeInferenceEngine:
                 
                 model = self.models[model_name]
                 
+                # 피처 수 조정
+                combined_df = self._adjust_feature_count(combined_df)
+                
                 # 배치 예측
                 start_time = time.time()
-                predictions_proba = model.predict_proba(df)
+                try:
+                    predictions_proba = model.predict_proba(combined_df)
+                    # CTR 값 검증 및 보정
+                    predictions_proba = np.clip(predictions_proba, 0.0001, 0.9999)
+                except Exception as e:
+                    logger.warning(f"배치 모델 예측 실패, 기본값 사용: {str(e)}")
+                    predictions_proba = np.full(len(batch), self.ctr_baseline)
+                
                 predictions_binary = (predictions_proba >= 0.5).astype(int)
                 latency = (time.time() - start_time) * 1000
                 
                 # 결과 구성
-                for j, (prob, binary) in enumerate(zip(predictions_proba, predictions_binary)):
+                for j, (item, prob, binary) in enumerate(zip(batch, predictions_proba, predictions_binary)):
+                    confidence = abs(prob - 0.5) * 2
+                    
+                    # CTR 카테고리 분류
+                    if prob < 0.01:
+                        ctr_category = 'very_low'
+                    elif prob < 0.02:
+                        ctr_category = 'low'
+                    elif prob < 0.05:
+                        ctr_category = 'medium'
+                    elif prob < 0.1:
+                        ctr_category = 'high'
+                    else:
+                        ctr_category = 'very_high'
+                    
                     result = {
-                        'click_probability': float(prob),
+                        'ctr_prediction': float(prob),
                         'predicted_click': int(binary),
+                        'confidence': float(confidence),
+                        'ctr_category': ctr_category,
                         'model_used': model_name,
                         'batch_latency_ms': latency,
                         'batch_index': i + j,
+                        'recommendation': 'show' if prob > self.ctr_baseline else 'skip',
                         'timestamp': time.time()
                     }
                     results.append(result)
                 
             except Exception as e:
-                logger.error(f"배치 {i//batch_size + 1} 예측 실패: {str(e)}")
+                logger.error(f"배치 {i//batch_size + 1} CTR 예측 실패: {str(e)}")
                 
                 # 오류 발생 시 기본값으로 채움
                 for j in range(len(batch)):
                     result = {
-                        'click_probability': 0.0,
+                        'ctr_prediction': self.ctr_baseline,
                         'predicted_click': 0,
+                        'confidence': 0.0,
+                        'ctr_category': 'low',
                         'model_used': model_name or 'unknown',
                         'batch_latency_ms': 0.0,
                         'batch_index': i + j,
+                        'recommendation': 'skip',
                         'error': str(e),
                         'timestamp': time.time()
                     }
                     results.append(result)
         
-        logger.info(f"배치 예측 완료: {len(results)}개 결과")
+        logger.info(f"배치 CTR 예측 완료: {len(results)}개 결과")
         return results
     
     def _update_average_latency(self, new_latency: float):
@@ -435,7 +598,7 @@ class RealTimeInferenceEngine:
         self.inference_stats['average_latency'] = new_avg
     
     def get_inference_stats(self) -> Dict[str, Any]:
-        """추론 통계 반환"""
+        """CTR 예측 통계 반환"""
         stats = self.inference_stats.copy()
         
         # 성공률 계산
@@ -446,6 +609,26 @@ class RealTimeInferenceEngine:
         else:
             stats['success_rate'] = 0.0
             stats['failure_rate'] = 0.0
+        
+        # CTR 예측 통계
+        if stats['ctr_predictions']:
+            ctr_preds = np.array(stats['ctr_predictions'])
+            stats['ctr_mean'] = float(ctr_preds.mean())
+            stats['ctr_std'] = float(ctr_preds.std())
+            stats['ctr_min'] = float(ctr_preds.min())
+            stats['ctr_max'] = float(ctr_preds.max())
+            stats['ctr_percentiles'] = {
+                'p50': float(np.percentile(ctr_preds, 50)),
+                'p90': float(np.percentile(ctr_preds, 90)),
+                'p95': float(np.percentile(ctr_preds, 95)),
+                'p99': float(np.percentile(ctr_preds, 99))
+            }
+        else:
+            stats['ctr_mean'] = 0.0
+            stats['ctr_std'] = 0.0
+            stats['ctr_min'] = 0.0
+            stats['ctr_max'] = 0.0
+            stats['ctr_percentiles'] = {}
         
         # 캐시 통계 추가
         cache_stats = self.feature_cache.user_features.get_stats()
@@ -461,7 +644,8 @@ class RealTimeInferenceEngine:
             'available_models': list(self.models.keys()),
             'feature_engineer_loaded': self.feature_engineer is not None,
             'cache_size': len(self.feature_cache.user_features.cache),
-            'system_status': 'healthy' if self.is_loaded else 'not_ready'
+            'system_status': 'healthy' if self.is_loaded else 'not_ready',
+            'ctr_baseline': self.ctr_baseline
         }
 
 class CTRPredictionAPI:
@@ -469,7 +653,7 @@ class CTRPredictionAPI:
     
     def __init__(self, config: Config = Config):
         self.config = config
-        self.engine = RealTimeInferenceEngine(config)
+        self.engine = CTRInferenceEngine(config)
         self.api_stats = {
             'api_calls': 0,
             'api_errors': 0,
@@ -477,7 +661,7 @@ class CTRPredictionAPI:
         }
     
     def initialize(self, model_dir: Path = None) -> bool:
-        """API 초기화"""
+        """CTR 예측 API 초기화"""
         logger.info("CTR 예측 API 초기화 시작")
         
         success = self.engine.load_models(model_dir)
@@ -499,64 +683,25 @@ class CTRPredictionAPI:
         self.api_stats['api_calls'] += 1
         
         try:
-            # 입력 데이터 구성 (모든 값을 수치형으로 처리)
-            input_data = {}
-            
-            # 사용자 ID를 해시값으로 변환
-            try:
-                input_data['user_hash'] = hash(str(user_id)) % 1000000
-            except:
-                input_data['user_hash'] = 0
-            
-            # 광고 ID를 해시값으로 변환
-            try:
-                input_data['ad_hash'] = hash(str(ad_id)) % 1000000
-            except:
-                input_data['ad_hash'] = 0
-            
-            # 컨텍스트 추가 (수치형으로 변환)
-            if context:
-                for key, value in context.items():
-                    try:
-                        # 숫자로 변환 시도
-                        input_data[key] = float(value)
-                    except:
-                        # 변환 실패 시 해시값 사용
-                        input_data[key] = hash(str(value)) % 1000
-            
-            # 기본 피처들 추가
-            default_features = {
-                'feat_e_1': 65.0,
-                'feat_e_3': 5.0,
-                'feat_e_4': -0.05,
-                'feat_e_5': -0.02,
-                'feat_e_6': -0.04,
-                'feat_e_7': 21.0,
-                'feat_e_8': -172.0,
-                'feat_e_9': -10.0,
-                'feat_e_10': -270.0,
-                'feat_d_1': 0.39,
-                'feat_d_2': 1.93,
-                'feat_d_3': 1.76,
-                'feat_d_4': 6.0,
-                'feat_d_5': -0.29,
-                'feat_d_6': -0.41
+            # 입력 데이터 구성
+            input_data = {
+                'user_id': user_id,
+                'ad_id': ad_id,
+                'context': context or {}
             }
             
-            for key, value in default_features.items():
-                if key not in input_data:
-                    input_data[key] = value
-            
-            # 예측 수행
+            # CTR 예측 수행
             result = self.engine.predict_single(input_data, model_name)
             
             # API 응답 형태로 변환
             api_response = {
                 'user_id': user_id,
                 'ad_id': ad_id,
-                'ctr_prediction': result['click_probability'],
-                'recommendation': 'show' if result['predicted_click'] else 'skip',
-                'confidence': abs(result['click_probability'] - 0.5) * 2,  # 0~1 사이 신뢰도
+                'ctr_prediction': result['ctr_prediction'],
+                'recommendation': result['recommendation'],
+                'confidence': result['confidence'],
+                'ctr_category': result['ctr_category'],
+                'expected_revenue': result['ctr_prediction'] * context.get('bid_amount', 1.0) if context else result['ctr_prediction'],
                 'model_info': {
                     'model_name': result['model_used'],
                     'version': self.config.INFERENCE_CONFIG['model_version']
@@ -576,9 +721,11 @@ class CTRPredictionAPI:
             return {
                 'user_id': user_id,
                 'ad_id': ad_id,
-                'ctr_prediction': 0.0,
+                'ctr_prediction': self.engine.ctr_baseline,
                 'recommendation': 'skip',
                 'confidence': 0.0,
+                'ctr_category': 'low',
+                'expected_revenue': 0.0,
                 'error': str(e),
                 'model_info': {
                     'model_name': 'unknown',
@@ -600,24 +747,11 @@ class CTRPredictionAPI:
         # 입력 데이터 변환
         input_data = []
         for req in requests:
-            input_item = {}
-            
-            # 기본 정보
-            try:
-                input_item['user_hash'] = hash(str(req.get('user_id', ''))) % 1000000
-                input_item['ad_hash'] = hash(str(req.get('ad_id', ''))) % 1000000
-            except:
-                input_item['user_hash'] = 0
-                input_item['ad_hash'] = 0
-            
-            # 추가 컨텍스트
-            context = req.get('context', {})
-            for key, value in context.items():
-                try:
-                    input_item[key] = float(value)
-                except:
-                    input_item[key] = hash(str(value)) % 1000
-            
+            input_item = {
+                'user_id': req.get('user_id', ''),
+                'ad_id': req.get('ad_id', ''),
+                'context': req.get('context', {})
+            }
             input_data.append(input_item)
         
         # 배치 예측 수행
@@ -626,12 +760,15 @@ class CTRPredictionAPI:
         # API 응답 형태로 변환
         api_responses = []
         for i, (req, pred) in enumerate(zip(requests, predictions)):
+            context = req.get('context', {})
             response = {
                 'user_id': req.get('user_id', ''),
                 'ad_id': req.get('ad_id', ''),
-                'ctr_prediction': pred['click_probability'],
-                'recommendation': 'show' if pred['predicted_click'] else 'skip',
-                'confidence': abs(pred['click_probability'] - 0.5) * 2,
+                'ctr_prediction': pred['ctr_prediction'],
+                'recommendation': pred['recommendation'],
+                'confidence': pred['confidence'],
+                'ctr_category': pred['ctr_category'],
+                'expected_revenue': pred['ctr_prediction'] * context.get('bid_amount', 1.0),
                 'batch_index': i,
                 'model_info': {
                     'model_name': pred['model_used'],
@@ -665,7 +802,7 @@ class CTRPredictionAPI:
         
         return status
 
-def create_prediction_service(config: Config = Config) -> CTRPredictionAPI:
+def create_ctr_prediction_service(config: Config = Config) -> CTRPredictionAPI:
     """CTR 예측 서비스 생성 팩토리 함수"""
     
     logger.info("CTR 예측 서비스 생성")
@@ -686,18 +823,25 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     
     # 서비스 생성
-    service = create_prediction_service()
+    service = create_ctr_prediction_service()
     
     if service:
         # 상태 확인
         status = service.get_api_status()
         print("API 상태:", json.dumps(status, indent=2))
         
-        # 단일 예측 테스트
+        # 단일 CTR 예측 테스트
         test_prediction = service.predict_ctr(
             user_id="test_user_123",
             ad_id="test_ad_456",
-            context={'device': 'mobile', 'page': 'home'}
+            context={
+                'device': 'mobile', 
+                'page': 'home',
+                'hour': 14,
+                'day_of_week': 'tuesday',
+                'position': 1,
+                'bid_amount': 0.5
+            }
         )
         
-        print("예측 결과:", json.dumps(test_prediction, indent=2))
+        print("CTR 예측 결과:", json.dumps(test_prediction, indent=2))

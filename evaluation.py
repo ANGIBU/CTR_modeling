@@ -22,7 +22,9 @@ class CTRMetrics:
         self.config = config
         self.ap_weight = config.EVALUATION_CONFIG['ap_weight']
         self.wll_weight = config.EVALUATION_CONFIG['wll_weight']
-        self.class_weight_ratio = config.EVALUATION_CONFIG['class_weight_ratio']
+        self.actual_ctr = config.EVALUATION_CONFIG['actual_ctr']
+        self.pos_weight = config.EVALUATION_CONFIG['pos_weight']
+        self.neg_weight = config.EVALUATION_CONFIG['neg_weight']
     
     def average_precision(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
         """Average Precision (AP) 계산"""
@@ -34,16 +36,16 @@ class CTRMetrics:
             return 0.0
     
     def weighted_log_loss(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """Weighted Log Loss (WLL) 계산 - 클래스 균형화"""
+        """실제 CTR 분포를 반영한 Weighted Log Loss"""
         try:
-            # 클래스 가중치 계산
-            pos_weight = self.class_weight_ratio
-            neg_weight = 1 - self.class_weight_ratio
+            # 실제 CTR 기반 클래스 가중치
+            pos_weight = self.pos_weight
+            neg_weight = self.neg_weight
             
             # 각 샘플별 가중치 적용
             sample_weights = np.where(y_true == 1, pos_weight, neg_weight)
             
-            # 로그 손실 계산 (클립핑으로 수치 안정성 확보)
+            # 확률 클리핑으로 수치 안정성 확보
             y_pred_proba_clipped = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
             
             # 가중 로그 손실 직접 계산
@@ -64,8 +66,8 @@ class CTRMetrics:
             ap_score = self.average_precision(y_true, y_pred_proba)
             wll_score = self.weighted_log_loss(y_true, y_pred_proba)
             
-            # WLL을 0-1 스케일로 변환 (1/(1+WLL))
-            wll_normalized = 1 / (1 + wll_score)
+            # WLL을 0-1 스케일로 변환
+            wll_normalized = 1 / (1 + wll_score) if wll_score != float('inf') else 0.0
             
             # 최종 점수 계산
             combined = self.ap_weight * ap_score + self.wll_weight * wll_normalized
@@ -115,10 +117,35 @@ class CTRMetrics:
             metrics['ctr_actual'] = y_true.mean()
             metrics['ctr_predicted'] = y_pred_proba.mean()
             metrics['ctr_bias'] = metrics['ctr_predicted'] - metrics['ctr_actual']
+            metrics['ctr_ratio'] = metrics['ctr_predicted'] / max(metrics['ctr_actual'], 1e-10)
             
             # 분포 관련 지표
             metrics['prediction_std'] = y_pred_proba.std()
             metrics['prediction_entropy'] = self._calculate_entropy(y_pred_proba)
+            
+            # 클래스별 예측 품질
+            pos_mask = (y_true == 1)
+            neg_mask = (y_true == 0)
+            
+            if pos_mask.any():
+                metrics['pos_mean_pred'] = y_pred_proba[pos_mask].mean()
+                metrics['pos_std_pred'] = y_pred_proba[pos_mask].std()
+            else:
+                metrics['pos_mean_pred'] = 0.0
+                metrics['pos_std_pred'] = 0.0
+                
+            if neg_mask.any():
+                metrics['neg_mean_pred'] = y_pred_proba[neg_mask].mean()
+                metrics['neg_std_pred'] = y_pred_proba[neg_mask].std()
+            else:
+                metrics['neg_mean_pred'] = 0.0
+                metrics['neg_std_pred'] = 0.0
+            
+            # 분리도 지표
+            if pos_mask.any() and neg_mask.any():
+                metrics['separation'] = metrics['pos_mean_pred'] - metrics['neg_mean_pred']
+            else:
+                metrics['separation'] = 0.0
             
         except Exception as e:
             logger.error(f"종합 평가 계산 오류: {str(e)}")
@@ -152,10 +179,10 @@ class CTRMetrics:
     def find_optimal_threshold(self, 
                              y_true: np.ndarray, 
                              y_pred_proba: np.ndarray,
-                             metric: str = 'f1') -> Tuple[float, float]:
+                             metric: str = 'combined') -> Tuple[float, float]:
         """최적 임계값 찾기"""
         
-        thresholds = np.arange(0.1, 0.9, 0.01)
+        thresholds = np.arange(0.01, 0.99, 0.01)
         best_threshold = 0.5
         best_score = 0.0
         
@@ -182,6 +209,57 @@ class CTRMetrics:
                 best_threshold = threshold
         
         return best_threshold, best_score
+    
+    def calculate_calibration_metrics(self, y_true: np.ndarray, y_pred_proba: np.ndarray, n_bins: int = 10) -> Dict[str, float]:
+        """모델 보정 지표 계산"""
+        try:
+            # 빈 경계 설정
+            bin_boundaries = np.linspace(0, 1, n_bins + 1)
+            bin_lowers = bin_boundaries[:-1]
+            bin_uppers = bin_boundaries[1:]
+            
+            bin_accuracies = []
+            bin_confidences = []
+            bin_counts = []
+            
+            for bin_lower, bin_upper in zip(bin_lowers, bin_uppers):
+                # 빈에 속하는 샘플 찾기
+                in_bin = (y_pred_proba > bin_lower) & (y_pred_proba <= bin_upper)
+                prop_in_bin = in_bin.mean()
+                
+                if prop_in_bin > 0:
+                    accuracy_in_bin = y_true[in_bin].mean()
+                    avg_confidence_in_bin = y_pred_proba[in_bin].mean()
+                    
+                    bin_accuracies.append(accuracy_in_bin)
+                    bin_confidences.append(avg_confidence_in_bin)
+                    bin_counts.append(in_bin.sum())
+                else:
+                    bin_accuracies.append(0)
+                    bin_confidences.append(0)
+                    bin_counts.append(0)
+            
+            # ECE (Expected Calibration Error) 계산
+            bin_accuracies = np.array(bin_accuracies)
+            bin_confidences = np.array(bin_confidences)
+            bin_counts = np.array(bin_counts)
+            
+            ece = np.sum(bin_counts * np.abs(bin_accuracies - bin_confidences)) / len(y_true)
+            
+            # MCE (Maximum Calibration Error) 계산
+            mce = np.max(np.abs(bin_accuracies - bin_confidences))
+            
+            return {
+                'ece': ece,
+                'mce': mce,
+                'bin_accuracies': bin_accuracies.tolist(),
+                'bin_confidences': bin_confidences.tolist(),
+                'bin_counts': bin_counts.tolist()
+            }
+            
+        except Exception as e:
+            logger.error(f"보정 지표 계산 오류: {str(e)}")
+            return {'ece': 0.0, 'mce': 0.0}
 
 class ModelComparator:
     """다중 모델 비교 클래스"""
@@ -244,6 +322,43 @@ class ModelComparator:
         best_score = self.comparison_results.loc[best_idx, metric]
         
         return best_idx, best_score
+    
+    def analyze_model_stability(self, 
+                              models_predictions: Dict[str, np.ndarray],
+                              y_true: np.ndarray,
+                              n_bootstrap: int = 100) -> Dict[str, Dict[str, float]]:
+        """모델 안정성 분석 (부트스트래핑)"""
+        
+        stability_results = {}
+        
+        for model_name, y_pred_proba in models_predictions.items():
+            try:
+                scores = []
+                
+                for _ in range(n_bootstrap):
+                    # 부트스트래핑 샘플링
+                    indices = np.random.choice(len(y_true), size=len(y_true), replace=True)
+                    y_true_bootstrap = y_true[indices]
+                    y_pred_bootstrap = y_pred_proba[indices]
+                    
+                    # 점수 계산
+                    score = self.metrics_calculator.combined_score(y_true_bootstrap, y_pred_bootstrap)
+                    scores.append(score)
+                
+                scores = np.array(scores)
+                
+                stability_results[model_name] = {
+                    'mean_score': scores.mean(),
+                    'std_score': scores.std(),
+                    'ci_lower': np.percentile(scores, 2.5),
+                    'ci_upper': np.percentile(scores, 97.5),
+                    'stability_ratio': 1 - (scores.std() / scores.mean()) if scores.mean() > 0 else 0
+                }
+                
+            except Exception as e:
+                logger.error(f"{model_name} 안정성 분석 실패: {str(e)}")
+        
+        return stability_results
 
 class EvaluationVisualizer:
     """평가 결과 시각화 클래스"""
@@ -409,6 +524,9 @@ class EvaluationReporter:
         # 최고 성능 모델
         best_model, best_score = comparator.get_best_model()
         
+        # 안정성 분석
+        stability_results = comparator.analyze_model_stability(models_predictions, y_true, n_bootstrap=50)
+        
         # 보고서 데이터 구성
         report = {
             'summary': {
@@ -416,10 +534,12 @@ class EvaluationReporter:
                 'best_model': best_model,
                 'best_score': best_score,
                 'data_size': len(y_true),
-                'actual_ctr': y_true.mean()
+                'actual_ctr': y_true.mean(),
+                'target_score': 0.34624  # 목표 점수
             },
-            'detailed_comparison': comparison_df.to_dict(),
-            'model_rankings': comparator.rank_models().to_dict()
+            'detailed_comparison': comparison_df.to_dict() if not comparison_df.empty else {},
+            'model_rankings': comparator.rank_models().to_dict() if not comparison_df.empty else {},
+            'stability_analysis': stability_results
         }
         
         # 시각화 생성 (출력 디렉터리가 지정된 경우)
@@ -427,30 +547,34 @@ class EvaluationReporter:
             import os
             os.makedirs(output_dir, exist_ok=True)
             
-            # ROC 곡선
-            self.visualizer.plot_roc_curves(
-                models_predictions, y_true,
-                save_path=f"{output_dir}/roc_curves.png"
-            )
-            
-            # PR 곡선
-            self.visualizer.plot_precision_recall_curves(
-                models_predictions, y_true,
-                save_path=f"{output_dir}/pr_curves.png"
-            )
-            
-            # 모델 비교
-            self.visualizer.plot_model_comparison(
-                comparison_df,
-                save_path=f"{output_dir}/model_comparison.png"
-            )
-            
-            # 최고 모델의 예측 분포
-            if best_model and best_model in models_predictions:
-                self.visualizer.plot_prediction_distribution(
-                    y_true, models_predictions[best_model], best_model,
-                    save_path=f"{output_dir}/prediction_distribution.png"
+            try:
+                # ROC 곡선
+                self.visualizer.plot_roc_curves(
+                    models_predictions, y_true,
+                    save_path=f"{output_dir}/roc_curves.png"
                 )
+                
+                # PR 곡선
+                self.visualizer.plot_precision_recall_curves(
+                    models_predictions, y_true,
+                    save_path=f"{output_dir}/pr_curves.png"
+                )
+                
+                # 모델 비교
+                if not comparison_df.empty:
+                    self.visualizer.plot_model_comparison(
+                        comparison_df,
+                        save_path=f"{output_dir}/model_comparison.png"
+                    )
+                
+                # 최고 모델의 예측 분포
+                if best_model and best_model in models_predictions:
+                    self.visualizer.plot_prediction_distribution(
+                        y_true, models_predictions[best_model], best_model,
+                        save_path=f"{output_dir}/prediction_distribution.png"
+                    )
+            except Exception as e:
+                logger.warning(f"시각화 생성 중 오류: {str(e)}")
         
         logger.info("종합 평가 보고서 생성 완료")
         

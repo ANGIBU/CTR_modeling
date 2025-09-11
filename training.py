@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import time
 
-from sklearn.model_selection import StratifiedKFold, RandomizedSearchCV, GridSearchCV
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import make_scorer
 import optuna
 from optuna.samplers import TPESampler
@@ -70,19 +70,15 @@ class ModelTrainer:
                            y: pd.Series,
                            cv_folds: int = None,
                            params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """교차검증을 통한 모델 평가"""
+        """시간적 순서를 고려한 교차검증 모델 평가"""
         
         if cv_folds is None:
             cv_folds = self.config.N_SPLITS
         
         logger.info(f"{model_type} 모델 {cv_folds}폴드 교차검증 시작")
         
-        # 계층화된 K-Fold 설정
-        skf = StratifiedKFold(
-            n_splits=cv_folds,
-            shuffle=True,
-            random_state=self.config.RANDOM_STATE
-        )
+        # 시간적 순서를 고려한 교차검증
+        tscv = TimeSeriesSplit(n_splits=cv_folds)
         
         cv_scores = {
             'ap_scores': [],
@@ -95,7 +91,7 @@ class ModelTrainer:
         metrics_calculator = CTRMetrics()
         
         # 각 폴드별 학습 및 평가
-        for fold, (train_idx, val_idx) in enumerate(skf.split(X, y)):
+        for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
             logger.info(f"폴드 {fold + 1}/{cv_folds} 시작")
             
             # 데이터 분할
@@ -156,29 +152,31 @@ class ModelTrainer:
                                    y: pd.Series,
                                    n_trials: int = 100,
                                    cv_folds: int = 3) -> Dict[str, Any]:
-        """Optuna를 사용한 하이퍼파라미터 튜닝"""
+        """CTR 특화 하이퍼파라미터 튜닝"""
         
         logger.info(f"{model_type} 모델 하이퍼파라미터 튜닝 시작 (trials: {n_trials})")
         
         def objective(trial):
-            # 모델 타입별 하이퍼파라미터 공간 정의
+            # 모델 타입별 CTR 특화 하이퍼파라미터 공간
             if model_type.lower() == 'lightgbm':
                 params = {
                     'objective': 'binary',
                     'metric': 'binary_logloss',
                     'boosting_type': 'gbdt',
-                    'num_leaves': trial.suggest_int('num_leaves', 10, 300),
+                    'num_leaves': trial.suggest_int('num_leaves', 31, 255),
                     'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
-                    'feature_fraction': trial.suggest_float('feature_fraction', 0.4, 1.0),
-                    'bagging_fraction': trial.suggest_float('bagging_fraction', 0.4, 1.0),
-                    'bagging_freq': trial.suggest_int('bagging_freq', 1, 7),
-                    'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
+                    'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 1.0),
+                    'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 1.0),
+                    'bagging_freq': trial.suggest_int('bagging_freq', 1, 10),
+                    'min_child_samples': trial.suggest_int('min_child_samples', 20, 300),
+                    'min_child_weight': trial.suggest_float('min_child_weight', 1, 20),
                     'lambda_l1': trial.suggest_float('lambda_l1', 0, 10),
                     'lambda_l2': trial.suggest_float('lambda_l2', 0, 10),
                     'verbose': -1,
                     'random_state': self.config.RANDOM_STATE,
                     'n_estimators': 1000,
-                    'early_stopping_rounds': 100
+                    'early_stopping_rounds': 100,
+                    'is_unbalance': True
                 }
             
             elif model_type.lower() == 'xgboost':
@@ -189,11 +187,27 @@ class ModelTrainer:
                     'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
                     'subsample': trial.suggest_float('subsample', 0.5, 1.0),
                     'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+                    'min_child_weight': trial.suggest_float('min_child_weight', 1, 20),
                     'reg_alpha': trial.suggest_float('reg_alpha', 0, 10),
                     'reg_lambda': trial.suggest_float('reg_lambda', 0, 10),
+                    'scale_pos_weight': trial.suggest_float('scale_pos_weight', 30, 70),
                     'random_state': self.config.RANDOM_STATE,
                     'n_estimators': 1000,
                     'early_stopping_rounds': 100
+                }
+            
+            elif model_type.lower() == 'catboost':
+                params = {
+                    'loss_function': 'Logloss',
+                    'eval_metric': 'Logloss',
+                    'depth': trial.suggest_int('depth', 4, 10),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
+                    'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1, 10),
+                    'iterations': 1000,
+                    'random_seed': self.config.RANDOM_STATE,
+                    'early_stopping_rounds': 100,
+                    'verbose': False,
+                    'auto_class_weights': 'Balanced'
                 }
             
             elif model_type.lower() == 'deepctr':
@@ -220,7 +234,7 @@ class ModelTrainer:
             # 교차검증 수행
             cv_result = self.cross_validate_model(model_type, X, y, cv_folds, params)
             
-            # 목적함수 값 반환 (최대화하려는 지표)
+            # Combined Score 최적화
             return cv_result['combined_mean']
         
         # Optuna 스터디 생성
@@ -258,7 +272,7 @@ class ModelTrainer:
         """모든 모델 학습"""
         
         if model_types is None:
-            model_types = ['lightgbm', 'xgboost']  # CatBoost 제거
+            model_types = ['lightgbm', 'xgboost', 'catboost']
         
         logger.info(f"모든 모델 학습 시작: {model_types}")
         
@@ -266,8 +280,11 @@ class ModelTrainer:
         
         for model_type in model_types:
             try:
-                # 최적 파라미터가 있으면 사용
-                params = self.best_params.get(model_type, None)
+                # 최적 파라미터가 있으면 사용, 없으면 CTR 특화 기본 파라미터 사용
+                if model_type in self.best_params:
+                    params = self.best_params[model_type]
+                else:
+                    params = self._get_ctr_optimized_params(model_type)
                 
                 # 모델 학습
                 model = self.train_single_model(
@@ -283,6 +300,64 @@ class ModelTrainer:
         logger.info(f"모든 모델 학습 완료. 성공한 모델: {list(trained_models.keys())}")
         
         return trained_models
+    
+    def _get_ctr_optimized_params(self, model_type: str) -> Dict[str, Any]:
+        """CTR 예측에 특화된 기본 파라미터"""
+        
+        if model_type.lower() == 'lightgbm':
+            return {
+                'objective': 'binary',
+                'metric': 'binary_logloss',
+                'boosting_type': 'gbdt',
+                'num_leaves': 127,
+                'learning_rate': 0.05,
+                'feature_fraction': 0.9,
+                'bagging_fraction': 0.8,
+                'bagging_freq': 5,
+                'min_child_samples': 100,
+                'min_child_weight': 5,
+                'lambda_l1': 0.1,
+                'lambda_l2': 0.1,
+                'verbose': -1,
+                'random_state': self.config.RANDOM_STATE,
+                'n_estimators': 1000,
+                'early_stopping_rounds': 100,
+                'is_unbalance': True
+            }
+        
+        elif model_type.lower() == 'xgboost':
+            return {
+                'objective': 'binary:logistic',
+                'eval_metric': 'logloss',
+                'max_depth': 8,
+                'learning_rate': 0.05,
+                'subsample': 0.8,
+                'colsample_bytree': 0.8,
+                'min_child_weight': 10,
+                'reg_alpha': 0.1,
+                'reg_lambda': 0.1,
+                'scale_pos_weight': 51.2,  # 1/0.0191 - 1
+                'random_state': self.config.RANDOM_STATE,
+                'n_estimators': 1000,
+                'early_stopping_rounds': 100
+            }
+        
+        elif model_type.lower() == 'catboost':
+            return {
+                'loss_function': 'Logloss',
+                'eval_metric': 'Logloss',
+                'depth': 8,
+                'learning_rate': 0.05,
+                'iterations': 1000,
+                'l2_leaf_reg': 3,
+                'random_seed': self.config.RANDOM_STATE,
+                'early_stopping_rounds': 100,
+                'verbose': False,
+                'auto_class_weights': 'Balanced'
+            }
+        
+        else:
+            return {}
     
     def save_models(self, output_dir: Path = None):
         """모델 저장"""
@@ -391,8 +466,8 @@ class TrainingPipeline:
         logger.info("전체 학습 파이프라인 시작")
         pipeline_start_time = time.time()
         
-        # CatBoost 제거, LightGBM과 XGBoost만 사용
-        model_types = ['lightgbm', 'xgboost']
+        # CTR 예측에 효과적인 모델들
+        model_types = ['lightgbm', 'xgboost', 'catboost']
         
         # 1. 하이퍼파라미터 튜닝 (옵션)
         if tune_hyperparameters:
@@ -410,6 +485,8 @@ class TrainingPipeline:
         for model_type in model_types:
             try:
                 params = self.trainer.best_params.get(model_type, None)
+                if params is None:
+                    params = self.trainer._get_ctr_optimized_params(model_type)
                 self.trainer.cross_validate_model(model_type, X_train, y_train, params=params)
             except Exception as e:
                 logger.error(f"{model_type} 교차검증 실패: {str(e)}")

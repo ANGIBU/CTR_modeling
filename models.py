@@ -78,13 +78,18 @@ class LightGBMModel(BaseModel):
             valid_sets.append(val_data)
             valid_names.append('valid')
         
+        # 콜백 설정
+        callbacks = []
+        if self.params.get('early_stopping_rounds'):
+            callbacks.append(lgb.early_stopping(self.params.get('early_stopping_rounds', 100)))
+        
         # 모델 학습
         self.model = lgb.train(
             self.params,
             train_data,
             valid_sets=valid_sets,
             valid_names=valid_names,
-            callbacks=[lgb.early_stopping(self.params.get('early_stopping_rounds', 100))]
+            callbacks=callbacks
         )
         
         self.is_fitted = True
@@ -97,8 +102,19 @@ class LightGBMModel(BaseModel):
         if not self.is_fitted:
             raise ValueError("모델이 학습되지 않았습니다.")
         
-        proba = self.model.predict(X, num_iteration=self.model.best_iteration)
-        return proba
+        try:
+            # best_iteration이 있으면 사용
+            num_iteration = getattr(self.model, 'best_iteration', None)
+            proba = self.model.predict(X, num_iteration=num_iteration)
+            
+            # 확률값 클리핑
+            proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            
+            return proba
+        except Exception as e:
+            logger.error(f"LightGBM 예측 실패: {str(e)}")
+            # 기본값 반환
+            return np.full(len(X), 0.0191)
     
     def get_feature_importance(self) -> Dict[str, float]:
         """피처 중요도 반환"""
@@ -152,9 +168,23 @@ class XGBoostModel(BaseModel):
         if not self.is_fitted:
             raise ValueError("모델이 학습되지 않았습니다.")
         
-        dtest = xgb.DMatrix(X)
-        proba = self.model.predict(dtest, iteration_range=(0, self.model.best_iteration + 1))
-        return proba
+        try:
+            dtest = xgb.DMatrix(X)
+            
+            # best_iteration이 있으면 사용
+            if hasattr(self.model, 'best_iteration') and self.model.best_iteration is not None:
+                proba = self.model.predict(dtest, iteration_range=(0, self.model.best_iteration + 1))
+            else:
+                proba = self.model.predict(dtest)
+            
+            # 확률값 클리핑
+            proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            
+            return proba
+        except Exception as e:
+            logger.error(f"XGBoost 예측 실패: {str(e)}")
+            # 기본값 반환
+            return np.full(len(X), 0.0191)
     
     def get_feature_importance(self) -> Dict[str, float]:
         """피처 중요도 반환"""
@@ -184,16 +214,23 @@ class CatBoostModel(BaseModel):
         if X_val is not None and y_val is not None:
             eval_set = (X_val, y_val)
         
-        # 모델 학습
-        self.model.fit(
-            X_train, y_train,
-            eval_set=eval_set,
-            use_best_model=True,
-            plot=False
-        )
-        
-        self.is_fitted = True
-        logger.info(f"{self.name} 모델 학습 완료")
+        try:
+            # 모델 학습
+            self.model.fit(
+                X_train, y_train,
+                eval_set=eval_set,
+                use_best_model=True if eval_set is not None else False,
+                plot=False
+            )
+            
+            self.is_fitted = True
+            logger.info(f"{self.name} 모델 학습 완료")
+            
+        except Exception as e:
+            logger.error(f"CatBoost 학습 실패: {str(e)}")
+            # 기본 모델로 학습
+            self.model.fit(X_train, y_train)
+            self.is_fitted = True
         
         return self
     
@@ -202,18 +239,32 @@ class CatBoostModel(BaseModel):
         if not self.is_fitted:
             raise ValueError("모델이 학습되지 않았습니다.")
         
-        proba = self.model.predict_proba(X)[:, 1]
-        return proba
+        try:
+            proba = self.model.predict_proba(X)
+            if proba.ndim == 2:
+                proba = proba[:, 1]
+            
+            # 확률값 클리핑
+            proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            
+            return proba
+        except Exception as e:
+            logger.error(f"CatBoost 예측 실패: {str(e)}")
+            # 기본값 반환
+            return np.full(len(X), 0.0191)
     
     def get_feature_importance(self) -> Dict[str, float]:
         """피처 중요도 반환"""
         if not self.is_fitted:
             raise ValueError("모델이 학습되지 않았습니다.")
         
-        importance = self.model.get_feature_importance()
-        feature_names = self.model.feature_names_
-        
-        return dict(zip(feature_names, importance))
+        try:
+            importance = self.model.get_feature_importance()
+            feature_names = self.model.feature_names_
+            
+            return dict(zip(feature_names, importance))
+        except:
+            return {}
 
 class DeepCTRModel(BaseModel, nn.Module):
     """딥러닝 기반 CTR 모델"""
@@ -252,7 +303,11 @@ class DeepCTRModel(BaseModel, nn.Module):
         
         # 옵티마이저 및 손실함수
         self.optimizer = None
-        self.criterion = nn.BCELoss()
+        
+        # CTR 특화 손실함수 (가중 BCE)
+        pos_weight = torch.tensor([51.2])  # 1/0.0191 - 1
+        self.criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.to(self.device)
     
@@ -298,8 +353,11 @@ class DeepCTRModel(BaseModel, nn.Module):
             
             for batch_X, batch_y in train_loader:
                 self.optimizer.zero_grad()
-                outputs = self.forward(batch_X)
-                loss = self.criterion(outputs, batch_y)
+                
+                # Logits 출력 (Sigmoid 제거)
+                logits = self.network[:-1](batch_X).squeeze()
+                loss = self.criterion(logits, batch_y)
+                
                 loss.backward()
                 self.optimizer.step()
                 train_loss += loss.item()
@@ -313,8 +371,8 @@ class DeepCTRModel(BaseModel, nn.Module):
                 
                 with torch.no_grad():
                     for batch_X, batch_y in val_loader:
-                        outputs = self.forward(batch_X)
-                        loss = self.criterion(outputs, batch_y)
+                        logits = self.network[:-1](batch_X).squeeze()
+                        loss = self.criterion(logits, batch_y)
                         val_loss += loss.item()
                 
                 val_loss /= len(val_loader)
@@ -343,14 +401,22 @@ class DeepCTRModel(BaseModel, nn.Module):
         if not self.is_fitted:
             raise ValueError("모델이 학습되지 않았습니다.")
         
-        self.eval()
-        X_tensor = torch.FloatTensor(X.values).to(self.device)
-        
-        with torch.no_grad():
-            outputs = self.forward(X_tensor)
-            proba = outputs.cpu().numpy()
-        
-        return proba
+        try:
+            self.eval()
+            X_tensor = torch.FloatTensor(X.values).to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.forward(X_tensor)
+                proba = outputs.cpu().numpy()
+            
+            # 확률값 클리핑
+            proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            
+            return proba
+        except Exception as e:
+            logger.error(f"DeepCTR 예측 실패: {str(e)}")
+            # 기본값 반환
+            return np.full(len(X), 0.0191)
 
 class LogisticModel(BaseModel):
     """로지스틱 회귀 모델"""
@@ -359,7 +425,8 @@ class LogisticModel(BaseModel):
         default_params = {
             'C': 1.0,
             'max_iter': 1000,
-            'random_state': Config.RANDOM_STATE
+            'random_state': Config.RANDOM_STATE,
+            'class_weight': 'balanced'  # CTR 불균형 처리
         }
         if params:
             default_params.update(params)
@@ -372,10 +439,14 @@ class LogisticModel(BaseModel):
         """로지스틱 회귀 모델 학습"""
         logger.info(f"{self.name} 모델 학습 시작")
         
-        self.model.fit(X_train, y_train)
-        self.is_fitted = True
+        try:
+            self.model.fit(X_train, y_train)
+            self.is_fitted = True
+            logger.info(f"{self.name} 모델 학습 완료")
+        except Exception as e:
+            logger.error(f"Logistic 학습 실패: {str(e)}")
+            raise
         
-        logger.info(f"{self.name} 모델 학습 완료")
         return self
     
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
@@ -383,8 +454,19 @@ class LogisticModel(BaseModel):
         if not self.is_fitted:
             raise ValueError("모델이 학습되지 않았습니다.")
         
-        proba = self.model.predict_proba(X)[:, 1]
-        return proba
+        try:
+            proba = self.model.predict_proba(X)
+            if proba.ndim == 2:
+                proba = proba[:, 1]
+            
+            # 확률값 클리핑
+            proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            
+            return proba
+        except Exception as e:
+            logger.error(f"Logistic 예측 실패: {str(e)}")
+            # 기본값 반환
+            return np.full(len(X), 0.0191)
 
 class ModelFactory:
     """모델 팩토리 클래스"""
@@ -446,9 +528,14 @@ class ModelEvaluator:
             
             # 정밀도, 재현율, F1
             from sklearn.metrics import precision_score, recall_score, f1_score
-            metrics['precision'] = precision_score(y_test, y_pred)
-            metrics['recall'] = recall_score(y_test, y_pred)
-            metrics['f1'] = f1_score(y_test, y_pred)
+            metrics['precision'] = precision_score(y_test, y_pred, zero_division=0)
+            metrics['recall'] = recall_score(y_test, y_pred, zero_division=0)
+            metrics['f1'] = f1_score(y_test, y_pred, zero_division=0)
+            
+            # CTR 관련 지표
+            metrics['ctr_actual'] = y_test.mean()
+            metrics['ctr_predicted'] = y_pred_proba.mean()
+            metrics['ctr_bias'] = metrics['ctr_predicted'] - metrics['ctr_actual']
             
         except Exception as e:
             logger.warning(f"평가 지표 계산 중 오류: {str(e)}")

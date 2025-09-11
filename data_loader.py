@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from typing import Tuple, Optional, Dict, Any
 import logging
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.model_selection import train_test_split, StratifiedKFold, TimeSeriesSplit
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,10 @@ class DataLoader:
             self.feature_columns = [col for col in self.train_data.columns 
                                   if col != self.target_column]
             logger.info(f"피처 컬럼 수: {len(self.feature_columns)}")
+            
+            # CTR 정보 로깅
+            actual_ctr = self.train_data[self.target_column].mean()
+            logger.info(f"실제 CTR: {actual_ctr:.4f}")
             
             return self.train_data, self.test_data
             
@@ -150,29 +154,37 @@ class DataLoader:
         
         return summary
     
-    def create_cross_validation_folds(self, 
-                                    X: pd.DataFrame, 
-                                    y: pd.Series, 
-                                    n_splits: int = None) -> StratifiedKFold:
-        """계층화된 교차검증 폴드 생성"""
+    def create_time_series_folds(self, 
+                                X: pd.DataFrame, 
+                                y: pd.Series, 
+                                n_splits: int = None) -> TimeSeriesSplit:
+        """시간적 순서를 고려한 교차검증 폴드 생성"""
         if n_splits is None:
             n_splits = self.config.N_SPLITS
         
-        skf = StratifiedKFold(
-            n_splits=n_splits, 
-            shuffle=True, 
-            random_state=self.config.RANDOM_STATE
-        )
+        # TimeSeriesSplit 사용으로 시간적 순서 보장
+        tscv = TimeSeriesSplit(n_splits=n_splits)
         
-        logger.info(f"{n_splits}개 폴드로 교차검증 설정 완료")
-        return skf
+        logger.info(f"시간적 교차검증 {n_splits}개 폴드 설정 완료")
+        return tscv
+    
+    def create_cross_validation_folds(self, 
+                                    X: pd.DataFrame, 
+                                    y: pd.Series, 
+                                    n_splits: int = None) -> TimeSeriesSplit:
+        """CTR 데이터에 적합한 교차검증 폴드 생성"""
+        if n_splits is None:
+            n_splits = self.config.N_SPLITS
+        
+        # CTR 데이터는 시간적 순서가 중요하므로 TimeSeriesSplit 사용
+        return self.create_time_series_folds(X, y, n_splits)
     
     def train_test_split_data(self, 
                             df: pd.DataFrame, 
                             test_size: float = None,
                             target_col: str = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-        """학습/검증 데이터 분할 (강화된 버전)"""
-        logger.info("학습/검증 데이터 분할 시작")
+        """시간적 순서를 고려한 학습/검증 데이터 분할"""
+        logger.info("시간적 순서를 고려한 학습/검증 데이터 분할 시작")
         
         if test_size is None:
             test_size = self.config.TEST_SIZE
@@ -190,9 +202,9 @@ class DataLoader:
         # 피처와 타겟 분리
         X, y = self._safe_feature_target_split(df_clean, target_col)
         
-        # 데이터 분할 수행
+        # 시간적 순서를 고려한 분할 수행
         try:
-            X_train, X_val, y_train, y_val = self._perform_safe_split(X, y, test_size)
+            X_train, X_val, y_train, y_val = self._perform_temporal_split(X, y, test_size)
             
             logger.info(f"데이터 분할 완료 - 학습: {X_train.shape}, 검증: {X_val.shape}")
             
@@ -204,6 +216,34 @@ class DataLoader:
             if y is not None:
                 logger.error(f"y 유니크 값: {y.unique()}")
             raise
+    
+    def _perform_temporal_split(self, X: pd.DataFrame, y: pd.Series, test_size: float) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+        """시간적 순서를 고려한 데이터 분할"""
+        logger.info("시간적 순서 기반 데이터 분할 수행")
+        
+        # 입력 데이터 최종 검증
+        if X is None or y is None:
+            raise ValueError("X 또는 y가 None입니다.")
+        
+        if len(X) != len(y):
+            raise ValueError(f"X와 y의 길이가 다릅니다. X: {len(X)}, y: {len(y)}")
+        
+        if len(X) == 0:
+            raise ValueError("분할할 데이터가 없습니다.")
+        
+        # 시간적 순서를 고려한 분할 (처음 80%를 학습, 마지막 20%를 검증)
+        split_idx = int(len(X) * (1 - test_size))
+        
+        X_train = X.iloc[:split_idx]
+        X_val = X.iloc[split_idx:]
+        y_train = y.iloc[:split_idx]
+        y_val = y.iloc[split_idx:]
+        
+        # 분할 결과 검증
+        self._validate_split_results(X_train, X_val, y_train, y_val)
+        
+        logger.info("시간적 순서 기반 분할 성공")
+        return X_train, X_val, y_train, y_val
     
     def _preprocess_for_split(self, df: pd.DataFrame, target_col: str) -> pd.DataFrame:
         """분할 전 데이터 전처리"""
@@ -235,30 +275,16 @@ class DataLoader:
                 final_columns.append(col)
         df_clean.columns = final_columns
         
-        # 4. ID성 컬럼 제거 (추가 안전 처리)
-        id_columns = []
-        for col in df_clean.columns:
-            if col != target_col:
-                col_lower = str(col).lower()
-                if any(pattern in col_lower for pattern in ['id', 'uuid', 'key', 'index', 'seq']):
-                    id_columns.append(col)
-                elif df_clean[col].nunique() / len(df_clean) > 0.95:  # 고유값 비율이 95% 이상
-                    id_columns.append(col)
-        
-        if id_columns:
-            logger.info(f"ID성 컬럼 제거: {id_columns}")
-            df_clean = df_clean.drop(columns=id_columns)
-        
-        # 5. 타겟 컬럼 검증
+        # 4. 타겟 컬럼 검증
         if target_col not in df_clean.columns:
             raise ValueError(f"전처리 후 타겟 컬럼 '{target_col}'이 없습니다.")
         
-        # 6. 타겟 결측치 처리
+        # 5. 타겟 결측치 처리
         if df_clean[target_col].isnull().any():
             logger.warning("타겟 변수에 결측치 발견, 해당 행 제거")
             df_clean = df_clean.dropna(subset=[target_col])
         
-        # 7. 타겟 값 검증
+        # 6. 타겟 값 검증
         unique_targets = df_clean[target_col].unique()
         if len(unique_targets) < 2:
             raise ValueError(f"타겟 변수의 유니크 값이 부족합니다: {unique_targets}")
@@ -364,69 +390,6 @@ class DataLoader:
         
         return y
     
-    def _perform_safe_split(self, X: pd.DataFrame, y: pd.Series, test_size: float) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-        """안전한 데이터 분할 수행"""
-        logger.info("안전한 데이터 분할 수행")
-        
-        # 입력 데이터 최종 검증
-        if X is None or y is None:
-            raise ValueError("X 또는 y가 None입니다.")
-        
-        if len(X) != len(y):
-            raise ValueError(f"X와 y의 길이가 다릅니다. X: {len(X)}, y: {len(y)}")
-        
-        if len(X) == 0:
-            raise ValueError("분할할 데이터가 없습니다.")
-        
-        # 타겟 분포 확인
-        y_value_counts = y.value_counts()
-        logger.info(f"타겟 분포: {y_value_counts.to_dict()}")
-        
-        # 최소 클래스 샘플 수 확인
-        min_class_count = y_value_counts.min()
-        min_samples_needed = max(2, int(test_size * len(y)))
-        
-        try:
-            # 계층화 분할 시도
-            if min_class_count >= min_samples_needed:
-                X_train, X_val, y_train, y_val = train_test_split(
-                    X, y, 
-                    test_size=test_size, 
-                    random_state=self.config.RANDOM_STATE,
-                    stratify=y
-                )
-                logger.info("계층화 분할 성공")
-            else:
-                logger.warning(f"최소 클래스 샘플 수 부족 ({min_class_count} < {min_samples_needed}), 일반 분할 사용")
-                X_train, X_val, y_train, y_val = train_test_split(
-                    X, y, 
-                    test_size=test_size, 
-                    random_state=self.config.RANDOM_STATE
-                )
-                logger.info("일반 분할 성공")
-        
-        except Exception as e:
-            logger.error(f"분할 실패: {str(e)}")
-            # 최후의 수단: 단순 인덱스 분할
-            split_idx = int(len(X) * (1 - test_size))
-            
-            # 랜덤 셔플
-            indices = np.random.RandomState(self.config.RANDOM_STATE).permutation(len(X))
-            train_indices = indices[:split_idx]
-            val_indices = indices[split_idx:]
-            
-            X_train = X.iloc[train_indices]
-            X_val = X.iloc[val_indices]
-            y_train = y.iloc[train_indices]
-            y_val = y.iloc[val_indices]
-            
-            logger.info("인덱스 분할로 대체")
-        
-        # 분할 결과 검증
-        self._validate_split_results(X_train, X_val, y_train, y_val)
-        
-        return X_train, X_val, y_train, y_val
-    
     def _validate_split_results(self, X_train: pd.DataFrame, X_val: pd.DataFrame, 
                                y_train: pd.Series, y_val: pd.Series):
         """분할 결과 검증"""
@@ -462,65 +425,6 @@ class DataLoader:
             raise ValueError("피처가 하나도 없습니다!")
         
         logger.info("분할 결과 검증 완료")
-    
-    def safe_train_test_split(self, 
-                             X: pd.DataFrame, 
-                             y: pd.Series, 
-                             test_size: float = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-        """안전한 데이터 분할 (별도 함수)"""
-        logger.info("안전한 데이터 분할 시작")
-        
-        if test_size is None:
-            test_size = self.config.TEST_SIZE
-        
-        # 입력 데이터 검증
-        if X is None or y is None:
-            raise ValueError("X 또는 y가 None입니다.")
-        
-        if len(X) != len(y):
-            raise ValueError(f"X와 y의 길이가 다릅니다. X: {len(X)}, y: {len(y)}")
-        
-        # 결측치 처리
-        if X.isnull().any().any():
-            logger.warning("X에 결측치가 있습니다. 0으로 대치합니다.")
-            X = X.fillna(0)
-        
-        if y.isnull().any():
-            logger.warning("y에 결측치가 있습니다. 해당 행을 제거합니다.")
-            valid_indices = ~y.isnull()
-            X = X[valid_indices]
-            y = y[valid_indices]
-        
-        # 데이터 타입 확인
-        if not isinstance(X, pd.DataFrame):
-            X = pd.DataFrame(X)
-        if not isinstance(y, pd.Series):
-            y = pd.Series(y)
-        
-        try:
-            # 계층화 분할 시도
-            X_train, X_val, y_train, y_val = train_test_split(
-                X, y, 
-                test_size=test_size, 
-                random_state=self.config.RANDOM_STATE,
-                stratify=y
-            )
-            
-            logger.info(f"계층화 분할 완료 - 학습: {X_train.shape}, 검증: {X_val.shape}")
-            
-        except Exception as e:
-            logger.warning(f"계층화 분할 실패: {str(e)}. 일반 분할로 진행합니다.")
-            
-            # 일반 분할
-            X_train, X_val, y_train, y_val = train_test_split(
-                X, y, 
-                test_size=test_size, 
-                random_state=self.config.RANDOM_STATE
-            )
-            
-            logger.info(f"일반 분할 완료 - 학습: {X_train.shape}, 검증: {X_val.shape}")
-        
-        return X_train, X_val, y_train, y_val
     
     def load_submission_template(self) -> pd.DataFrame:
         """제출 템플릿 로딩"""
