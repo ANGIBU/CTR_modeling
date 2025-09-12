@@ -101,10 +101,7 @@ def load_and_preprocess_large_data(config: Config, quick_mode: bool = False) -> 
             logger.info(f"절약 모드: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
         
         # 대용량 데이터 로딩
-        train_df, test_df = data_loader.load_data_chunked(
-            max_train_size=max_train_size,
-            max_test_size=max_test_size
-        )
+        train_df, test_df = data_loader.load_large_data_optimized()
         
         # 메모리 상태 확인
         current_memory = get_memory_usage()
