@@ -8,7 +8,6 @@ from abc import ABC, abstractmethod
 import pickle
 import gc
 
-# 트리 기반 모델 - 안전한 import
 try:
     import lightgbm as lgb
     LIGHTGBM_AVAILABLE = True
@@ -30,7 +29,6 @@ except ImportError:
     CATBOOST_AVAILABLE = False
     logging.warning("CatBoost가 설치되지 않았습니다.")
 
-# 신경망 모델 - 안전한 import 강화
 TORCH_AVAILABLE = False
 AMP_AVAILABLE = False
 torch = None
@@ -44,11 +42,9 @@ autocast = None
 try:
     import torch
     
-    # GPU 사용 가능성 엄격한 테스트
     gpu_available = False
     if torch.cuda.is_available():
         try:
-            # 실제 GPU 메모리 할당 테스트
             test_tensor = torch.zeros(1000, 1000).cuda()
             test_result = test_tensor.sum()
             del test_tensor
@@ -65,7 +61,6 @@ try:
         import torch.optim as optim
         from torch.utils.data import DataLoader as TorchDataLoader, TensorDataset
         
-        # Mixed Precision 모듈 - 더 안전하게
         try:
             if gpu_available and hasattr(torch.cuda, 'amp'):
                 from torch.cuda.amp import GradScaler, autocast
@@ -80,7 +75,6 @@ except ImportError:
     AMP_AVAILABLE = False
     logging.warning("PyTorch가 설치되지 않았습니다. DeepCTR 모델을 사용할 수 없습니다.")
 
-# Calibration 모듈
 try:
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.isotonic import IsotonicRegression
@@ -90,7 +84,6 @@ except ImportError:
     SKLEARN_AVAILABLE = False
     logging.warning("scikit-learn이 설치되지 않았습니다.")
 
-# 기타 모델
 try:
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.metrics import roc_auc_score, log_loss
@@ -137,10 +130,8 @@ class BaseModel(ABC):
             return
             
         try:
-            # 기본 예측 수행
             train_pred = self.predict_proba_raw(X_train)
             
-            # Calibration 방법 선택
             if method == 'platt':
                 calibrator = CalibratedClassifierCV(
                     estimator=None, 
@@ -157,7 +148,6 @@ class BaseModel(ABC):
                 logger.warning(f"지원하지 않는 calibration 방법: {method}")
                 return
             
-            # Calibration 학습
             calibrator.fit(train_pred.reshape(-1, 1), y_train)
             self.calibrator = calibrator
             self.is_calibrated = True
@@ -177,12 +167,10 @@ class BaseModel(ABC):
             return X
         
         try:
-            # 누락된 피처 추가
             for feature in self.feature_names:
                 if feature not in X.columns:
                     X[feature] = 0.0
             
-            # 필요한 피처만 선택
             X = X[self.feature_names]
             return X
         except Exception as e:
@@ -190,17 +178,45 @@ class BaseModel(ABC):
             return X
 
 class LightGBMModel(BaseModel):
-    """LightGBM 모델"""
+    """CTR 특화 LightGBM 모델"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not LIGHTGBM_AVAILABLE:
             raise ImportError("LightGBM이 설치되지 않았습니다.")
             
-        default_params = Config.LGBM_PARAMS.copy()
+        # CTR 특화 기본 파라미터
+        default_params = {
+            'objective': 'binary',
+            'metric': 'binary_logloss',
+            'boosting_type': 'gbdt',
+            'num_leaves': 255,
+            'learning_rate': 0.03,
+            'feature_fraction': 0.8,
+            'bagging_fraction': 0.7,
+            'bagging_freq': 5,
+            'min_child_samples': 200,
+            'min_child_weight': 10,
+            'lambda_l1': 2.0,
+            'lambda_l2': 2.0,
+            'verbose': -1,
+            'random_state': Config.RANDOM_STATE,
+            'n_estimators': 3000,
+            'early_stopping_rounds': 200,
+            'scale_pos_weight': 49.0,
+            'force_row_wise': True,
+            'max_bin': 255,
+            'num_threads': 6,
+            'device_type': 'cpu',
+            'min_data_in_leaf': 100,
+            'max_depth': 12,
+            'feature_fraction_bynode': 0.8,
+            'extra_trees': True,
+            'path_smooth': 1.0
+        }
+        
         if params:
             default_params.update(params)
         
-        # 파라미터 안전성 검증
         default_params = self._validate_params(default_params)
         
         super().__init__("LightGBM", default_params)
@@ -209,7 +225,6 @@ class LightGBMModel(BaseModel):
         """LightGBM 파라미터 검증"""
         safe_params = params.copy()
         
-        # 필수 파라미터 확인
         if 'objective' not in safe_params:
             safe_params['objective'] = 'binary'
         if 'metric' not in safe_params:
@@ -217,12 +232,10 @@ class LightGBMModel(BaseModel):
         if 'verbose' not in safe_params:
             safe_params['verbose'] = -1
         
-        # 충돌하는 파라미터 제거
         if 'is_unbalance' in safe_params and 'scale_pos_weight' in safe_params:
             safe_params.pop('is_unbalance', None)
         
-        # 메모리 안전성을 위한 파라미터 조정
-        safe_params['num_leaves'] = min(safe_params.get('num_leaves', 63), 127)
+        safe_params['num_leaves'] = min(safe_params.get('num_leaves', 63), 511)
         safe_params['max_bin'] = min(safe_params.get('max_bin', 255), 255)
         safe_params['num_threads'] = min(safe_params.get('num_threads', 4), 6)
         
@@ -230,13 +243,12 @@ class LightGBMModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """LightGBM 모델 학습"""
+        """CTR 특화 LightGBM 모델 학습"""
         logger.info(f"{self.name} 모델 학습 시작")
         
         try:
             self.feature_names = list(X_train.columns)
             
-            # 데이터 검증
             if X_train.isnull().sum().sum() > 0:
                 logger.warning("학습 데이터에 결측치가 있습니다. 0으로 대체합니다.")
                 X_train = X_train.fillna(0)
@@ -245,7 +257,6 @@ class LightGBMModel(BaseModel):
                 logger.warning("검증 데이터에 결측치가 있습니다. 0으로 대체합니다.")
                 X_val = X_val.fillna(0)
             
-            # LightGBM 데이터셋 생성
             train_data = lgb.Dataset(X_train, label=y_train, free_raw_data=False)
             
             valid_sets = [train_data]
@@ -256,13 +267,12 @@ class LightGBMModel(BaseModel):
                 valid_sets.append(val_data)
                 valid_names.append('valid')
             
-            # 콜백 설정
             callbacks = []
             early_stopping = self.params.get('early_stopping_rounds', 100)
             if early_stopping:
                 callbacks.append(lgb.early_stopping(early_stopping, verbose=False))
             
-            # 학습 실행
+            # CTR 특화 학습
             self.model = lgb.train(
                 self.params,
                 train_data,
@@ -274,7 +284,6 @@ class LightGBMModel(BaseModel):
             self.is_fitted = True
             logger.info(f"{self.name} 모델 학습 완료")
             
-            # 메모리 정리
             del train_data
             if 'val_data' in locals():
                 del val_data
@@ -282,7 +291,6 @@ class LightGBMModel(BaseModel):
             
         except Exception as e:
             logger.error(f"LightGBM 학습 실패: {str(e)}")
-            # 메모리 정리
             gc.collect()
             raise
         
@@ -295,11 +303,8 @@ class LightGBMModel(BaseModel):
         
         try:
             X_processed = self._ensure_feature_consistency(X)
-            
-            # 결측치 처리
             X_processed = X_processed.fillna(0)
             
-            # 예측 수행
             num_iteration = getattr(self.model, 'best_iteration', None)
             proba = self.model.predict(X_processed, num_iteration=num_iteration)
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
@@ -322,15 +327,36 @@ class LightGBMModel(BaseModel):
         return raw_pred
 
 class XGBoostModel(BaseModel):
-    """XGBoost 모델"""
+    """CTR 특화 XGBoost 모델"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
             raise ImportError("XGBoost가 설치되지 않았습니다.")
-            
-        default_params = Config.XGB_PARAMS.copy()
-        if params:
-            default_params.update(params)
+        
+        # CTR 특화 기본 파라미터
+        default_params = {
+            'objective': 'binary:logistic',
+            'eval_metric': 'logloss',
+            'tree_method': 'hist',
+            'max_depth': 8,
+            'learning_rate': 0.03,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'colsample_bylevel': 0.8,
+            'colsample_bynode': 0.8,
+            'min_child_weight': 15,
+            'reg_alpha': 2.0,
+            'reg_lambda': 2.0,
+            'scale_pos_weight': 49.0,
+            'random_state': Config.RANDOM_STATE,
+            'n_estimators': 3000,
+            'early_stopping_rounds': 200,
+            'max_bin': 255,
+            'nthread': 6,
+            'grow_policy': 'lossguide',
+            'max_leaves': 255,
+            'gamma': 0.1
+        }
         
         # GPU 사용 가능성 재확인
         gpu_available = False
@@ -345,7 +371,6 @@ class XGBoostModel(BaseModel):
             except:
                 gpu_available = False
         
-        # GPU 파라미터 안전하게 설정
         if gpu_available:
             default_params['tree_method'] = 'gpu_hist'
             default_params['gpu_id'] = 0
@@ -353,7 +378,9 @@ class XGBoostModel(BaseModel):
             default_params['tree_method'] = 'hist'
             default_params.pop('gpu_id', None)
         
-        # 파라미터 검증
+        if params:
+            default_params.update(params)
+        
         default_params = self._validate_params(default_params)
         
         super().__init__("XGBoost", default_params)
@@ -362,14 +389,12 @@ class XGBoostModel(BaseModel):
         """XGBoost 파라미터 검증"""
         safe_params = params.copy()
         
-        # 필수 파라미터 확인
         if 'objective' not in safe_params:
             safe_params['objective'] = 'binary:logistic'
         if 'eval_metric' not in safe_params:
             safe_params['eval_metric'] = 'logloss'
         
-        # 메모리 안전성을 위한 파라미터 조정
-        safe_params['max_depth'] = min(safe_params.get('max_depth', 6), 8)
+        safe_params['max_depth'] = min(safe_params.get('max_depth', 6), 12)
         safe_params['max_bin'] = min(safe_params.get('max_bin', 256), 256)
         safe_params['nthread'] = min(safe_params.get('nthread', 4), 6)
         
@@ -377,18 +402,16 @@ class XGBoostModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """XGBoost 모델 학습"""
+        """CTR 특화 XGBoost 모델 학습"""
         logger.info(f"{self.name} 모델 학습 시작")
         
         try:
             self.feature_names = list(X_train.columns)
             
-            # 데이터 검증 및 전처리
             X_train = X_train.fillna(0)
             if X_val is not None:
                 X_val = X_val.fillna(0)
             
-            # XGBoost 데이터셋 생성
             dtrain = xgb.DMatrix(X_train, label=y_train, enable_categorical=False)
             
             evals = [(dtrain, 'train')]
@@ -396,7 +419,6 @@ class XGBoostModel(BaseModel):
                 dval = xgb.DMatrix(X_val, label=y_val, enable_categorical=False)
                 evals.append((dval, 'valid'))
             
-            # 학습 실행
             early_stopping = self.params.get('early_stopping_rounds', 100)
             
             self.model = xgb.train(
@@ -410,7 +432,6 @@ class XGBoostModel(BaseModel):
             self.is_fitted = True
             logger.info(f"{self.name} 모델 학습 완료")
             
-            # 메모리 정리
             del dtrain
             if 'dval' in locals():
                 del dval
@@ -418,7 +439,6 @@ class XGBoostModel(BaseModel):
             
         except Exception as e:
             logger.error(f"XGBoost 학습 실패: {str(e)}")
-            # GPU 에러 시 CPU로 재시도
             if 'gpu' in str(e).lower() and self.params.get('tree_method') == 'gpu_hist':
                 logger.info("GPU 학습 실패, CPU로 재시도")
                 self.params['tree_method'] = 'hist'
@@ -448,7 +468,6 @@ class XGBoostModel(BaseModel):
             
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
             
-            # 메모리 정리
             del dtest
             
             return proba
@@ -470,15 +489,37 @@ class XGBoostModel(BaseModel):
         return raw_pred
 
 class CatBoostModel(BaseModel):
-    """CatBoost 모델"""
+    """CTR 특화 CatBoost 모델"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not CATBOOST_AVAILABLE:
             raise ImportError("CatBoost가 설치되지 않았습니다.")
-            
-        default_params = Config.CAT_PARAMS.copy()
-        if params:
-            default_params.update(params)
+        
+        # CTR 특화 기본 파라미터
+        default_params = {
+            'loss_function': 'Logloss',
+            'eval_metric': 'Logloss',
+            'task_type': 'CPU',
+            'depth': 8,
+            'learning_rate': 0.03,
+            'l2_leaf_reg': 10,
+            'iterations': 3000,
+            'random_seed': Config.RANDOM_STATE,
+            'early_stopping_rounds': 200,
+            'verbose': False,
+            'auto_class_weights': 'Balanced',
+            'max_ctr_complexity': 2,
+            'thread_count': 6,
+            'bootstrap_type': 'Bayesian',
+            'bagging_temperature': 1.0,
+            'od_type': 'IncToDec',
+            'od_wait': 200,
+            'leaf_estimation_iterations': 10,
+            'leaf_estimation_method': 'Newton',
+            'grow_policy': 'Lossguide',
+            'max_leaves': 255,
+            'min_data_in_leaf': 100
+        }
         
         # GPU 사용 가능성 재확인
         gpu_available = False
@@ -493,7 +534,6 @@ class CatBoostModel(BaseModel):
             except:
                 gpu_available = False
         
-        # GPU 파라미터 안전하게 설정
         if gpu_available:
             default_params['task_type'] = 'GPU'
             default_params['devices'] = '0'
@@ -501,7 +541,9 @@ class CatBoostModel(BaseModel):
             default_params['task_type'] = 'CPU'
             default_params.pop('devices', None)
         
-        # 파라미터 검증
+        if params:
+            default_params.update(params)
+        
         default_params = self._validate_params(default_params)
         
         super().__init__("CatBoost", default_params)
@@ -510,7 +552,6 @@ class CatBoostModel(BaseModel):
             self.model = CatBoostClassifier(**self.params)
         except Exception as e:
             logger.error(f"CatBoost 모델 초기화 실패: {e}")
-            # GPU 실패시 CPU로 재시도
             if 'gpu' in str(e).lower() or 'cuda' in str(e).lower():
                 logger.info("GPU 초기화 실패, CPU로 재시도")
                 self.params['task_type'] = 'CPU'
@@ -523,27 +564,24 @@ class CatBoostModel(BaseModel):
         """CatBoost 파라미터 검증"""
         safe_params = params.copy()
         
-        # 필수 파라미터 확인
         if 'loss_function' not in safe_params:
             safe_params['loss_function'] = 'Logloss'
         if 'verbose' not in safe_params:
             safe_params['verbose'] = False
         
-        # 메모리 안전성을 위한 파라미터 조정
-        safe_params['depth'] = min(safe_params.get('depth', 6), 8)
+        safe_params['depth'] = min(safe_params.get('depth', 6), 10)
         safe_params['thread_count'] = min(safe_params.get('thread_count', 4), 6)
         
         return safe_params
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """CatBoost 모델 학습"""
+        """CTR 특화 CatBoost 모델 학습"""
         logger.info(f"{self.name} 모델 학습 시작")
         
         try:
             self.feature_names = list(X_train.columns)
             
-            # 데이터 전처리
             X_train = X_train.fillna(0)
             if X_val is not None:
                 X_val = X_val.fillna(0)
@@ -552,7 +590,6 @@ class CatBoostModel(BaseModel):
             if X_val is not None and y_val is not None:
                 eval_set = (X_val, y_val)
             
-            # 학습 실행
             self.model.fit(
                 X_train, y_train,
                 eval_set=eval_set,
@@ -567,7 +604,6 @@ class CatBoostModel(BaseModel):
         except Exception as e:
             logger.error(f"CatBoost 학습 실패: {str(e)}")
             
-            # GPU 에러 시 CPU로 재시도
             if ('gpu' in str(e).lower() or 'cuda' in str(e).lower()) and self.params.get('task_type') == 'GPU':
                 logger.info("GPU 학습 실패, CPU로 재시도")
                 self.params['task_type'] = 'CPU'
@@ -575,7 +611,6 @@ class CatBoostModel(BaseModel):
                 self.model = CatBoostClassifier(**self.params)
                 return self.fit(X_train, y_train, X_val, y_val)
             
-            # 단순화된 학습 시도
             try:
                 logger.info("단순화된 CatBoost 학습 시도")
                 self.model.fit(X_train, y_train, verbose=False)
@@ -585,7 +620,6 @@ class CatBoostModel(BaseModel):
                 logger.error(f"단순화된 CatBoost 학습도 실패: {str(e2)}")
                 raise
         
-        # 메모리 정리
         gc.collect()
         
         return self
@@ -623,7 +657,7 @@ class CatBoostModel(BaseModel):
         return raw_pred
 
 class DeepCTRModel(BaseModel):
-    """GPU 기반 딥러닝 CTR 모델"""
+    """CTR 특화 딥러닝 모델"""
     
     def __init__(self, input_dim: int, params: Dict[str, Any] = None):
         if not TORCH_AVAILABLE:
@@ -631,28 +665,41 @@ class DeepCTRModel(BaseModel):
             
         BaseModel.__init__(self, "DeepCTR", params)
         
-        default_params = Config.NN_PARAMS.copy()
+        # CTR 특화 기본 파라미터
+        default_params = {
+            'hidden_dims': [512, 256, 128, 64],
+            'dropout_rate': 0.3,
+            'learning_rate': 0.001,
+            'weight_decay': 1e-5,
+            'batch_size': 1024,
+            'epochs': 50,
+            'patience': 15,
+            'use_batch_norm': True,
+            'activation': 'relu',
+            'use_residual': True,
+            'use_attention': False,
+            'focal_loss_alpha': 0.25,
+            'focal_loss_gamma': 2.0
+        }
+        
         if params:
             default_params.update(params)
         self.params = default_params
         
         self.input_dim = input_dim
         
-        # 디바이스 안전하게 설정
         self.device = 'cpu'
         self.gpu_available = False
         
         if TORCH_AVAILABLE:
             try:
                 if torch.cuda.is_available():
-                    # 엄격한 GPU 테스트
                     test_tensor = torch.zeros(1000, 1000).cuda()
                     test_result = test_tensor.sum().item()
                     del test_tensor
                     torch.cuda.empty_cache()
                     
-                    # 메모리 할당 테스트
-                    torch.cuda.set_per_process_memory_fraction(0.5)  # 50%로 제한
+                    torch.cuda.set_per_process_memory_fraction(0.6)
                     
                     self.device = 'cuda:0'
                     self.gpu_available = True
@@ -664,12 +711,10 @@ class DeepCTRModel(BaseModel):
                 self.device = 'cpu'
                 self.gpu_available = False
         
-        # 네트워크 구조 정의
         try:
-            self.network = self._build_network()
+            self.network = self._build_ctr_network()
             self.optimizer = None
             
-            # Mixed Precision
             self.scaler = None
             if AMP_AVAILABLE and self.gpu_available:
                 try:
@@ -679,34 +724,30 @@ class DeepCTRModel(BaseModel):
                     self.scaler = None
                     logger.info("Mixed Precision 비활성화")
             
-            # CTR 특화 손실함수
             if TORCH_AVAILABLE:
                 pos_weight = torch.tensor([49.0], device=self.device)
-                self.criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+                self.criterion = self._get_ctr_loss(pos_weight)
                 
-                # Temperature scaling
                 self.temperature = nn.Parameter(torch.ones(1, device=self.device) * 1.5)
                 
-                # 모델을 디바이스로 이동
                 self.to(self.device)
                 
         except Exception as e:
             logger.error(f"DeepCTR 모델 초기화 실패: {e}")
-            # CPU 모드로 재시도
             if self.gpu_available:
                 logger.info("CPU 모드로 재시도")
                 self.device = 'cpu'
                 self.gpu_available = False
-                self.network = self._build_network()
+                self.network = self._build_ctr_network()
                 pos_weight = torch.tensor([49.0])
-                self.criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+                self.criterion = self._get_ctr_loss(pos_weight)
                 self.temperature = nn.Parameter(torch.ones(1) * 1.5)
                 self.to(self.device)
             else:
                 raise
     
-    def _build_network(self):
-        """네트워크 구조 생성"""
+    def _build_ctr_network(self):
+        """CTR 특화 네트워크 구조 생성"""
         if not TORCH_AVAILABLE:
             raise ImportError("PyTorch가 필요합니다.")
             
@@ -715,6 +756,7 @@ class DeepCTRModel(BaseModel):
             dropout_rate = self.params['dropout_rate']
             use_batch_norm = self.params.get('use_batch_norm', True)
             activation = self.params.get('activation', 'relu')
+            use_residual = self.params.get('use_residual', False)
             
             layers = []
             prev_dim = self.input_dim
@@ -725,7 +767,13 @@ class DeepCTRModel(BaseModel):
             
             # 은닉층
             for i, hidden_dim in enumerate(hidden_dims):
-                layers.append(nn.Linear(prev_dim, hidden_dim))
+                linear = nn.Linear(prev_dim, hidden_dim)
+                
+                # Xavier 초기화
+                nn.init.xavier_uniform_(linear.weight)
+                nn.init.zeros_(linear.bias)
+                
+                layers.append(linear)
                 
                 if use_batch_norm:
                     layers.append(nn.BatchNorm1d(hidden_dim))
@@ -734,17 +782,40 @@ class DeepCTRModel(BaseModel):
                     layers.append(nn.ReLU())
                 elif activation == 'gelu':
                     layers.append(nn.GELU())
+                elif activation == 'swish':
+                    layers.append(nn.SiLU())
                 
                 layers.append(nn.Dropout(dropout_rate))
                 prev_dim = hidden_dim
             
             # 출력층
-            layers.append(nn.Linear(prev_dim, 1))
+            output_layer = nn.Linear(prev_dim, 1)
+            nn.init.xavier_uniform_(output_layer.weight)
+            nn.init.zeros_(output_layer.bias)
+            layers.append(output_layer)
             
             return nn.Sequential(*layers)
         except Exception as e:
             logger.error(f"네트워크 구조 생성 실패: {e}")
             raise
+    
+    def _get_ctr_loss(self, pos_weight):
+        """CTR 특화 손실함수"""
+        if self.params.get('use_focal_loss', False):
+            return self._focal_loss
+        else:
+            return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    
+    def _focal_loss(self, inputs, targets):
+        """Focal Loss 구현"""
+        alpha = self.params['focal_loss_alpha']
+        gamma = self.params['focal_loss_gamma']
+        
+        ce_loss = nn.functional.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = alpha * (1-pt)**gamma * ce_loss
+        
+        return focal_loss.mean()
     
     def to(self, device):
         """모델을 디바이스로 이동"""
@@ -753,7 +824,7 @@ class DeepCTRModel(BaseModel):
                 self.network = self.network.to(device)
                 if hasattr(self, 'temperature'):
                     self.temperature = self.temperature.to(device)
-                if hasattr(self, 'criterion'):
+                if hasattr(self, 'criterion') and hasattr(self.criterion, 'to'):
                     self.criterion = self.criterion.to(device)
                 self.device = device
             except Exception as e:
@@ -789,7 +860,7 @@ class DeepCTRModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """딥러닝 모델 학습"""
+        """CTR 특화 딥러닝 모델 학습"""
         if not TORCH_AVAILABLE:
             raise ImportError("PyTorch가 필요합니다.")
             
@@ -798,7 +869,6 @@ class DeepCTRModel(BaseModel):
         try:
             self.feature_names = list(X_train.columns)
             
-            # 데이터 전처리
             X_train = X_train.fillna(0)
             if X_val is not None:
                 X_val = X_val.fillna(0)
@@ -814,15 +884,14 @@ class DeepCTRModel(BaseModel):
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(
                 self.optimizer, 
                 mode='min', 
-                factor=0.7,
-                patience=8,
+                factor=0.8,
+                patience=10,
                 min_lr=1e-6
             )
             
-            # 배치 크기 조정 (메모리 절약)
-            batch_size = min(self.params['batch_size'], 1024) if self.gpu_available else 512
+            # 배치 크기 조정
+            batch_size = min(self.params['batch_size'], 2048) if self.gpu_available else 1024
             
-            # 데이터 텐서 변환
             X_train_tensor = torch.FloatTensor(X_train.values).to(self.device)
             y_train_tensor = torch.FloatTensor(y_train.values).to(self.device)
             
@@ -832,10 +901,9 @@ class DeepCTRModel(BaseModel):
                 batch_size=batch_size, 
                 shuffle=True,
                 num_workers=0,
-                pin_memory=False  # 안정성을 위해 비활성화
+                pin_memory=False
             )
             
-            # 검증 데이터 준비
             val_loader = None
             if X_val is not None and y_val is not None:
                 X_val_tensor = torch.FloatTensor(X_val.values).to(self.device)
@@ -851,10 +919,9 @@ class DeepCTRModel(BaseModel):
             # 학습 루프
             best_val_loss = float('inf')
             patience_counter = 0
-            max_epochs = min(self.params['epochs'], 30)  # 최대 에포크 제한
+            max_epochs = min(self.params['epochs'], 50)
             
             for epoch in range(max_epochs):
-                # 학습 모드
                 self.train()
                 train_loss = 0.0
                 batch_count = 0
@@ -881,7 +948,6 @@ class DeepCTRModel(BaseModel):
                         train_loss += loss.item()
                         batch_count += 1
                         
-                        # 배치별 메모리 정리
                         if batch_count % 10 == 0 and self.gpu_available:
                             torch.cuda.empty_cache()
                             
@@ -895,7 +961,6 @@ class DeepCTRModel(BaseModel):
                     
                 train_loss /= batch_count
                 
-                # 검증
                 val_loss = train_loss
                 if val_loader is not None:
                     self.eval()
@@ -923,7 +988,6 @@ class DeepCTRModel(BaseModel):
                         val_loss /= val_batch_count
                         scheduler.step(val_loss)
                         
-                        # 조기 종료 확인
                         if val_loss < best_val_loss:
                             best_val_loss = val_loss
                             patience_counter = 0
@@ -934,11 +998,9 @@ class DeepCTRModel(BaseModel):
                             logger.info(f"조기 종료: epoch {epoch + 1}")
                             break
                 
-                # 진행 상황 로깅
                 if (epoch + 1) % 10 == 0:
                     logger.info(f"Epoch {epoch + 1}: Train Loss = {train_loss:.4f}, Val Loss = {val_loss:.4f}")
                 
-                # GPU 메모리 정리
                 if self.gpu_available:
                     torch.cuda.empty_cache()
             
@@ -947,7 +1009,6 @@ class DeepCTRModel(BaseModel):
             
         except Exception as e:
             logger.error(f"DeepCTR 학습 실패: {str(e)}")
-            # GPU 에러시 CPU로 재시도
             if self.gpu_available and ('cuda' in str(e).lower() or 'gpu' in str(e).lower()):
                 logger.info("GPU 학습 실패, CPU로 재시도")
                 self.device = 'cpu'
@@ -956,7 +1017,6 @@ class DeepCTRModel(BaseModel):
                 return self.fit(X_train, y_train, X_val, y_val)
             raise
         finally:
-            # 메모리 정리
             if self.gpu_available:
                 torch.cuda.empty_cache()
             gc.collect()
@@ -976,7 +1036,7 @@ class DeepCTRModel(BaseModel):
             X_tensor = torch.FloatTensor(X_processed.values).to(self.device)
             
             predictions = []
-            batch_size = min(self.params['batch_size'], 512)
+            batch_size = min(self.params['batch_size'], 1024)
             
             with torch.no_grad():
                 for i in range(0, len(X_tensor), batch_size):
@@ -993,7 +1053,6 @@ class DeepCTRModel(BaseModel):
                         
                         predictions.append(proba.cpu().numpy())
                         
-                        # 배치별 메모리 정리
                         if self.gpu_available and i % (batch_size * 5) == 0:
                             torch.cuda.empty_cache()
                             
@@ -1010,7 +1069,6 @@ class DeepCTRModel(BaseModel):
             logger.error(f"DeepCTR 예측 실패: {str(e)}")
             return np.full(len(X), Config.CALIBRATION_CONFIG['target_ctr'])
         finally:
-            # GPU 메모리 정리
             if self.gpu_available:
                 torch.cuda.empty_cache()
     
@@ -1055,7 +1113,6 @@ class LogisticModel(BaseModel):
         try:
             self.feature_names = list(X_train.columns)
             
-            # 데이터 전처리
             X_train = X_train.fillna(0)
             
             self.model.fit(X_train, y_train)
@@ -1107,6 +1164,7 @@ class CTRCalibrator:
         self.platt_scaler = None
         self.isotonic_regressor = None
         self.bias_correction = 0.0
+        self.temperature_scaler = None
         
     def fit_platt_scaling(self, y_true: np.ndarray, y_pred: np.ndarray):
         """Platt Scaling 학습"""
@@ -1134,6 +1192,21 @@ class CTRCalibrator:
         except Exception as e:
             logger.error(f"Isotonic regression 학습 실패: {str(e)}")
     
+    def fit_temperature_scaling(self, y_true: np.ndarray, y_pred: np.ndarray):
+        """Temperature Scaling 학습"""
+        try:
+            from scipy.optimize import minimize_scalar
+            
+            def temperature_loss(temperature):
+                calibrated = 1 / (1 + np.exp(-y_pred / temperature))
+                return -np.sum(y_true * np.log(calibrated + 1e-15) + (1 - y_true) * np.log(1 - calibrated + 1e-15))
+            
+            result = minimize_scalar(temperature_loss, bounds=(0.1, 10.0), method='bounded')
+            self.temperature_scaler = result.x
+            logger.info(f"Temperature scaling 학습 완료: T={self.temperature_scaler:.3f}")
+        except Exception as e:
+            logger.error(f"Temperature scaling 학습 실패: {str(e)}")
+    
     def fit_bias_correction(self, y_true: np.ndarray, y_pred: np.ndarray):
         """단순 편향 보정 학습"""
         try:
@@ -1145,11 +1218,11 @@ class CTRCalibrator:
             logger.error(f"편향 보정 학습 실패: {str(e)}")
 
 class ModelFactory:
-    """모델 팩토리 클래스"""
+    """CTR 특화 모델 팩토리 클래스"""
     
     @staticmethod
     def create_model(model_type: str, **kwargs) -> BaseModel:
-        """모델 타입에 따라 모델 인스턴스 생성"""
+        """모델 타입에 따라 CTR 특화 모델 인스턴스 생성"""
         
         try:
             if model_type.lower() == 'lightgbm':
@@ -1190,7 +1263,6 @@ class ModelFactory:
         """사용 가능한 모델 타입 리스트"""
         available = []
         
-        # 기본 모델들
         if SKLEARN_AVAILABLE:
             available.append('logistic')
         
@@ -1203,10 +1275,9 @@ class ModelFactory:
         if TORCH_AVAILABLE:
             available.append('deepctr')
         
-        # 최소한 하나의 모델은 사용 가능해야 함
         if not available:
             logger.error("사용 가능한 모델이 없습니다. 필요한 라이브러리를 설치해주세요.")
-            available = ['logistic']  # 기본 fallback
+            available = ['logistic']
             
         return available
 
@@ -1225,7 +1296,6 @@ class ModelEvaluator:
             
             metrics = {}
             
-            # sklearn이 사용 가능한 경우에만 고급 지표 계산
             if SKLEARN_AVAILABLE:
                 try:
                     metrics['auc'] = roc_auc_score(y_test, y_pred_proba)
@@ -1244,7 +1314,6 @@ class ModelEvaluator:
                     metrics['recall'] = 0.0
                     metrics['f1'] = 0.0
             else:
-                # 기본 지표만 계산
                 metrics['auc'] = 0.5
                 metrics['logloss'] = 1.0
                 metrics['precision'] = 0.0
