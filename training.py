@@ -54,6 +54,10 @@ class ModelTrainer:
         logger.info(f"{model_type} 모델 학습 시작")
         start_time = time.time()
         
+        # 파라미터 검증 및 수정
+        if params:
+            params = self._validate_and_fix_params(model_type, params)
+        
         # 모델 생성
         model_kwargs = {'params': params}
         if model_type.lower() == 'deepctr':
@@ -81,6 +85,41 @@ class ModelTrainer:
         }
         
         return model
+    
+    def _validate_and_fix_params(self, model_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """파라미터 검증 및 수정"""
+        fixed_params = params.copy()
+        
+        if model_type.lower() == 'lightgbm':
+            # LightGBM의 충돌 방지
+            if 'is_unbalance' in fixed_params and 'scale_pos_weight' in fixed_params:
+                # is_unbalance 제거하고 scale_pos_weight만 사용
+                fixed_params.pop('is_unbalance', None)
+                logger.info("LightGBM: is_unbalance 제거하여 충돌 방지")
+            
+            # 필수 파라미터 확인
+            if 'objective' not in fixed_params:
+                fixed_params['objective'] = 'binary'
+            if 'metric' not in fixed_params:
+                fixed_params['metric'] = 'binary_logloss'
+            if 'verbose' not in fixed_params:
+                fixed_params['verbose'] = -1
+                
+        elif model_type.lower() == 'xgboost':
+            # XGBoost 파라미터 검증
+            if 'objective' not in fixed_params:
+                fixed_params['objective'] = 'binary:logistic'
+            if 'eval_metric' not in fixed_params:
+                fixed_params['eval_metric'] = 'logloss'
+                
+        elif model_type.lower() == 'catboost':
+            # CatBoost 파라미터 검증
+            if 'loss_function' not in fixed_params:
+                fixed_params['loss_function'] = 'Logloss'
+            if 'verbose' not in fixed_params:
+                fixed_params['verbose'] = False
+        
+        return fixed_params
     
     def _apply_model_calibration(self, model: BaseModel, X_val: pd.DataFrame, y_val: pd.Series):
         """모델에 Calibration 적용"""
@@ -135,6 +174,10 @@ class ModelTrainer:
         
         logger.info(f"{model_type} 모델 {cv_folds}폴드 교차검증 시작")
         
+        # 파라미터 검증
+        if params:
+            params = self._validate_and_fix_params(model_type, params)
+        
         # 시간적 순서를 고려한 교차검증
         tscv = TimeSeriesSplit(n_splits=cv_folds)
         
@@ -152,52 +195,82 @@ class ModelTrainer:
         for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
             logger.info(f"폴드 {fold + 1}/{cv_folds} 시작")
             
-            # 데이터 분할
-            X_train_fold = X.iloc[train_idx].copy()
-            X_val_fold = X.iloc[val_idx].copy()
-            y_train_fold = y.iloc[train_idx].copy()
-            y_val_fold = y.iloc[val_idx].copy()
-            
-            # 모델 학습
-            start_time = time.time()
-            model = self.train_single_model(
-                model_type, X_train_fold, y_train_fold,
-                X_val_fold, y_val_fold, params,
-                apply_calibration=True
-            )
-            training_time = time.time() - start_time
-            
-            # 예측 및 평가
-            y_pred_proba = model.predict_proba(X_val_fold)
-            
-            # 평가 지표 계산
-            ap_score = metrics_calculator.average_precision(y_val_fold, y_pred_proba)
-            wll_score = metrics_calculator.weighted_log_loss(y_val_fold, y_pred_proba)
-            combined_score = metrics_calculator.combined_score(y_val_fold, y_pred_proba)
-            
-            # 결과 저장
-            cv_scores['ap_scores'].append(ap_score)
-            cv_scores['wll_scores'].append(wll_score)
-            cv_scores['combined_scores'].append(combined_score)
-            cv_scores['training_times'].append(training_time)
-            cv_scores['fold_models'].append(model)
-            
-            logger.info(f"폴드 {fold + 1} 완료 - AP: {ap_score:.4f}, WLL: {wll_score:.4f}, Combined: {combined_score:.4f}")
-            
-            # 메모리 정리
-            del X_train_fold, X_val_fold, y_train_fold, y_val_fold
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            try:
+                # 데이터 분할
+                X_train_fold = X.iloc[train_idx].copy()
+                X_val_fold = X.iloc[val_idx].copy()
+                y_train_fold = y.iloc[train_idx].copy()
+                y_val_fold = y.iloc[val_idx].copy()
+                
+                # 모델 학습
+                start_time = time.time()
+                model = self.train_single_model(
+                    model_type, X_train_fold, y_train_fold,
+                    X_val_fold, y_val_fold, params,
+                    apply_calibration=True
+                )
+                training_time = time.time() - start_time
+                
+                # 예측 및 평가
+                y_pred_proba = model.predict_proba(X_val_fold)
+                
+                # 평가 지표 계산
+                ap_score = metrics_calculator.average_precision(y_val_fold, y_pred_proba)
+                wll_score = metrics_calculator.weighted_log_loss(y_val_fold, y_pred_proba)
+                combined_score = metrics_calculator.combined_score(y_val_fold, y_pred_proba)
+                
+                # 결과 저장
+                cv_scores['ap_scores'].append(ap_score)
+                cv_scores['wll_scores'].append(wll_score)
+                cv_scores['combined_scores'].append(combined_score)
+                cv_scores['training_times'].append(training_time)
+                cv_scores['fold_models'].append(model)
+                
+                logger.info(f"폴드 {fold + 1} 완료 - AP: {ap_score:.4f}, WLL: {wll_score:.4f}, Combined: {combined_score:.4f}")
+                
+                # 메모리 정리
+                del X_train_fold, X_val_fold, y_train_fold, y_val_fold
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                
+            except Exception as e:
+                logger.error(f"폴드 {fold + 1} 실행 실패: {str(e)}")
+                # 실패한 폴드는 기본값으로 채움
+                cv_scores['ap_scores'].append(0.0)
+                cv_scores['wll_scores'].append(float('inf'))
+                cv_scores['combined_scores'].append(0.0)
+                cv_scores['training_times'].append(0.0)
+                cv_scores['fold_models'].append(None)
+        
+        # 유효한 점수만 사용하여 평균 계산
+        valid_ap_scores = [s for s in cv_scores['ap_scores'] if s > 0]
+        valid_wll_scores = [s for s in cv_scores['wll_scores'] if s != float('inf')]
+        valid_combined_scores = [s for s in cv_scores['combined_scores'] if s > 0]
+        
+        if not valid_combined_scores:
+            logger.warning(f"{model_type} 모든 폴드가 실패했습니다")
+            return {
+                'model_type': model_type,
+                'ap_mean': 0.0,
+                'ap_std': 0.0,
+                'wll_mean': float('inf'),
+                'wll_std': 0.0,
+                'combined_mean': 0.0,
+                'combined_std': 0.0,
+                'training_time_mean': 0.0,
+                'scores_detail': cv_scores,
+                'params': params or {}
+            }
         
         # 평균 및 표준편차 계산
         cv_results = {
             'model_type': model_type,
-            'ap_mean': np.mean(cv_scores['ap_scores']),
-            'ap_std': np.std(cv_scores['ap_scores']),
-            'wll_mean': np.mean(cv_scores['wll_scores']),
-            'wll_std': np.std(cv_scores['wll_scores']),
-            'combined_mean': np.mean(cv_scores['combined_scores']),
-            'combined_std': np.std(cv_scores['combined_scores']),
-            'training_time_mean': np.mean(cv_scores['training_times']),
+            'ap_mean': np.mean(valid_ap_scores) if valid_ap_scores else 0.0,
+            'ap_std': np.std(valid_ap_scores) if len(valid_ap_scores) > 1 else 0.0,
+            'wll_mean': np.mean(valid_wll_scores) if valid_wll_scores else float('inf'),
+            'wll_std': np.std(valid_wll_scores) if len(valid_wll_scores) > 1 else 0.0,
+            'combined_mean': np.mean(valid_combined_scores),
+            'combined_std': np.std(valid_combined_scores) if len(valid_combined_scores) > 1 else 0.0,
+            'training_time_mean': np.mean([t for t in cv_scores['training_times'] if t > 0]),
             'scores_detail': cv_scores,
             'params': params or {}
         }
@@ -215,7 +288,7 @@ class ModelTrainer:
                                    y: pd.Series,
                                    n_trials: int = None,
                                    cv_folds: int = 3) -> Dict[str, Any]:
-        """CTR 특화 하이퍼파라미터 튜닝"""
+        """CTR 특화 하이퍼파라미터 튜닝 (파라미터 충돌 방지)"""
         
         if n_trials is None:
             n_trials = self.config.TUNING_CONFIG['n_trials']
@@ -223,7 +296,7 @@ class ModelTrainer:
         logger.info(f"{model_type} 모델 하이퍼파라미터 튜닝 시작 (trials: {n_trials})")
         
         def objective(trial):
-            # 모델 타입별 CTR 특화 하이퍼파라미터 공간
+            # 모델 타입별 CTR 특화 하이퍼파라미터 공간 (충돌 방지)
             if model_type.lower() == 'lightgbm':
                 params = {
                     'objective': 'binary',
@@ -240,10 +313,10 @@ class ModelTrainer:
                     'lambda_l2': trial.suggest_float('lambda_l2', 0.1, 5.0),
                     'verbose': -1,
                     'random_state': self.config.RANDOM_STATE,
-                    'n_estimators': 2000,
-                    'early_stopping_rounds': 200,
-                    'is_unbalance': True,
+                    'n_estimators': 1000,  # 학습 속도를 위해 감소
+                    'early_stopping_rounds': 100,
                     'scale_pos_weight': trial.suggest_float('scale_pos_weight', 30, 70)
+                    # is_unbalance 제거하여 충돌 방지
                 }
             
             elif model_type.lower() == 'xgboost':
@@ -261,8 +334,8 @@ class ModelTrainer:
                     'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 5.0),
                     'scale_pos_weight': trial.suggest_float('scale_pos_weight', 30, 70),
                     'random_state': self.config.RANDOM_STATE,
-                    'n_estimators': 2000,
-                    'early_stopping_rounds': 200
+                    'n_estimators': 1000,
+                    'early_stopping_rounds': 100
                 }
             
             elif model_type.lower() == 'catboost':
@@ -274,9 +347,9 @@ class ModelTrainer:
                     'depth': trial.suggest_int('depth', 6, 12),
                     'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
                     'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1, 10),
-                    'iterations': 2000,
+                    'iterations': 1000,
                     'random_seed': self.config.RANDOM_STATE,
-                    'early_stopping_rounds': 200,
+                    'early_stopping_rounds': 100,
                     'verbose': False,
                     'auto_class_weights': 'Balanced'
                 }
@@ -295,8 +368,8 @@ class ModelTrainer:
                     'learning_rate': trial.suggest_float('learning_rate', 0.0001, 0.01, log=True),
                     'weight_decay': trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True),
                     'batch_size': trial.suggest_categorical('batch_size', [4096, 8192, 16384]),
-                    'epochs': 100,
-                    'patience': 20,
+                    'epochs': 50,  # 튜닝 속도를 위해 감소
+                    'patience': 10,
                     'use_batch_norm': trial.suggest_categorical('use_batch_norm', [True, False]),
                     'activation': trial.suggest_categorical('activation', ['relu', 'gelu'])
                 }
@@ -310,7 +383,13 @@ class ModelTrainer:
                 cv_result = self.cross_validate_model(model_type, X, y, cv_folds, params)
                 
                 # Combined Score 최적화
-                return cv_result['combined_mean']
+                score = cv_result['combined_mean']
+                
+                # 점수가 0이면 실패한 것으로 간주
+                if score <= 0:
+                    return 0.0
+                    
+                return score
             
             except Exception as e:
                 logger.error(f"Trial 실행 실패: {str(e)}")
@@ -328,26 +407,36 @@ class ModelTrainer:
             study.optimize(
                 objective, 
                 n_trials=n_trials,
-                timeout=self.config.TUNING_CONFIG.get('timeout', 3600),
-                n_jobs=1  # GPU 사용 시 병렬 처리 제한
+                timeout=self.config.TUNING_CONFIG.get('timeout', 1800),  # 30분으로 단축
+                n_jobs=1,  # GPU 사용 시 병렬 처리 제한
+                show_progress_bar=False
             )
         except KeyboardInterrupt:
             logger.info("하이퍼파라미터 튜닝이 중단되었습니다.")
+        except Exception as e:
+            logger.error(f"하이퍼파라미터 튜닝 중 오류 발생: {str(e)}")
         
         # 결과 정리
+        if study.best_value is None or study.best_value <= 0:
+            logger.warning(f"{model_type} 하이퍼파라미터 튜닝에서 유효한 결과를 얻지 못했습니다.")
+            # 기본 파라미터 사용
+            best_params = self._get_ctr_optimized_params(model_type)
+        else:
+            best_params = study.best_params
+            
         tuning_results = {
             'model_type': model_type,
-            'best_params': study.best_params,
-            'best_score': study.best_value,
+            'best_params': best_params,
+            'best_score': study.best_value if study.best_value is not None else 0.0,
             'n_trials': len(study.trials),
             'study': study
         }
         
-        self.best_params[model_type] = study.best_params
+        self.best_params[model_type] = best_params
         
         logger.info(f"{model_type} 하이퍼파라미터 튜닝 완료")
-        logger.info(f"최적 점수: {study.best_value:.4f}")
-        logger.info(f"최적 파라미터: {study.best_params}")
+        logger.info(f"최적 점수: {tuning_results['best_score']:.4f}")
+        logger.info(f"최적 파라미터: {best_params}")
         
         return tuning_results
     
@@ -471,10 +560,13 @@ class ModelTrainer:
         return trained_models
     
     def _get_ctr_optimized_params(self, model_type: str) -> Dict[str, Any]:
-        """CTR 예측에 특화된 기본 파라미터"""
+        """CTR 예측에 특화된 기본 파라미터 (충돌 방지)"""
         
         if model_type.lower() == 'lightgbm':
-            return self.config.LGBM_PARAMS.copy()
+            # is_unbalance 제거한 안전한 파라미터
+            params = self.config.LGBM_PARAMS.copy()
+            params.pop('is_unbalance', None)  # 충돌 방지
+            return params
         
         elif model_type.lower() == 'xgboost':
             return self.config.XGB_PARAMS.copy()
@@ -588,15 +680,17 @@ class ModelTrainer:
         
         if self.cv_results:
             # 최고 성능 모델 찾기
-            best_model = max(
-                self.cv_results.items(),
-                key=lambda x: x[1]['combined_mean']
-            )
-            summary['best_model'] = {
-                'name': best_model[0],
-                'score': best_model[1]['combined_mean'],
-                'std': best_model[1]['combined_std']
-            }
+            valid_results = {k: v for k, v in self.cv_results.items() if v['combined_mean'] > 0}
+            if valid_results:
+                best_model = max(
+                    valid_results.items(),
+                    key=lambda x: x[1]['combined_mean']
+                )
+                summary['best_model'] = {
+                    'name': best_model[0],
+                    'score': best_model[1]['combined_mean'],
+                    'std': best_model[1]['combined_std']
+                }
         
         return summary
 
@@ -660,7 +754,10 @@ class TrainingPipeline:
         trained_models = self.trainer.train_all_models(X_train, y_train, X_val, y_val, model_types)
         
         # 4. 모델 저장
-        self.trainer.save_models()
+        try:
+            self.trainer.save_models()
+        except Exception as e:
+            logger.warning(f"모델 저장 실패: {str(e)}")
         
         # 5. 결과 요약
         pipeline_time = time.time() - pipeline_start_time

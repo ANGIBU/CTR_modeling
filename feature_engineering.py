@@ -33,7 +33,7 @@ class CTRFeatureEngineer:
         self.final_feature_columns = []
         self.original_feature_order = []
         self.memory_efficient_mode = False
-        
+    
     def set_memory_efficient_mode(self, enabled: bool = True):
         """메모리 효율 모드 설정"""
         self.memory_efficient_mode = enabled
@@ -44,12 +44,18 @@ class CTRFeatureEngineer:
     
     def get_memory_usage(self) -> float:
         """현재 메모리 사용량 (GB)"""
-        process = psutil.Process()
-        return process.memory_info().rss / (1024**3)
+        try:
+            process = psutil.Process()
+            return process.memory_info().rss / (1024**3)
+        except:
+            return 0.0
     
     def get_available_memory(self) -> float:
         """사용 가능한 메모리 (GB)"""
-        return psutil.virtual_memory().available / (1024**3)
+        try:
+            return psutil.virtual_memory().available / (1024**3)
+        except:
+            return 32.0
     
     def create_all_features(self, 
                           train_df: pd.DataFrame, 
@@ -125,7 +131,7 @@ class CTRFeatureEngineer:
     def _unify_data_types(self, 
                          X_train: pd.DataFrame, 
                          X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """기본 데이터 타입 통일"""
+        """기본 데이터 타입 통일 (메모리 효율적 처리)"""
         logger.info("데이터 타입 통일 시작")
         
         try:
@@ -137,70 +143,108 @@ class CTRFeatureEngineer:
                     train_dtype = str(X_train[col].dtype)
                     test_dtype = str(X_test[col].dtype)
                     
+                    # 문제가 된 seq 컬럼 특별 처리
+                    if col == 'seq' or 'seq' in str(col).lower():
+                        logger.info(f"{col}: 메모리 효율적 문자열 처리")
+                        # 메모리 효율적 처리: 해시값으로 변환
+                        try:
+                            train_hash = X_train[col].astype(str).apply(lambda x: hash(str(x)) % 1000000).astype('int32')
+                            test_hash = X_test[col].astype(str).apply(lambda x: hash(str(x)) % 1000000).astype('int32')
+                            
+                            X_train[col] = train_hash
+                            X_test[col] = test_hash
+                            logger.info(f"{col}: 해시 변환 완료")
+                            continue
+                        except Exception as e:
+                            logger.error(f"{col} 해시 변환 실패: {e}")
+                            # 기본값으로 대체
+                            X_train[col] = 0
+                            X_test[col] = 0
+                            continue
+                    
                     # 타입이 다른 경우 통일
                     if train_dtype != test_dtype:
                         logger.info(f"{col}: 타입 불일치 - train: {train_dtype}, test: {test_dtype}")
                         
                         # category 타입 특별 처리
                         if 'category' in train_dtype or 'category' in test_dtype:
-                            # 둘 다 문자열로 변환
-                            X_train[col] = X_train[col].astype('str')
-                            X_test[col] = X_test[col].astype('str')
-                            logger.info(f"{col}: str로 통일")
+                            # 메모리 효율적으로 처리
+                            try:
+                                X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0).astype('float32')
+                                X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0).astype('float32')
+                                logger.info(f"{col}: float32로 통일")
+                            except:
+                                X_train[col] = 0.0
+                                X_test[col] = 0.0
                         # 수치형으로 변환 시도
                         elif pd.api.types.is_numeric_dtype(X_train[col]) or pd.api.types.is_numeric_dtype(X_test[col]):
-                            # 수치형으로 통일
-                            X_train[col] = pd.to_numeric(X_train[col], errors='coerce').astype('float32')
-                            X_test[col] = pd.to_numeric(X_test[col], errors='coerce').astype('float32')
+                            X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0).astype('float32')
+                            X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0).astype('float32')
                             logger.info(f"{col}: float32로 통일")
                         else:
-                            # 문자열로 통일
-                            X_train[col] = X_train[col].astype('str')
-                            X_test[col] = X_test[col].astype('str')
-                            logger.info(f"{col}: str로 통일")
+                            # 문자열은 해시로 변환
+                            try:
+                                train_hash = X_train[col].astype(str).apply(lambda x: hash(str(x)) % 100000).astype('int32')
+                                test_hash = X_test[col].astype(str).apply(lambda x: hash(str(x)) % 100000).astype('int32')
+                                X_train[col] = train_hash
+                                X_test[col] = test_hash
+                                logger.info(f"{col}: 해시로 변환")
+                            except:
+                                X_train[col] = 0
+                                X_test[col] = 0
                     
                     # 동일한 타입이어도 최적화
                     elif train_dtype == 'object':
-                        # object 타입은 문자열로 명시적 변환
-                        X_train[col] = X_train[col].astype('str')
-                        X_test[col] = X_test[col].astype('str')
+                        # object 타입을 해시로 변환 (메모리 절약)
+                        try:
+                            train_hash = X_train[col].astype(str).apply(lambda x: hash(str(x)) % 100000).astype('int32')
+                            test_hash = X_test[col].astype(str).apply(lambda x: hash(str(x)) % 100000).astype('int32')
+                            X_train[col] = train_hash
+                            X_test[col] = test_hash
+                        except:
+                            X_train[col] = 0
+                            X_test[col] = 0
                     elif 'category' in train_dtype:
-                        # category 타입은 문자열로 변환
-                        X_train[col] = X_train[col].astype('str')
-                        X_test[col] = X_test[col].astype('str')
+                        # category 타입은 수치형으로 변환
+                        try:
+                            X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0).astype('float32')
+                            X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0).astype('float32')
+                        except:
+                            X_train[col] = 0.0
+                            X_test[col] = 0.0
                     elif train_dtype in ['int64', 'float64']:
                         # 큰 타입은 작은 타입으로 변환
-                        if train_dtype == 'int64':
-                            # 범위 확인 후 적절한 타입 선택
-                            try:
-                                min_val = min(X_train[col].min(), X_test[col].min())
+                        try:
+                            if train_dtype == 'int64':
+                                min_val = min(X_train[col].min(), X_test[col].min()) 
                                 max_val = max(X_train[col].max(), X_test[col].max())
                                 
-                                if pd.isna(min_val) or pd.isna(max_val):
+                                if pd.isna(min_val) or pd.isna(max_val) or min_val < 0:
                                     X_train[col] = X_train[col].astype('float32')
                                     X_test[col] = X_test[col].astype('float32')
-                                elif min_val >= 0 and max_val < 65535:
+                                elif max_val < 65535:
                                     X_train[col] = X_train[col].astype('uint16')
                                     X_test[col] = X_test[col].astype('uint16')
                                 else:
                                     X_train[col] = X_train[col].astype('int32')
                                     X_test[col] = X_test[col].astype('int32')
-                            except:
+                            else:  # float64
                                 X_train[col] = X_train[col].astype('float32')
                                 X_test[col] = X_test[col].astype('float32')
-                        else:  # float64
-                            X_train[col] = X_train[col].astype('float32')
-                            X_test[col] = X_test[col].astype('float32')
+                        except Exception as e:
+                            logger.warning(f"{col} 타입 최적화 실패: {e}")
+                            X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0).astype('float32')
+                            X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0).astype('float32')
                 
                 except Exception as e:
                     logger.warning(f"{col} 타입 통일 실패: {str(e)}")
-                    # 실패 시 기본값으로 설정
+                    # 실패 시 안전한 기본값으로 설정
                     try:
                         X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0).astype('float32')
                         X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0).astype('float32')
                     except:
-                        X_train[col] = X_train[col].astype('str')
-                        X_test[col] = X_test[col].astype('str')
+                        X_train[col] = 0.0
+                        X_test[col] = 0.0
             
             logger.info("데이터 타입 통일 완료")
             
@@ -227,9 +271,13 @@ class CTRFeatureEngineer:
             elif dtype_str in ['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64',
                              'float16', 'float32', 'float64']:
                 # 카디널리티 체크로 ID성 여부 재확인
-                if df[col].nunique() / len(df) > 0.95:
-                    self.id_columns.append(col)
-                else:
+                try:
+                    unique_ratio = df[col].nunique() / len(df)
+                    if unique_ratio > 0.95:
+                        self.id_columns.append(col)
+                    else:
+                        self.numeric_columns.append(col)
+                except:
                     self.numeric_columns.append(col)
             elif dtype_str in ['object', 'category', 'string', 'bool']:
                 self.categorical_columns.append(col)
@@ -274,12 +322,16 @@ class CTRFeatureEngineer:
                         ).astype('int32')
                         
                         # 카운트 인코딩
-                        value_counts = train_values.value_counts()
-                        X_train[f'{col}_count'] = train_values.map(value_counts).fillna(0).astype('int16')
-                        X_test[f'{col}_count'] = test_values.map(value_counts).fillna(0).astype('int16')
-                        
-                        self.generated_features.extend([f'{col}_hash', f'{col}_count'])
-                        logger.info(f"{col}: 해시 및 카운트 인코딩 완료")
+                        try:
+                            value_counts = train_values.value_counts()
+                            X_train[f'{col}_count'] = train_values.map(value_counts).fillna(0).astype('int16')
+                            X_test[f'{col}_count'] = test_values.map(value_counts).fillna(0).astype('int16')
+                            
+                            self.generated_features.extend([f'{col}_hash', f'{col}_count'])
+                            logger.info(f"{col}: 해시 및 카운트 인코딩 완료")
+                        except Exception as e:
+                            logger.warning(f"{col} 카운트 인코딩 실패: {e}")
+                            self.generated_features.append(f'{col}_hash')
                     
                 except Exception as e:
                     logger.warning(f"{col} ID 피처 처리 실패: {str(e)}")
@@ -328,25 +380,30 @@ class CTRFeatureEngineer:
                                    X_train: pd.DataFrame, 
                                    X_test: pd.DataFrame, 
                                    y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """범주형 피처 인코딩"""
+        """범주형 피처 인코딩 (안전한 처리)"""
         logger.info("범주형 피처 인코딩 시작")
         
         # 현재 남아있는 범주형 컬럼 재확인
         current_categorical_cols = []
         for col in X_train.columns:
-            dtype_str = str(X_train[col].dtype)
-            if dtype_str in ['object', 'category', 'string'] or X_train[col].dtype.name == 'category':
-                current_categorical_cols.append(col)
+            try:
+                dtype_str = str(X_train[col].dtype)
+                if dtype_str in ['object', 'category', 'string'] or X_train[col].dtype.name == 'category':
+                    current_categorical_cols.append(col)
+            except:
+                continue
+        
+        logger.info(f"처리할 범주형 컬럼: {len(current_categorical_cols)}개")
         
         for col in current_categorical_cols:
             try:
                 # 안전한 문자열 변환
-                train_values = X_train[col].astype('str').fillna('missing')
-                test_values = X_test[col].astype('str').fillna('missing')
+                train_values = X_train[col].astype(str).fillna('missing')
+                test_values = X_test[col].astype(str).fillna('missing')
                 
                 # 고카디널리티 처리
                 unique_count = len(train_values.unique())
-                max_categories = 100 if self.memory_efficient_mode else 500
+                max_categories = 50 if self.memory_efficient_mode else 200
                 
                 if unique_count > max_categories:
                     top_categories = train_values.value_counts().head(max_categories).index
@@ -439,20 +496,23 @@ class CTRFeatureEngineer:
         kf = KFold(n_splits=3, shuffle=True, random_state=42)
         global_mean = target.mean()
         
-        for train_idx, val_idx in kf.split(series):
-            # 훈련 세트에서 타겟 평균 계산
-            train_stats = pd.DataFrame({
-                'category': series.iloc[train_idx],
-                'target': target.iloc[train_idx]
-            }).groupby('category').agg({'target': ['mean', 'count']})
-            
-            train_stats.columns = ['mean', 'count']
-            
-            # 스무딩 적용
-            smoothed_means = (train_stats['mean'] * train_stats['count'] + global_mean * smoothing) / (train_stats['count'] + smoothing)
-            
-            # 검증 세트에 적용
-            result[val_idx] = series.iloc[val_idx].map(smoothed_means).fillna(global_mean)
+        try:
+            for train_idx, val_idx in kf.split(series):
+                # 훈련 세트에서 타겟 평균 계산
+                train_stats = pd.DataFrame({
+                    'category': series.iloc[train_idx],
+                    'target': target.iloc[train_idx]
+                }).groupby('category').agg({'target': ['mean', 'count']})
+                
+                train_stats.columns = ['mean', 'count']
+                
+                # 스무딩 적용
+                smoothed_means = (train_stats['mean'] * train_stats['count'] + global_mean * smoothing) / (train_stats['count'] + smoothing)
+                
+                # 검증 세트에 적용
+                result[val_idx] = series.iloc[val_idx].map(smoothed_means).fillna(global_mean)
+        except:
+            result.fill(global_mean)
         
         return pd.Series(result, index=series.index)
     

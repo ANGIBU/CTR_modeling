@@ -58,7 +58,7 @@ class Config:
     N_SPLITS = 5
     TEST_SIZE = 0.2
     
-    # LightGBM CTR 특화 파라미터
+    # LightGBM CTR 특화 파라미터 (충돌 해결)
     LGBM_PARAMS = {
         'objective': 'binary',
         'metric': 'binary_logloss',
@@ -76,8 +76,7 @@ class Config:
         'random_state': RANDOM_STATE,
         'n_estimators': 2000,
         'early_stopping_rounds': 200,
-        'is_unbalance': True,
-        'scale_pos_weight': 49.0  # 1/0.0201 - 1
+        'scale_pos_weight': 49.0  # is_unbalance 제거하여 충돌 방지
     }
     
     # XGBoost CTR 특화 파라미터
@@ -193,7 +192,7 @@ class Config:
     
     # 하이퍼파라미터 튜닝 설정
     TUNING_CONFIG = {
-        'n_trials': 150,
+        'n_trials': 50,  # 충돌 방지를 위해 감소
         'timeout': 3600,
         'parallel_jobs': 6,  # 6코어 CPU 활용
         'pruner': 'MedianPruner',

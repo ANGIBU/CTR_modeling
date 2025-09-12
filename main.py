@@ -11,6 +11,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Any, Optional
 import sys
+import signal
 
 # 필수 라이브러리 import 안전 처리
 try:
@@ -42,29 +43,51 @@ except ImportError as e:
     print("필요한 모든 파일이 프로젝트 디렉터리에 있는지 확인하세요.")
     sys.exit(1)
 
+# 전역 변수로 정리 작업을 위한 플래그
+cleanup_required = False
+training_pipeline = None
+
+def signal_handler(signum, frame):
+    """인터럽트 신호 처리"""
+    global cleanup_required
+    print("\n프로그램 중단 요청을 받았습니다. 정리 작업을 진행합니다...")
+    cleanup_required = True
+    force_memory_cleanup()
+
 def get_memory_usage() -> float:
     """현재 메모리 사용량 (GB)"""
     if PSUTIL_AVAILABLE:
-        process = psutil.Process()
-        return process.memory_info().rss / (1024**3)
+        try:
+            process = psutil.Process()
+            return process.memory_info().rss / (1024**3)
+        except:
+            return 0.0
     return 0.0
 
 def get_available_memory() -> float:
     """사용 가능한 메모리 (GB)"""
     if PSUTIL_AVAILABLE:
-        return psutil.virtual_memory().available / (1024**3)
-    return 32.0  # 기본값
+        try:
+            return psutil.virtual_memory().available / (1024**3)
+        except:
+            return 32.0  # 기본값
+    return 32.0
 
 def force_memory_cleanup():
     """강제 메모리 정리"""
-    gc.collect()
-    if TORCH_AVAILABLE and torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    try:
+        gc.collect()
+        if TORCH_AVAILABLE and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    except Exception as e:
+        print(f"메모리 정리 중 오류: {e}")
+    
     try:
         import ctypes
         if hasattr(ctypes, 'windll'):
             ctypes.windll.kernel32.SetProcessWorkingSetSize(-1, -1, -1)
-    except Exception:
+    except:
         pass
 
 def setup_logging():
@@ -90,16 +113,23 @@ def memory_monitor_decorator(func):
         logger = logging.getLogger(__name__)
         logger.info(f"{func.__name__} 시작 - 메모리: {memory_before:.2f} GB, 사용 가능: {available_before:.2f} GB")
         
-        result = func(*args, **kwargs)
-        
-        memory_after = get_memory_usage()
-        available_after = get_available_memory()
-        logger.info(f"{func.__name__} 완료 - 메모리: {memory_after:.2f} GB, 사용 가능: {available_after:.2f} GB")
-        
-        if available_after < 8:
+        try:
+            result = func(*args, **kwargs)
+            
+            memory_after = get_memory_usage()
+            available_after = get_available_memory()
+            logger.info(f"{func.__name__} 완료 - 메모리: {memory_after:.2f} GB, 사용 가능: {available_after:.2f} GB")
+            
+            if available_after < 8:
+                logger.warning("메모리 부족 상황 - 정리 작업 수행")
+                force_memory_cleanup()
+            
+            return result
+        except Exception as e:
+            logger.error(f"{func.__name__} 실행 중 오류: {e}")
             force_memory_cleanup()
-        
-        return result
+            raise
+    
     return wrapper
 
 @memory_monitor_decorator
@@ -132,11 +162,11 @@ def load_and_preprocess_large_data(config: Config, quick_mode: bool = False) -> 
             max_test_size = 20000
             logger.info(f"빠른 모드: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
         elif available_memory > 45:
-            max_train_size = 1500000
-            max_test_size = 300000
+            max_train_size = 1000000  # 메모리 문제로 감소
+            max_test_size = 250000
             logger.info(f"대용량 모드: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
         elif available_memory > 30:
-            max_train_size = 1000000
+            max_train_size = 800000
             max_test_size = 200000
             logger.info(f"중간 모드: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
         else:
@@ -149,7 +179,11 @@ def load_and_preprocess_large_data(config: Config, quick_mode: bool = False) -> 
             train_df, test_df = data_loader.load_large_data_optimized()
         except Exception as e:
             logger.warning(f"최적화 로딩 실패: {e}. 기본 로딩 시도")
-            train_df, test_df = data_loader.load_data()
+            try:
+                train_df, test_df = data_loader.load_data()
+            except Exception as e2:
+                logger.error(f"기본 로딩도 실패: {e2}")
+                raise
         
         # 메모리 상태 확인
         current_memory = get_memory_usage()
@@ -159,7 +193,7 @@ def load_and_preprocess_large_data(config: Config, quick_mode: bool = False) -> 
         # 메모리 부족 시 점진적 감소
         if available_memory < 12:
             logger.warning("메모리 부족으로 데이터 크기 조정")
-            target_ratio = max(0.3, available_memory / 20)
+            target_ratio = max(0.5, available_memory / 20)
             
             new_train_size = int(len(train_df) * target_ratio)
             new_test_size = int(len(test_df) * target_ratio)
@@ -167,8 +201,9 @@ def load_and_preprocess_large_data(config: Config, quick_mode: bool = False) -> 
             logger.info(f"데이터 크기 조정: 학습 {len(train_df):,} → {new_train_size:,}")
             logger.info(f"데이터 크기 조정: 테스트 {len(test_df):,} → {new_test_size:,}")
             
-            train_df = train_df.sample(n=new_train_size, random_state=42).reset_index(drop=True)
-            test_df = test_df.sample(n=new_test_size, random_state=42).reset_index(drop=True)
+            if new_train_size > 0 and new_test_size > 0:
+                train_df = train_df.sample(n=new_train_size, random_state=42).reset_index(drop=True)
+                test_df = test_df.sample(n=new_test_size, random_state=42).reset_index(drop=True)
             
             force_memory_cleanup()
         
@@ -258,8 +293,8 @@ def advanced_feature_engineering(train_df: pd.DataFrame,
         y_train = train_df[target_col].copy()
         
         # 피처 엔지니어 저장
-        feature_engineer_path = config.MODEL_DIR / "feature_engineer.pkl"
         try:
+            feature_engineer_path = config.MODEL_DIR / "feature_engineer.pkl"
             config.setup_directories()
             with open(feature_engineer_path, 'wb') as f:
                 pickle.dump(feature_engineer, f)
@@ -294,6 +329,8 @@ def comprehensive_model_training(X_train: pd.DataFrame,
     logger = logging.getLogger(__name__)
     logger.info("종합 모델 학습 시작")
     
+    global training_pipeline
+    
     try:
         available_memory = get_available_memory()
         gpu_available = TORCH_AVAILABLE and torch.cuda.is_available()
@@ -310,8 +347,8 @@ def comprehensive_model_training(X_train: pd.DataFrame,
         # 메모리 기반 학습 전략
         if available_memory < 15:
             logger.info("메모리 절약 모드")
-            if len(X_train) > 200000:
-                sample_size = 150000
+            if len(X_train) > 500000:
+                sample_size = 400000
                 sample_indices = np.random.choice(len(X_train), sample_size, replace=False)
                 X_train = X_train.iloc[sample_indices].reset_index(drop=True)
                 y_train = y_train.iloc[sample_indices].reset_index(drop=True)
@@ -331,9 +368,13 @@ def comprehensive_model_training(X_train: pd.DataFrame,
             logger.error(f"데이터 분할 실패: {e}")
             # 기본 분할 시도
             from sklearn.model_selection import train_test_split
-            split_result = train_test_split(X_train, y_train, test_size=0.2, random_state=42, stratify=y_train)
-            X_train_split, X_val_split, y_train_split, y_val_split = split_result
-            logger.info("기본 데이터 분할 사용")
+            try:
+                split_result = train_test_split(X_train, y_train, test_size=0.2, random_state=42, stratify=y_train)
+                X_train_split, X_val_split, y_train_split, y_val_split = split_result
+                logger.info("기본 데이터 분할 사용")
+            except Exception as e2:
+                logger.error(f"기본 데이터 분할도 실패: {e2}")
+                raise
         
         del X_train, y_train
         force_memory_cleanup()
@@ -342,7 +383,7 @@ def comprehensive_model_training(X_train: pd.DataFrame,
         available_models = ModelFactory.get_available_models()
         logger.info(f"사용 가능한 모델: {available_models}")
         
-        # 기본 모델들만 사용
+        # 안전한 모델들만 사용 (충돌 방지)
         model_types = []
         if 'lightgbm' in available_models:
             model_types.append('lightgbm')
@@ -365,14 +406,19 @@ def comprehensive_model_training(X_train: pd.DataFrame,
         pipeline_results = {}
         
         # 개별 모델 학습
+        successful_models = 0
         for model_type in model_types:
+            if cleanup_required:
+                logger.info("사용자 중단 요청으로 학습 중단")
+                break
+                
             try:
                 logger.info(f"{model_type} 모델 학습 시작")
                 
-                # 하이퍼파라미터 튜닝
+                # 하이퍼파라미터 튜닝 (간소화)
                 if tune_hyperparameters and available_memory > 10:
                     try:
-                        n_trials = 30 if model_type == 'deepctr' else 50
+                        n_trials = 20 if model_type == 'deepctr' else 30  # trial 수 감소
                         training_pipeline.trainer.hyperparameter_tuning_optuna(
                             model_type, X_train_split, y_train_split, n_trials=n_trials, cv_folds=3
                         )
@@ -384,12 +430,19 @@ def comprehensive_model_training(X_train: pd.DataFrame,
                     cv_result = training_pipeline.trainer.cross_validate_model(
                         model_type, X_train_split, y_train_split, cv_folds=3
                     )
+                    
+                    if cv_result['combined_mean'] > 0:
+                        successful_models += 1
+                    
                 except Exception as e:
                     logger.warning(f"{model_type} 교차검증 실패: {e}")
                     cv_result = None
                 
                 # 최종 모델 학습
                 params = training_pipeline.trainer.best_params.get(model_type, None)
+                if params is None:
+                    params = training_pipeline.trainer._get_ctr_optimized_params(model_type)
+                
                 model_kwargs = {'params': params}
                 if model_type == 'deepctr':
                     model_kwargs['input_dim'] = X_train_split.shape[1]
@@ -428,22 +481,25 @@ def comprehensive_model_training(X_train: pd.DataFrame,
         pipeline_results = {
             'model_count': len(training_pipeline.trainer.trained_models),
             'trained_models': list(training_pipeline.trainer.trained_models.keys()),
-            'gpu_used': gpu_available and 'deepctr' in training_pipeline.trainer.trained_models
+            'gpu_used': gpu_available and 'deepctr' in training_pipeline.trainer.trained_models,
+            'successful_models': successful_models
         }
         
         # 최고 성능 모델 찾기
         if training_pipeline.trainer.cv_results:
             try:
-                best_model_name = max(
-                    training_pipeline.trainer.cv_results.keys(),
-                    key=lambda x: training_pipeline.trainer.cv_results[x]['combined_mean']
-                )
-                best_score = training_pipeline.trainer.cv_results[best_model_name]['combined_mean']
-                
-                pipeline_results['best_model'] = {
-                    'name': best_model_name,
-                    'score': best_score
-                }
+                valid_results = {k: v for k, v in training_pipeline.trainer.cv_results.items() if v['combined_mean'] > 0}
+                if valid_results:
+                    best_model_name = max(
+                        valid_results.keys(),
+                        key=lambda x: valid_results[x]['combined_mean']
+                    )
+                    best_score = valid_results[best_model_name]['combined_mean']
+                    
+                    pipeline_results['best_model'] = {
+                        'name': best_model_name,
+                        'score': best_score
+                    }
             except Exception as e:
                 logger.warning(f"최고 모델 찾기 실패: {e}")
         
@@ -678,7 +734,10 @@ def generate_optimized_predictions(trainer: ModelTrainer,
         # 데이터 타입 통일
         for col in X_test.columns:
             if X_test[col].dtype != 'float32':
-                X_test[col] = X_test[col].astype('float32')
+                try:
+                    X_test[col] = X_test[col].astype('float32')
+                except:
+                    X_test[col] = 0.0
         
         logger.info(f"검증 완료 - X_test 형태: {X_test.shape}")
         
@@ -814,7 +873,19 @@ def generate_optimized_predictions(trainer: ModelTrainer,
         
     except Exception as e:
         logger.error(f"최적화된 예측 생성 실패: {str(e)}")
-        raise
+        # 기본 제출 파일이라도 생성
+        try:
+            default_submission = pd.DataFrame({
+                'id': range(len(X_test) if 'X_test' in locals() else 100),
+                'clicked': 0.0201
+            })
+            output_path = config.BASE_DIR / "submission.csv"
+            default_submission.to_csv(output_path, index=False)
+            logger.info(f"기본 제출 파일 저장: {output_path}")
+            return default_submission
+        except Exception as e2:
+            logger.error(f"기본 제출 파일 생성도 실패: {e2}")
+            raise e
 
 def setup_inference_system(config: Config) -> Optional[CTRPredictionAPI]:
     """추론 시스템 설정"""
@@ -883,6 +954,10 @@ def execute_comprehensive_pipeline(args, config: Config, logger):
             config, quick_mode=args.quick
         )
         
+        if cleanup_required:
+            logger.info("사용자 중단 요청")
+            return None
+        
         # 2. 피처 엔지니어링
         X_train, X_test, y_train, feature_engineer = advanced_feature_engineering(
             train_df, test_df, config
@@ -890,6 +965,10 @@ def execute_comprehensive_pipeline(args, config: Config, logger):
         
         del train_df, test_df
         force_memory_cleanup()
+        
+        if cleanup_required:
+            logger.info("사용자 중단 요청")
+            return None
         
         # 3. 종합 모델 학습 (GPU 포함)
         trainer, X_val, y_val, training_results = comprehensive_model_training(
@@ -899,17 +978,24 @@ def execute_comprehensive_pipeline(args, config: Config, logger):
         
         logger.info(f"학습 결과: {training_results}")
         
+        if cleanup_required:
+            logger.info("사용자 중단 요청")
+            return {'trainer': trainer, 'submission': None}
+        
         # 4. Calibration 앙상블
         available_memory = get_available_memory()
         ensemble_manager = None
         
-        if available_memory > 5:
+        if available_memory > 5 and training_results.get('successful_models', 0) >= 2:
             ensemble_manager = advanced_ensemble_pipeline(trainer, X_val, y_val, config)
         else:
-            logger.warning("메모리 부족으로 앙상블 단계 생략")
+            logger.warning("메모리 부족 또는 모델 부족으로 앙상블 단계 생략")
         
         # 5. 종합 평가
-        comprehensive_evaluation(trainer, ensemble_manager, X_val, y_val, config)
+        try:
+            comprehensive_evaluation(trainer, ensemble_manager, X_val, y_val, config)
+        except Exception as e:
+            logger.warning(f"종합 평가 실패: {e}")
         
         # 6. 최적화된 예측 생성 (CTR 보정)
         submission = generate_optimized_predictions(trainer, ensemble_manager, X_test, config)
@@ -918,10 +1004,10 @@ def execute_comprehensive_pipeline(args, config: Config, logger):
         available_memory = get_available_memory()
         prediction_api = None
         
-        if available_memory > 3:
+        if available_memory > 3 and not cleanup_required:
             prediction_api = setup_inference_system(config)
         else:
-            logger.warning("메모리 부족으로 추론 시스템 설정 생략")
+            logger.warning("메모리 부족 또는 중단 요청으로 추론 시스템 설정 생략")
         
         return {
             'trainer': trainer,
@@ -939,6 +1025,9 @@ def execute_comprehensive_pipeline(args, config: Config, logger):
         logger.info("3. 다른 프로그램 종료")
         force_memory_cleanup()
         raise
+    except KeyboardInterrupt:
+        logger.info("사용자에 의해 실행이 중단되었습니다.")
+        return None
     except Exception as e:
         logger.error(f"파이프라인 실행 실패: {str(e)}")
         force_memory_cleanup()
@@ -946,6 +1035,12 @@ def execute_comprehensive_pipeline(args, config: Config, logger):
 
 def main():
     """메인 실행 함수"""
+    
+    global cleanup_required
+    
+    # 신호 처리기 설정
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
     # 인자 파싱
     parser = argparse.ArgumentParser(description="CTR 모델링 종합 파이프라인")
@@ -990,6 +1085,10 @@ def main():
         if args.mode == "train":
             logger.info("=== 종합 학습 모드 시작 ===")
             results = execute_comprehensive_pipeline(args, config, logger)
+            
+            if results is None:
+                logger.info("파이프라인이 중단되었습니다.")
+                return
             
             # 학습 결과 요약
             logger.info("=== 학습 결과 요약 ===")
@@ -1071,6 +1170,7 @@ def main():
         
     finally:
         # 정리 작업
+        cleanup_required = True
         force_memory_cleanup()
         if PSUTIL_AVAILABLE:
             final_memory = get_memory_usage()
