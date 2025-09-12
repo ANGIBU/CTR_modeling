@@ -342,29 +342,113 @@ class DataLoader:
         return df
     
     def basic_preprocessing(self, df: pd.DataFrame) -> pd.DataFrame:
-        """기본 전처리 수행"""
+        """강화된 기본 전처리 수행"""
         logger.info("기본 전처리 시작")
         
         df_processed = df.copy()
         
         # 결측치 확인 및 처리
         missing_info = df_processed.isnull().sum()
-        if missing_info.sum() > 0:
-            logger.warning(f"결측치 발견: {missing_info.sum()}개")
+        total_missing = missing_info.sum()
+        
+        if total_missing > 0:
+            logger.warning(f"결측치 발견: {total_missing:,}개")
             
-            # 수치형 변수: 중앙값으로 대치
-            numeric_cols = df_processed.select_dtypes(include=[np.number]).columns
-            for col in numeric_cols:
-                if df_processed[col].isnull().sum() > 0:
-                    median_val = df_processed[col].median()
-                    df_processed[col].fillna(median_val, inplace=True)
+            # 컬럼별 결측치 정보
+            missing_cols = missing_info[missing_info > 0].sort_values(ascending=False)
+            if len(missing_cols) <= 10:
+                logger.info("결측치가 많은 상위 컬럼:")
+                for col, count in missing_cols.items():
+                    ratio = count / len(df_processed) * 100
+                    logger.info(f"  {col}: {count:,}개 ({ratio:.1f}%)")
             
-            # 범주형 변수: 최빈값으로 대치
-            categorical_cols = df_processed.select_dtypes(include=['object', 'category']).columns
-            for col in categorical_cols:
+            # 타입별 결측치 처리
+            for col in df_processed.columns:
                 if df_processed[col].isnull().sum() > 0:
-                    mode_val = df_processed[col].mode()[0] if len(df_processed[col].mode()) > 0 else 'unknown'
-                    df_processed[col].fillna(mode_val, inplace=True)
+                    col_dtype = str(df_processed[col].dtype)
+                    
+                    # 수치형 변수 처리
+                    if col_dtype in ['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64']:
+                        # 정수형은 0으로 대치
+                        df_processed[col].fillna(0, inplace=True)
+                    elif col_dtype in ['float16', 'float32', 'float64']:
+                        # 실수형은 중앙값으로 대치 (0이 아닌 값들의 중앙값)
+                        non_zero_median = df_processed[df_processed[col] != 0][col].median()
+                        if pd.isna(non_zero_median):
+                            fill_value = 0.0
+                        else:
+                            fill_value = non_zero_median
+                        df_processed[col].fillna(fill_value, inplace=True)
+                    # 범주형 변수 처리
+                    elif col_dtype in ['object', 'category', 'string', 'bool']:
+                        # 범주형은 최빈값으로 대치, 없으면 'unknown'
+                        if len(df_processed[col].mode()) > 0:
+                            mode_val = df_processed[col].mode()[0]
+                        else:
+                            mode_val = 'unknown'
+                        df_processed[col].fillna(mode_val, inplace=True)
+                    else:
+                        # 기타 타입은 0으로 대치
+                        df_processed[col].fillna(0, inplace=True)
+        
+        # 특별한 값 처리
+        # 무한값 처리
+        numeric_cols = df_processed.select_dtypes(include=[np.number]).columns
+        for col in numeric_cols:
+            inf_count = np.isinf(df_processed[col]).sum()
+            if inf_count > 0:
+                logger.warning(f"{col}: 무한값 {inf_count:,}개 발견, 대체 처리")
+                
+                # 유한한 값들의 통계치로 대체
+                finite_values = df_processed[col][np.isfinite(df_processed[col])]
+                if len(finite_values) > 0:
+                    if finite_values.std() == 0:
+                        replacement = finite_values.mean()
+                    else:
+                        # 99.5퍼센타일과 0.5퍼센타일로 클리핑
+                        upper_bound = finite_values.quantile(0.995)
+                        lower_bound = finite_values.quantile(0.005)
+                        
+                        df_processed.loc[df_processed[col] == np.inf, col] = upper_bound
+                        df_processed.loc[df_processed[col] == -np.inf, col] = lower_bound
+                else:
+                    df_processed[col].replace([np.inf, -np.inf], 0, inplace=True)
+        
+        # 이상치 탐지 및 처리 (수치형 변수에만 적용)
+        outlier_cols_processed = 0
+        max_outlier_cols = 20  # 처리할 최대 컬럼 수
+        
+        for col in numeric_cols[:max_outlier_cols]:
+            try:
+                if df_processed[col].var() == 0:
+                    continue  # 분산이 0인 상수 컬럼은 스킵
+                
+                q1 = df_processed[col].quantile(0.25)
+                q3 = df_processed[col].quantile(0.75)
+                iqr = q3 - q1
+                
+                if iqr > 0:  # IQR이 0보다 클 때만 처리
+                    lower_bound = q1 - 3 * iqr  # 3 IQR로 완화
+                    upper_bound = q3 + 3 * iqr
+                    
+                    outliers_mask = (df_processed[col] < lower_bound) | (df_processed[col] > upper_bound)
+                    outlier_count = outliers_mask.sum()
+                    
+                    if outlier_count > 0 and outlier_count < len(df_processed) * 0.1:  # 전체의 10% 미만일 때만
+                        # 클리핑 방식으로 이상치 대체
+                        df_processed.loc[df_processed[col] < lower_bound, col] = lower_bound
+                        df_processed.loc[df_processed[col] > upper_bound, col] = upper_bound
+                        
+                        outlier_cols_processed += 1
+                        if outlier_cols_processed % 5 == 0:
+                            logger.debug(f"이상치 처리 진행: {outlier_cols_processed}개 컬럼 완료")
+                
+            except Exception as e:
+                logger.debug(f"{col} 이상치 처리 실패: {str(e)}")
+                continue
+        
+        if outlier_cols_processed > 0:
+            logger.info(f"이상치 처리 완료: {outlier_cols_processed}개 컬럼")
         
         # 최종 메모리 최적화
         df_processed = self._optimize_memory_usage(df_processed)

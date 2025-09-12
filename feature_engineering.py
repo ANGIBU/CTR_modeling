@@ -143,18 +143,53 @@ class CTRFeatureEngineer:
                     train_dtype = str(X_train[col].dtype)
                     test_dtype = str(X_test[col].dtype)
                     
-                    # 문제가 된 seq 컬럼 특별 처리
+                    # seq 컬럼 특별 처리 - 메모리 안전한 방식
                     if col == 'seq' or 'seq' in str(col).lower():
-                        logger.info(f"{col}: 메모리 효율적 문자열 처리")
-                        # 메모리 효율적 처리: 해시값으로 변환
+                        logger.info(f"{col}: 메모리 안전 문자열 처리")
                         try:
-                            train_hash = X_train[col].astype(str).apply(lambda x: hash(str(x)) % 1000000).astype('int32')
-                            test_hash = X_test[col].astype(str).apply(lambda x: hash(str(x)) % 1000000).astype('int32')
+                            # 문자열 길이 제한 및 안전한 처리
+                            def safe_hash_string(x):
+                                try:
+                                    if pd.isna(x):
+                                        return 0
+                                    # 문자열 길이 제한 (최대 100자)
+                                    str_val = str(x)[:100] if len(str(x)) > 100 else str(x)
+                                    return hash(str_val) % 1000000
+                                except:
+                                    return 0
                             
-                            X_train[col] = train_hash
-                            X_test[col] = test_hash
-                            logger.info(f"{col}: 해시 변환 완료")
+                            # 청킹 방식으로 처리
+                            chunk_size = 50000
+                            train_hash_parts = []
+                            test_hash_parts = []
+                            
+                            # 훈련 데이터 처리
+                            for i in range(0, len(X_train), chunk_size):
+                                chunk = X_train[col].iloc[i:i+chunk_size]
+                                hash_chunk = chunk.apply(safe_hash_string).astype('int32')
+                                train_hash_parts.append(hash_chunk)
+                                
+                                # 메모리 정리
+                                if i % (chunk_size * 5) == 0:
+                                    gc.collect()
+                            
+                            X_train[col] = pd.concat(train_hash_parts)
+                            
+                            # 테스트 데이터 처리
+                            for i in range(0, len(X_test), chunk_size):
+                                chunk = X_test[col].iloc[i:i+chunk_size]
+                                hash_chunk = chunk.apply(safe_hash_string).astype('int32')
+                                test_hash_parts.append(hash_chunk)
+                                
+                                # 메모리 정리
+                                if i % (chunk_size * 5) == 0:
+                                    gc.collect()
+                            
+                            X_test[col] = pd.concat(test_hash_parts)
+                            
+                            logger.info(f"{col}: 안전한 해시 변환 완료")
                             continue
+                            
                         except Exception as e:
                             logger.error(f"{col} 해시 변환 실패: {e}")
                             # 기본값으로 대체
@@ -162,17 +197,15 @@ class CTRFeatureEngineer:
                             X_test[col] = 0
                             continue
                     
-                    # 타입이 다른 경우 통일
+                    # 일반적인 타입 통일 처리
                     if train_dtype != test_dtype:
-                        logger.info(f"{col}: 타입 불일치 - train: {train_dtype}, test: {test_dtype}")
+                        logger.debug(f"{col}: 타입 불일치 - train: {train_dtype}, test: {test_dtype}")
                         
                         # category 타입 특별 처리
                         if 'category' in train_dtype or 'category' in test_dtype:
-                            # 메모리 효율적으로 처리
                             try:
                                 X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0).astype('float32')
                                 X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0).astype('float32')
-                                logger.info(f"{col}: float32로 통일")
                             except:
                                 X_train[col] = 0.0
                                 X_test[col] = 0.0
@@ -180,30 +213,35 @@ class CTRFeatureEngineer:
                         elif pd.api.types.is_numeric_dtype(X_train[col]) or pd.api.types.is_numeric_dtype(X_test[col]):
                             X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0).astype('float32')
                             X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0).astype('float32')
-                            logger.info(f"{col}: float32로 통일")
                         else:
-                            # 문자열은 해시로 변환
-                            try:
-                                train_hash = X_train[col].astype(str).apply(lambda x: hash(str(x)) % 100000).astype('int32')
-                                test_hash = X_test[col].astype(str).apply(lambda x: hash(str(x)) % 100000).astype('int32')
-                                X_train[col] = train_hash
-                                X_test[col] = test_hash
-                                logger.info(f"{col}: 해시로 변환")
-                            except:
-                                X_train[col] = 0
-                                X_test[col] = 0
+                            # 문자열은 안전한 해시로 변환
+                            def safe_str_hash(x):
+                                try:
+                                    if pd.isna(x):
+                                        return 0
+                                    str_val = str(x)[:50] if len(str(x)) > 50 else str(x)
+                                    return hash(str_val) % 100000
+                                except:
+                                    return 0
+                            
+                            X_train[col] = X_train[col].apply(safe_str_hash).astype('int32')
+                            X_test[col] = X_test[col].apply(safe_str_hash).astype('int32')
                     
                     # 동일한 타입이어도 최적화
                     elif train_dtype == 'object':
-                        # object 타입을 해시로 변환 (메모리 절약)
-                        try:
-                            train_hash = X_train[col].astype(str).apply(lambda x: hash(str(x)) % 100000).astype('int32')
-                            test_hash = X_test[col].astype(str).apply(lambda x: hash(str(x)) % 100000).astype('int32')
-                            X_train[col] = train_hash
-                            X_test[col] = test_hash
-                        except:
-                            X_train[col] = 0
-                            X_test[col] = 0
+                        # object 타입을 안전한 해시로 변환
+                        def safe_obj_hash(x):
+                            try:
+                                if pd.isna(x):
+                                    return 0
+                                str_val = str(x)[:50] if len(str(x)) > 50 else str(x)
+                                return hash(str_val) % 100000
+                            except:
+                                return 0
+                        
+                        X_train[col] = X_train[col].apply(safe_obj_hash).astype('int32')
+                        X_test[col] = X_test[col].apply(safe_obj_hash).astype('int32')
+                        
                     elif 'category' in train_dtype:
                         # category 타입은 수치형으로 변환
                         try:
@@ -250,6 +288,9 @@ class CTRFeatureEngineer:
             
         except Exception as e:
             logger.error(f"데이터 타입 통일 전체 실패: {str(e)}")
+        
+        # 메모리 정리
+        gc.collect()
         
         return X_train, X_test
     
@@ -301,25 +342,33 @@ class CTRFeatureEngineer:
                     
                     # 메모리 효율 모드에서는 해시만 생성
                     if self.memory_efficient_mode:
-                        X_train[f'{col}_hash'] = train_values.apply(
-                            lambda x: hash(str(x)) % 100000
-                        ).astype('int32')
+                        def safe_id_hash(x):
+                            try:
+                                if pd.isna(x) or x == 'unknown':
+                                    return 0
+                                str_val = str(x)[:50] if len(str(x)) > 50 else str(x)
+                                return hash(str_val) % 100000
+                            except:
+                                return 0
                         
-                        X_test[f'{col}_hash'] = test_values.apply(
-                            lambda x: hash(str(x)) % 100000
-                        ).astype('int32')
+                        X_train[f'{col}_hash'] = train_values.apply(safe_id_hash).astype('int32')
+                        X_test[f'{col}_hash'] = test_values.apply(safe_id_hash).astype('int32')
                         
                         self.generated_features.append(f'{col}_hash')
                         logger.info(f"{col}: 해시 인코딩 완료 (효율 모드)")
                     else:
                         # 일반 모드에서는 해시 + 카운트
-                        X_train[f'{col}_hash'] = train_values.apply(
-                            lambda x: int(hashlib.md5(str(x).encode()).hexdigest(), 16) % 1000000
-                        ).astype('int32')
+                        def safe_md5_hash(x):
+                            try:
+                                if pd.isna(x) or x == 'unknown':
+                                    return 0
+                                str_val = str(x)[:100] if len(str(x)) > 100 else str(x)
+                                return int(hashlib.md5(str_val.encode()).hexdigest(), 16) % 1000000
+                            except:
+                                return 0
                         
-                        X_test[f'{col}_hash'] = test_values.apply(
-                            lambda x: int(hashlib.md5(str(x).encode()).hexdigest(), 16) % 1000000
-                        ).astype('int32')
+                        X_train[f'{col}_hash'] = train_values.apply(safe_md5_hash).astype('int32')
+                        X_test[f'{col}_hash'] = test_values.apply(safe_md5_hash).astype('int32')
                         
                         # 카운트 인코딩
                         try:
