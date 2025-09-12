@@ -94,7 +94,7 @@ def setup_logging():
     """로깅 설정"""
     try:
         logger = Config.setup_logging()
-        logger.info("=== CTR 모델링 파이프라인 시작 ===")
+        logger.info("=== 파이프라인 시작 ===")
         return logger
     except Exception as e:
         print(f"로깅 설정 실패: {e}")
