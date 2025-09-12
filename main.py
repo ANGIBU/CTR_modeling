@@ -27,7 +27,6 @@ except ImportError:
 try:
     import torch
     if torch.cuda.is_available():
-        # GPU 테스트
         try:
             test_tensor = torch.tensor([1.0]).cuda()
             test_tensor.cpu()
@@ -85,8 +84,8 @@ def get_available_memory() -> float:
         try:
             return psutil.virtual_memory().available / (1024**3)
         except:
-            return 32.0
-    return 32.0
+            return 45.0
+    return 45.0
 
 def force_memory_cleanup():
     """강제 메모리 정리"""
@@ -135,8 +134,7 @@ def memory_monitor_decorator(func):
             available_after = get_available_memory()
             logger.info(f"{func.__name__} 완료 - 메모리: {memory_after:.2f} GB, 사용 가능: {available_after:.2f} GB")
             
-            # 메모리 부족 경고
-            if available_after < 8:
+            if available_after < 15:
                 logger.warning("메모리 부족 상황 - 정리 작업 수행")
                 force_memory_cleanup()
             
@@ -172,26 +170,21 @@ def load_and_preprocess_large_data(config: Config, quick_mode: bool = False) -> 
         available_memory = get_available_memory()
         logger.info(f"사용 가능 메모리: {available_memory:.2f} GB")
         
-        # 메모리 기반 동적 크기 결정 (더 보수적으로)
+        # 메모리 기반 동적 크기 결정
         if quick_mode:
             max_train_size = 100000
-            max_test_size = 20000
-            logger.info(f"빠른 모드: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
-        elif available_memory > 40:
-            # 64GB 환경에서도 보수적으로
-            max_train_size = 1000000  # 1.5M에서 1M으로 감소
-            max_test_size = 250000
-            logger.info(f"대용량 모드: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
-        elif available_memory > 25:
-            max_train_size = 600000  # 800k에서 600k로 감소
-            max_test_size = 150000
-            logger.info(f"중간 모드: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
+            logger.info(f"빠른 모드: 학습 {max_train_size:,}")
         else:
-            max_train_size = 300000
-            max_test_size = 80000
-            logger.info(f"절약 모드: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
+            # 전체 데이터 처리 모드
+            if available_memory > 30:
+                max_train_size = 1500000
+            elif available_memory > 20:
+                max_train_size = 1000000
+            else:
+                max_train_size = 800000
+            logger.info(f"전체 데이터 모드: 학습 {max_train_size:,}")
         
-        # 대용량 데이터 로딩
+        # 전체 데이터 로딩 (테스트 데이터는 항상 전체)
         try:
             train_df, test_df = data_loader.load_large_data_optimized()
         except Exception as e:
@@ -202,25 +195,26 @@ def load_and_preprocess_large_data(config: Config, quick_mode: bool = False) -> 
                 logger.error(f"기본 로딩도 실패: {e2}")
                 raise
         
-        # 메모리 상태 확인 후 크기 조정
+        # 테스트 데이터 크기 검증
+        if len(test_df) < 1500000:
+            logger.error(f"테스트 데이터 크기가 부족합니다: {len(test_df):,} < 1,500,000")
+            raise ValueError("전체 테스트 데이터를 로딩하지 못했습니다")
+        
+        # 메모리 상태 확인
         current_memory = get_memory_usage()
         available_memory = get_available_memory()
         logger.info(f"데이터 로딩 후 - 사용: {current_memory:.2f} GB, 사용 가능: {available_memory:.2f} GB")
         
-        # 메모리 부족 시 점진적 감소
-        if available_memory < 10:
-            logger.warning("메모리 부족으로 데이터 크기 조정")
-            target_ratio = max(0.4, available_memory / 25)  # 더 보수적으로
+        # 메모리 부족 시 학습 데이터만 조정 (테스트 데이터는 유지)
+        if available_memory < 20:
+            logger.warning("메모리 부족으로 학습 데이터 크기 조정")
+            target_ratio = max(0.5, available_memory / 40)
             
             new_train_size = int(len(train_df) * target_ratio)
-            new_test_size = int(len(test_df) * target_ratio)
+            logger.info(f"학습 데이터 크기 조정: {len(train_df):,} → {new_train_size:,}")
             
-            logger.info(f"데이터 크기 조정: 학습 {len(train_df):,} → {new_train_size:,}")
-            logger.info(f"데이터 크기 조정: 테스트 {len(test_df):,} → {new_test_size:,}")
-            
-            if new_train_size > 1000 and new_test_size > 100:  # 최소 크기 보장
+            if new_train_size > 50000:
                 train_df = train_df.sample(n=new_train_size, random_state=42).reset_index(drop=True)
-                test_df = test_df.sample(n=new_test_size, random_state=42).reset_index(drop=True)
             
             force_memory_cleanup()
         
@@ -261,6 +255,7 @@ def load_and_preprocess_large_data(config: Config, quick_mode: bool = False) -> 
         force_memory_cleanup()
         
         logger.info("대용량 데이터 로딩 및 전처리 완료")
+        logger.info(f"테스트 데이터 크기 확인: {len(test_processed):,}행")
         return train_processed, test_processed, data_loader
         
     except Exception as e:
@@ -280,8 +275,7 @@ def advanced_feature_engineering(train_df: pd.DataFrame,
         available_memory = get_available_memory()
         logger.info(f"피처 엔지니어링 시작 - 사용 가능 메모리: {available_memory:.2f} GB")
         
-        # 메모리 기반 모드 설정 (더 엄격하게)
-        memory_efficient_mode = available_memory < 15  # 20에서 15로 낮춤
+        memory_efficient_mode = available_memory < 25
         
         feature_engineer = FeatureEngineer(config)
         feature_engineer.set_memory_efficient_mode(memory_efficient_mode)
@@ -293,7 +287,6 @@ def advanced_feature_engineering(train_df: pd.DataFrame,
         target_col = 'clicked'
         if target_col not in train_df.columns:
             logger.error(f"타겟 컬럼 '{target_col}'이 없습니다.")
-            # 가능한 타겟 컬럼들을 찾아보기
             possible_targets = [col for col in train_df.columns if 'click' in col.lower()]
             if possible_targets:
                 target_col = possible_targets[0]
@@ -327,6 +320,7 @@ def advanced_feature_engineering(train_df: pd.DataFrame,
             feature_summary = feature_engineer.get_feature_importance_summary()
             logger.info(f"생성된 피처 수: {feature_summary['total_generated_features']}")
             logger.info(f"최종 피처 차원: {X_train.shape}")
+            logger.info(f"테스트 데이터 피처 차원: {X_test.shape}")
         except Exception as e:
             logger.warning(f"피처 요약 정보 생성 실패: {e}")
         
@@ -342,7 +336,7 @@ def comprehensive_model_training(X_train: pd.DataFrame,
                                y_train: pd.Series,
                                config: Config,
                                tune_hyperparameters: bool = True) -> tuple:
-    """종합 모델 학습 (GPU 활용)"""
+    """종합 모델 학습"""
     logger = logging.getLogger(__name__)
     logger.info("종합 모델 학습 시작")
     
@@ -361,11 +355,11 @@ def comprehensive_model_training(X_train: pd.DataFrame,
             except Exception as e:
                 logger.warning(f"GPU 정보 조회 실패: {e}")
         
-        # 메모리 기반 학습 전략 (더 보수적으로)
-        if available_memory < 12:
+        # 메모리 기반 학습 전략
+        if available_memory < 20:
             logger.info("메모리 절약 모드")
-            if len(X_train) > 400000:  # 500k에서 400k로 낮춤
-                sample_size = 350000
+            if len(X_train) > 800000:
+                sample_size = 700000
                 sample_indices = np.random.choice(len(X_train), sample_size, replace=False)
                 X_train = X_train.iloc[sample_indices].reset_index(drop=True)
                 y_train = y_train.iloc[sample_indices].reset_index(drop=True)
@@ -383,7 +377,6 @@ def comprehensive_model_training(X_train: pd.DataFrame,
             X_train_split, X_val_split, y_train_split, y_val_split = split_result
         except Exception as e:
             logger.error(f"데이터 분할 실패: {e}")
-            # 기본 분할 시도
             from sklearn.model_selection import train_test_split
             try:
                 split_result = train_test_split(X_train, y_train, test_size=0.2, random_state=42, stratify=y_train)
@@ -400,7 +393,6 @@ def comprehensive_model_training(X_train: pd.DataFrame,
         available_models = ModelFactory.get_available_models()
         logger.info(f"사용 가능한 모델: {available_models}")
         
-        # 안전한 모델들만 사용 (충돌 방지)
         model_types = []
         if 'lightgbm' in available_models:
             model_types.append('lightgbm')
@@ -409,13 +401,12 @@ def comprehensive_model_training(X_train: pd.DataFrame,
         if 'catboost' in available_models:
             model_types.append('catboost')
         
-        # GPU 사용 가능시 DeepCTR 추가 (메모리 여유가 있을 때만)
-        if gpu_available and available_memory > 15 and 'deepctr' in available_models:
+        # GPU 사용 가능시 DeepCTR 추가
+        if gpu_available and available_memory > 20 and 'deepctr' in available_models:
             model_types.append('deepctr')
             logger.info("GPU 환경: DeepCTR 모델 추가")
         
         if not model_types:
-            # 최소한 로지스틱 회귀라도 사용
             model_types = ['logistic']
             logger.warning("기본 모델만 사용 가능합니다.")
         
@@ -432,10 +423,10 @@ def comprehensive_model_training(X_train: pd.DataFrame,
             try:
                 logger.info(f"{model_type} 모델 학습 시작")
                 
-                # 하이퍼파라미터 튜닝 (간소화)
-                if tune_hyperparameters and available_memory > 8:
+                # 하이퍼파라미터 튜닝
+                if tune_hyperparameters and available_memory > 15:
                     try:
-                        n_trials = 15 if model_type == 'deepctr' else 20  # trial 수 감소
+                        n_trials = 20 if model_type == 'deepctr' else 30
                         training_pipeline.trainer.hyperparameter_tuning_optuna(
                             model_type, X_train_split, y_train_split, n_trials=n_trials, cv_folds=3
                         )
@@ -535,9 +526,9 @@ def advanced_ensemble_pipeline(trainer: ModelTrainer,
                              X_val: pd.DataFrame,
                              y_val: pd.Series,
                              config: Config) -> Optional[CTREnsembleManager]:
-    """Calibration 앙상블 파이프라인"""
+    """앙상블 파이프라인"""
     logger = logging.getLogger(__name__)
-    logger.info("Calibration 앙상블 파이프라인 시작")
+    logger.info("앙상블 파이프라인 시작")
     
     try:
         available_memory = get_available_memory()
@@ -556,13 +547,13 @@ def advanced_ensemble_pipeline(trainer: ModelTrainer,
         actual_ctr = y_val.mean()
         logger.info(f"실제 CTR: {actual_ctr:.4f}")
         
-        # 앙상블 타입별 생성 (메모리 보수적으로)
+        # 앙상블 타입별 생성
         ensemble_types = []
         
-        if available_memory > 12:
+        if available_memory > 20:
             ensemble_types = ['weighted', 'calibrated', 'rank']
             logger.info("전체 앙상블 모드")
-        elif available_memory > 8:
+        elif available_memory > 15:
             ensemble_types = ['weighted', 'calibrated']
             logger.info("제한 앙상블 모드")
         else:
@@ -572,7 +563,6 @@ def advanced_ensemble_pipeline(trainer: ModelTrainer,
         for ensemble_type in ensemble_types:
             try:
                 if ensemble_type == 'calibrated':
-                    # CTR 보정 앙상블 (핵심)
                     ensemble_manager.create_ensemble(
                         'calibrated', 
                         target_ctr=actual_ctr, 
@@ -601,7 +591,7 @@ def advanced_ensemble_pipeline(trainer: ModelTrainer,
         except Exception as e:
             logger.warning(f"앙상블 저장 실패: {e}")
         
-        logger.info("Calibration 앙상블 파이프라인 완료")
+        logger.info("앙상블 파이프라인 완료")
         return ensemble_manager
         
     except Exception as e:
@@ -701,13 +691,21 @@ def comprehensive_evaluation(trainer: ModelTrainer,
     except Exception as e:
         logger.error(f"종합 평가 실패: {str(e)}")
 
-def generate_optimized_predictions(trainer: ModelTrainer,
+def generate_full_test_predictions(trainer: ModelTrainer,
                                  ensemble_manager: Optional[CTREnsembleManager],
                                  X_test: pd.DataFrame,
                                  config: Config) -> pd.DataFrame:
-    """최적화된 예측 생성 (CTR 보정 적용)"""
+    """전체 테스트 데이터 예측 생성"""
     logger = logging.getLogger(__name__)
-    logger.info("최적화된 예측 생성 시작")
+    logger.info("전체 테스트 데이터 예측 생성 시작")
+    
+    # 테스트 데이터 크기 확인
+    test_size = len(X_test)
+    logger.info(f"테스트 데이터 크기: {test_size:,}행")
+    
+    if test_size < 1500000:
+        logger.error(f"테스트 데이터 크기가 부족합니다: {test_size:,} < 1,500,000")
+        raise ValueError("전체 테스트 데이터가 아닙니다")
     
     try:
         # 제출 템플릿 로딩
@@ -717,17 +715,20 @@ def generate_optimized_predictions(trainer: ModelTrainer,
         except Exception as e:
             logger.warning(f"제출 템플릿 로딩 실패: {e}. 기본 템플릿 생성")
             submission = pd.DataFrame({
-                'id': range(len(X_test)),
+                'id': range(test_size),
                 'clicked': 0.0201
             })
         
-        # 샘플링 모드 확인
-        is_sampled = len(X_test) != len(submission)
-        if is_sampled:
-            logger.info(f"샘플링 모드: X_test={len(X_test)}, submission={len(submission)}")
+        logger.info(f"제출 템플릿 크기: {len(submission):,}행")
+        logger.info(f"테스트 데이터 크기: {test_size:,}행")
+        
+        # 크기 일치 확인
+        if len(submission) != test_size:
+            logger.error(f"크기 불일치: 제출 템플릿 {len(submission):,} vs 테스트 데이터 {test_size:,}")
+            raise ValueError("제출 템플릿과 테스트 데이터 크기가 일치하지 않습니다")
         
         # X_test 데이터 검증 및 정리
-        logger.info("예측 전 X_test 데이터 검증")
+        logger.info("테스트 데이터 검증 및 정리")
         
         # object 타입 및 비수치형 컬럼 제거
         object_columns = X_test.select_dtypes(include=['object']).columns.tolist()
@@ -756,46 +757,88 @@ def generate_optimized_predictions(trainer: ModelTrainer,
                 except:
                     X_test[col] = 0.0
         
-        logger.info(f"검증 완료 - X_test 형태: {X_test.shape}")
+        logger.info(f"검증 완료 - 테스트 데이터 형태: {X_test.shape}")
         
-        # 예측 수행 (우선순위: Calibrated Ensemble → Best Ensemble → Best Model)
-        predictions = None
+        # 배치 단위 예측
+        batch_size = 50000  # 5만개씩 처리
+        total_batches = (test_size + batch_size - 1) // batch_size
+        predictions = np.zeros(test_size)
+        
+        # 예측 방법 선택
         prediction_method = ""
         
-        # 1순위: Calibrated Ensemble 사용
+        # 1순위: Calibrated Ensemble
         if (ensemble_manager and 
             hasattr(ensemble_manager, 'calibrated_ensemble') and
             ensemble_manager.calibrated_ensemble and 
             ensemble_manager.calibrated_ensemble.is_fitted):
             
+            logger.info("Calibrated Ensemble로 전체 데이터 예측 수행")
+            prediction_method = "Calibrated Ensemble"
+            
             try:
-                logger.info("Calibrated Ensemble로 예측 수행")
-                base_predictions = {}
-                for model_name, model_info in trainer.trained_models.items():
-                    try:
-                        pred = model_info['model'].predict_proba(X_test)
-                        base_predictions[model_name] = pred
-                    except Exception as e:
-                        logger.warning(f"{model_name} 예측 실패: {str(e)}")
-                        base_predictions[model_name] = np.full(len(X_test), 0.0201)
-                
-                predictions = ensemble_manager.calibrated_ensemble.predict_proba(base_predictions)
-                prediction_method = "Calibrated Ensemble"
+                for i in range(0, test_size, batch_size):
+                    end_idx = min(i + batch_size, test_size)
+                    X_batch = X_test.iloc[i:end_idx]
+                    
+                    logger.info(f"배치 {i//batch_size + 1}/{total_batches} 처리 중 ({i:,}~{end_idx:,})")
+                    
+                    # 기본 모델들의 예측
+                    base_predictions = {}
+                    for model_name, model_info in trainer.trained_models.items():
+                        try:
+                            pred = model_info['model'].predict_proba(X_batch)
+                            base_predictions[model_name] = pred
+                        except Exception as e:
+                            logger.warning(f"{model_name} 배치 예측 실패: {str(e)}")
+                            base_predictions[model_name] = np.full(len(X_batch), 0.0201)
+                    
+                    # 앙상블 예측
+                    batch_pred = ensemble_manager.calibrated_ensemble.predict_proba(base_predictions)
+                    predictions[i:end_idx] = batch_pred
+                    
+                    # 메모리 정리
+                    if (i // batch_size) % 5 == 0:
+                        force_memory_cleanup()
+                        
             except Exception as e:
-                logger.warning(f"Calibrated Ensemble 예측 실패: {e}")
+                logger.error(f"Calibrated Ensemble 배치 예측 실패: {e}")
+                predictions = None
         
         # 2순위: Best Ensemble 사용
         elif ensemble_manager and hasattr(ensemble_manager, 'best_ensemble') and ensemble_manager.best_ensemble:
+            logger.info("Best Ensemble로 전체 데이터 예측 수행")
+            prediction_method = f"Best Ensemble ({ensemble_manager.best_ensemble.name})"
+            
             try:
-                logger.info("Best Ensemble로 예측 수행")
-                predictions = ensemble_manager.predict_with_best_ensemble(X_test)
-                prediction_method = f"Best Ensemble ({ensemble_manager.best_ensemble.name})"
+                for i in range(0, test_size, batch_size):
+                    end_idx = min(i + batch_size, test_size)
+                    X_batch = X_test.iloc[i:end_idx]
+                    
+                    logger.info(f"배치 {i//batch_size + 1}/{total_batches} 처리 중 ({i:,}~{end_idx:,})")
+                    
+                    base_predictions = {}
+                    for model_name, model_info in trainer.trained_models.items():
+                        try:
+                            pred = model_info['model'].predict_proba(X_batch)
+                            base_predictions[model_name] = pred
+                        except Exception as e:
+                            logger.warning(f"{model_name} 배치 예측 실패: {str(e)}")
+                            base_predictions[model_name] = np.full(len(X_batch), 0.0201)
+                    
+                    batch_pred = ensemble_manager.best_ensemble.predict_proba(base_predictions)
+                    predictions[i:end_idx] = batch_pred
+                    
+                    if (i // batch_size) % 5 == 0:
+                        force_memory_cleanup()
+                        
             except Exception as e:
-                logger.warning(f"Best Ensemble 예측 실패: {e}")
+                logger.error(f"Best Ensemble 배치 예측 실패: {e}")
+                predictions = None
         
-        # 3순위: Best Single Model 사용
+        # 3순위: Best Single Model
         if predictions is None:
-            logger.info("Best Single Model로 예측 수행")
+            logger.info("Best Single Model로 전체 데이터 예측 수행")
             best_model_name = None
             best_score = 0
             
@@ -810,36 +853,39 @@ def generate_optimized_predictions(trainer: ModelTrainer,
                         continue
             
             if best_model_name:
+                logger.info(f"사용할 모델: {best_model_name}")
+                prediction_method = f"Best Model ({best_model_name})"
+                
                 try:
                     best_model = trainer.trained_models[best_model_name]['model']
-                    logger.info(f"사용할 모델: {best_model_name}")
-                    predictions = best_model.predict_proba(X_test)
-                    prediction_method = f"Best Model ({best_model_name})"
+                    
+                    for i in range(0, test_size, batch_size):
+                        end_idx = min(i + batch_size, test_size)
+                        X_batch = X_test.iloc[i:end_idx]
+                        
+                        logger.info(f"배치 {i//batch_size + 1}/{total_batches} 처리 중 ({i:,}~{end_idx:,})")
+                        
+                        batch_pred = best_model.predict_proba(X_batch)
+                        predictions[i:end_idx] = batch_pred
+                        
+                        if (i // batch_size) % 5 == 0:
+                            force_memory_cleanup()
+                            
                 except Exception as e:
-                    logger.error(f"Best Model 예측 실패: {e}")
-            
-            # 마지막 수단: 첫 번째 사용 가능한 모델
-            if predictions is None and trainer.trained_models:
-                try:
-                    first_model_name = list(trainer.trained_models.keys())[0]
-                    first_model = trainer.trained_models[first_model_name]['model']
-                    predictions = first_model.predict_proba(X_test)
-                    prediction_method = f"First Available ({first_model_name})"
-                    logger.info(f"첫 번째 모델 사용: {first_model_name}")
-                except Exception as e:
-                    logger.error(f"첫 번째 모델 예측 실패: {e}")
+                    logger.error(f"Best Model 배치 예측 실패: {e}")
+                    predictions = None
         
         # 기본값 사용
         if predictions is None:
             logger.warning("모든 예측 실패. 기본값 사용")
-            predictions = np.full(len(X_test), 0.0201)
+            predictions = np.full(test_size, 0.0201)
             prediction_method = "Default"
         
-        # CTR 보정 (보수적으로)
+        # CTR 보정 
         target_ctr = 0.0201
         current_ctr = predictions.mean()
         
-        if abs(current_ctr - target_ctr) > 0.003:  # 0.005에서 0.003으로 엄격하게
+        if abs(current_ctr - target_ctr) > 0.002:
             logger.info(f"CTR 보정: {current_ctr:.4f} → {target_ctr:.4f}")
             
             # 선형 보정
@@ -853,30 +899,14 @@ def generate_optimized_predictions(trainer: ModelTrainer,
             logger.info(f"보정 후 CTR: {corrected_ctr:.4f}")
         
         # 제출 파일 생성
-        if is_sampled:
-            logger.info("샘플링 모드: 기본값으로 초기화 후 샘플 예측값 할당")
-            submission['clicked'] = target_ctr
-            if len(predictions) <= len(submission):
-                submission.iloc[:len(predictions), submission.columns.get_loc('clicked')] = predictions
-        else:
-            if len(predictions) == len(submission):
-                submission['clicked'] = predictions
-            else:
-                logger.warning(f"예측값 길이 불일치: {len(predictions)} != {len(submission)}")
-                if len(predictions) < len(submission):
-                    # 부족한 부분은 기본값으로 채움
-                    extended_predictions = np.full(len(submission), target_ctr)
-                    extended_predictions[:len(predictions)] = predictions
-                    submission['clicked'] = extended_predictions
-                else:
-                    submission['clicked'] = predictions[:len(submission)]
+        submission['clicked'] = predictions
         
         # 예측 통계
         final_ctr = submission['clicked'].mean()
-        logger.info(f"=== 예측 결과 ===")
+        logger.info(f"=== 전체 데이터 예측 결과 ===")
         logger.info(f"예측 방법: {prediction_method}")
+        logger.info(f"처리된 데이터 수: {test_size:,}행")
         logger.info(f"예측값 범위: {predictions.min():.4f} ~ {predictions.max():.4f}")
-        logger.info(f"예측 평균 CTR: {predictions.mean():.4f}")
         logger.info(f"최종 제출 CTR: {final_ctr:.4f}")
         logger.info(f"목표 CTR: {target_ctr:.4f}")
         logger.info(f"CTR 편향: {final_ctr - target_ctr:+.4f}")
@@ -889,11 +919,10 @@ def generate_optimized_predictions(trainer: ModelTrainer,
         return submission
         
     except Exception as e:
-        logger.error(f"최적화된 예측 생성 실패: {str(e)}")
-        # 기본 제출 파일이라도 생성
+        logger.error(f"전체 테스트 데이터 예측 생성 실패: {str(e)}")
         try:
             default_submission = pd.DataFrame({
-                'id': range(len(X_test) if 'X_test' in locals() else 100),
+                'id': range(test_size if 'test_size' in locals() else 1527298),
                 'clicked': 0.0201
             })
             output_path = config.BASE_DIR / "submission.csv"
@@ -912,7 +941,7 @@ def setup_inference_system(config: Config) -> Optional[CTRPredictionAPI]:
     try:
         available_memory = get_available_memory()
         
-        if available_memory < 3:  # 5에서 3으로 낮춤
+        if available_memory < 5:
             logger.warning("메모리 부족으로 추론 시스템 설정 생략")
             return None
         
@@ -987,7 +1016,7 @@ def execute_comprehensive_pipeline(args, config: Config, logger):
             logger.info("사용자 중단 요청")
             return None
         
-        # 3. 종합 모델 학습 (GPU 포함)
+        # 3. 종합 모델 학습
         trainer, X_val, y_val, training_results = comprehensive_model_training(
             X_train, y_train, config, 
             tune_hyperparameters=not args.no_tune
@@ -999,11 +1028,11 @@ def execute_comprehensive_pipeline(args, config: Config, logger):
             logger.info("사용자 중단 요청")
             return {'trainer': trainer, 'submission': None}
         
-        # 4. Calibration 앙상블 (메모리 여유가 있을 때만)
+        # 4. 앙상블
         available_memory = get_available_memory()
         ensemble_manager = None
         
-        if available_memory > 5 and training_results.get('successful_models', 0) >= 2:
+        if available_memory > 10 and training_results.get('successful_models', 0) >= 2:
             ensemble_manager = advanced_ensemble_pipeline(trainer, X_val, y_val, config)
         else:
             logger.warning("메모리 부족 또는 모델 부족으로 앙상블 단계 생략")
@@ -1014,14 +1043,14 @@ def execute_comprehensive_pipeline(args, config: Config, logger):
         except Exception as e:
             logger.warning(f"종합 평가 실패: {e}")
         
-        # 6. 최적화된 예측 생성 (CTR 보정)
-        submission = generate_optimized_predictions(trainer, ensemble_manager, X_test, config)
+        # 6. 전체 테스트 데이터 예측 생성
+        submission = generate_full_test_predictions(trainer, ensemble_manager, X_test, config)
         
-        # 7. 추론 시스템 설정 (메모리 여유가 있을 때만)
+        # 7. 추론 시스템 설정
         available_memory = get_available_memory()
         prediction_api = None
         
-        if available_memory > 2 and not cleanup_required:  # 3에서 2로 낮춤
+        if available_memory > 5 and not cleanup_required:
             prediction_api = setup_inference_system(config)
         else:
             logger.warning("메모리 부족 또는 중단 요청으로 추론 시스템 설정 생략")
@@ -1123,6 +1152,10 @@ def main():
                     logger.info(f"Calibrated Ensemble: {ensemble_summary['calibrated_ensemble_available']}")
                 except Exception as e:
                     logger.warning(f"앙상블 요약 실패: {e}")
+            
+            # 제출 파일 정보
+            if results['submission'] is not None:
+                logger.info(f"제출 파일 생성: {len(results['submission']):,}행")
             
         elif args.mode == "inference":
             logger.info("=== 추론 모드 시작 ===")
