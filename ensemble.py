@@ -12,6 +12,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import roc_auc_score
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.isotonic import IsotonicRegression
 import optuna
 
 from config import Config
@@ -52,10 +54,179 @@ class BaseEnsemble(ABC):
                 predictions[name] = pred
             except Exception as e:
                 logger.error(f"{name} 모델 예측 실패: {str(e)}")
-                # 기본값으로 실제 CTR 사용
                 predictions[name] = np.full(len(X), 0.0191)
         
         return predictions
+
+class CTRCalibratedEnsemble(BaseEnsemble):
+    """CTR 보정 앙상블 클래스"""
+    
+    def __init__(self, target_ctr: float = 0.0201, calibration_method: str = 'platt'):
+        super().__init__("CTRCalibratedEnsemble")
+        self.target_ctr = target_ctr
+        self.calibration_method = calibration_method
+        self.weights = {}
+        self.calibrator = None
+        self.bias_correction = 0.0
+        self.metrics_calculator = CTRMetrics()
+        
+    def fit(self, X: pd.DataFrame, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
+        """보정된 앙상블 학습"""
+        logger.info("CTR 보정 앙상블 학습 시작")
+        
+        available_models = list(base_predictions.keys())
+        logger.info(f"사용 가능한 모델: {available_models}")
+        
+        if len(available_models) < 2:
+            logger.warning("앙상블을 위한 모델이 부족합니다")
+            if available_models:
+                self.weights = {available_models[0]: 1.0}
+            self.is_fitted = True
+            return
+        
+        # 1단계: Combined Score 기준 가중치 최적화
+        self.weights = self._optimize_weights_for_combined_score(base_predictions, y)
+        
+        # 2단계: 가중 앙상블 생성
+        ensemble_pred = self._create_weighted_ensemble(base_predictions)
+        
+        # 3단계: CTR 보정 적용
+        self._apply_ctr_calibration(ensemble_pred, y)
+        
+        self.is_fitted = True
+        logger.info("CTR 보정 앙상블 학습 완료")
+    
+    def _optimize_weights_for_combined_score(self, base_predictions: Dict[str, np.ndarray], y: pd.Series) -> Dict[str, float]:
+        """Combined Score 최적화를 위한 가중치 튜닝"""
+        
+        model_names = list(base_predictions.keys())
+        
+        def objective(trial):
+            weights = {}
+            for name in model_names:
+                weights[name] = trial.suggest_float(f'weight_{name}', 0.0, 1.0)
+            
+            total_weight = sum(weights.values())
+            if total_weight == 0:
+                return 0.0
+            
+            weights = {k: v/total_weight for k, v in weights.items()}
+            
+            ensemble_pred = np.zeros(len(y))
+            for name, weight in weights.items():
+                if name in base_predictions:
+                    ensemble_pred += weight * base_predictions[name]
+            
+            score = self.metrics_calculator.combined_score(y, ensemble_pred)
+            return score
+        
+        try:
+            study = optuna.create_study(direction='maximize')
+            study.optimize(objective, n_trials=200, show_progress_bar=False)
+            
+            optimized_weights = {}
+            for param_name, weight in study.best_params.items():
+                model_name = param_name.replace('weight_', '')
+                optimized_weights[model_name] = weight
+            
+            total_weight = sum(optimized_weights.values())
+            if total_weight > 0:
+                optimized_weights = {k: v/total_weight for k, v in optimized_weights.items()}
+            
+            logger.info(f"최적화 완료 - 최고 Combined Score: {study.best_value:.4f}")
+            logger.info(f"최적 가중치: {optimized_weights}")
+            
+            return optimized_weights
+            
+        except Exception as e:
+            logger.error(f"가중치 최적화 실패: {str(e)}")
+            return {name: 1.0/len(model_names) for name in model_names}
+    
+    def _create_weighted_ensemble(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
+        """가중 앙상블 생성"""
+        ensemble_pred = np.zeros(len(list(base_predictions.values())[0]))
+        
+        for name, weight in self.weights.items():
+            if name in base_predictions:
+                ensemble_pred += weight * base_predictions[name]
+        
+        return ensemble_pred
+    
+    def _apply_ctr_calibration(self, predictions: np.ndarray, y: pd.Series):
+        """CTR 보정 적용"""
+        logger.info(f"CTR 보정 적용 시작 - 방법: {self.calibration_method}")
+        
+        try:
+            # 편향 계산
+            predicted_ctr = predictions.mean()
+            actual_ctr = y.mean()
+            self.bias_correction = actual_ctr - predicted_ctr
+            
+            logger.info(f"CTR 편향: 예측 {predicted_ctr:.4f} vs 실제 {actual_ctr:.4f} = 보정 {self.bias_correction:.4f}")
+            
+            # Calibration 방법에 따른 보정
+            if self.calibration_method == 'platt':
+                self.calibrator = LogisticRegression()
+                self.calibrator.fit(predictions.reshape(-1, 1), y)
+                
+            elif self.calibration_method == 'isotonic':
+                self.calibrator = IsotonicRegression(out_of_bounds='clip')
+                self.calibrator.fit(predictions, y)
+                
+            elif self.calibration_method == 'bias_only':
+                self.calibrator = None
+                
+            else:
+                raise ValueError(f"지원하지 않는 보정 방법: {self.calibration_method}")
+            
+            # 보정 후 검증
+            calibrated_pred = self._calibrate_predictions(predictions)
+            calibrated_ctr = calibrated_pred.mean()
+            
+            logger.info(f"보정 결과: {predicted_ctr:.4f} → {calibrated_ctr:.4f} (목표: {actual_ctr:.4f})")
+            
+        except Exception as e:
+            logger.error(f"CTR 보정 실패: {str(e)}")
+            self.calibrator = None
+            self.bias_correction = 0.0
+    
+    def _calibrate_predictions(self, predictions: np.ndarray) -> np.ndarray:
+        """예측값 보정 적용"""
+        try:
+            if self.calibrator is not None:
+                if self.calibration_method == 'platt':
+                    calibrated = self.calibrator.predict_proba(predictions.reshape(-1, 1))[:, 1]
+                elif self.calibration_method == 'isotonic':
+                    calibrated = self.calibrator.predict(predictions)
+                else:
+                    calibrated = predictions
+            else:
+                calibrated = predictions
+            
+            # 편향 보정 적용
+            calibrated = calibrated + self.bias_correction
+            
+            # CTR 범위 클리핑
+            calibrated = np.clip(calibrated, 0.001, 0.999)
+            
+            return calibrated
+            
+        except Exception as e:
+            logger.warning(f"보정 적용 실패: {str(e)}")
+            return np.clip(predictions + self.bias_correction, 0.001, 0.999)
+    
+    def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
+        """보정된 앙상블 예측"""
+        if not self.is_fitted:
+            raise ValueError("앙상블 모델이 학습되지 않았습니다")
+        
+        # 가중 앙상블
+        ensemble_pred = self._create_weighted_ensemble(base_predictions)
+        
+        # 보정 적용
+        calibrated_pred = self._calibrate_predictions(ensemble_pred)
+        
+        return calibrated_pred
 
 class CTRWeightedBlending(BaseEnsemble):
     """CTR 예측에 특화된 가중 블렌딩 앙상블"""
@@ -74,7 +245,7 @@ class CTRWeightedBlending(BaseEnsemble):
         logger.info(f"사용 가능한 모델: {available_models}")
         
         if len(available_models) < 2:
-            logger.warning("앙상블을 위한 모델이 부족합니다.")
+            logger.warning("앙상블을 위한 모델이 부족합니다")
             if available_models:
                 self.optimized_weights = {available_models[0]: 1.0}
             self.is_fitted = True
@@ -88,7 +259,6 @@ class CTRWeightedBlending(BaseEnsemble):
         if total_weight > 0:
             self.optimized_weights = {k: v/total_weight for k, v in self.optimized_weights.items()}
         else:
-            # 모든 가중치가 0인 경우 균등 가중치
             self.optimized_weights = {k: 1.0/len(available_models) for k in available_models}
         
         self.is_fitted = True
@@ -104,29 +274,24 @@ class CTRWeightedBlending(BaseEnsemble):
             for name in model_names:
                 weights[name] = trial.suggest_float(f'weight_{name}', 0.0, 1.0)
             
-            # 가중치 정규화
             total_weight = sum(weights.values())
             if total_weight == 0:
                 return 0.0
             
             weights = {k: v/total_weight for k, v in weights.items()}
             
-            # 앙상블 예측
             ensemble_pred = np.zeros(len(y))
             for name, weight in weights.items():
                 if name in base_predictions:
                     ensemble_pred += weight * base_predictions[name]
             
-            # Combined Score 계산
             score = self.metrics_calculator.combined_score(y, ensemble_pred)
             return score
         
         try:
-            # Optuna 최적화
             study = optuna.create_study(direction='maximize')
             study.optimize(objective, n_trials=200, show_progress_bar=False)
             
-            # 결과를 실제 모델명으로 매핑
             optimized_weights = {}
             for param_name, weight in study.best_params.items():
                 model_name = param_name.replace('weight_', '')
@@ -138,7 +303,6 @@ class CTRWeightedBlending(BaseEnsemble):
             
         except Exception as e:
             logger.error(f"가중치 최적화 실패: {str(e)}")
-            # 개별 모델 성능 기반 가중치
             return self._performance_based_weights(base_predictions, y)
     
     def _performance_based_weights(self, base_predictions: Dict[str, np.ndarray], y: pd.Series) -> Dict[str, float]:
@@ -149,7 +313,7 @@ class CTRWeightedBlending(BaseEnsemble):
         for name, pred in base_predictions.items():
             try:
                 score = self.metrics_calculator.combined_score(y, pred)
-                weights[name] = max(score, 0.01)  # 최소 가중치 보장
+                weights[name] = max(score, 0.01)
             except:
                 weights[name] = 0.01
         
@@ -159,7 +323,7 @@ class CTRWeightedBlending(BaseEnsemble):
     def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
         """가중 블렌딩 예측"""
         if not self.is_fitted:
-            raise ValueError("앙상블 모델이 학습되지 않았습니다.")
+            raise ValueError("앙상블 모델이 학습되지 않았습니다")
         
         ensemble_pred = np.zeros(len(list(base_predictions.values())[0]))
         total_weight = 0
@@ -169,11 +333,9 @@ class CTRWeightedBlending(BaseEnsemble):
                 ensemble_pred += weight * base_predictions[name]
                 total_weight += weight
         
-        # 가중치 합이 0이 아닌 경우에만 정규화
         if total_weight > 0:
             ensemble_pred = ensemble_pred / total_weight
         else:
-            # 모든 가중치가 0인 경우 균등 평균
             ensemble_pred = np.mean(list(base_predictions.values()), axis=0)
         
         return ensemble_pred
@@ -191,10 +353,7 @@ class CTRStackingEnsemble(BaseEnsemble):
         """시간적 순서를 고려한 스태킹 앙상블 학습"""
         logger.info("CTR 스태킹 앙상블 학습 시작")
         
-        # Out-of-fold 예측 생성 (시간적 순서 고려)
         oof_predictions = self._generate_temporal_oof_predictions(X, y)
-        
-        # 메타 모델 학습
         self._train_meta_model(oof_predictions, y)
         
         self.is_fitted = True
@@ -211,21 +370,17 @@ class CTRStackingEnsemble(BaseEnsemble):
             
             for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
                 try:
-                    # 폴드별 학습
                     X_train_fold = X.iloc[train_idx]
                     X_val_fold = X.iloc[val_idx]
                     y_train_fold = y.iloc[train_idx]
                     
-                    # 모델 복사 및 학습
                     fold_model = self._clone_model(model)
                     fold_model.fit(X_train_fold, y_train_fold)
                     
-                    # 검증 세트 예측
                     oof_pred[val_idx] = fold_model.predict_proba(X_val_fold)
                     
                 except Exception as e:
                     logger.error(f"{model_name} 폴드 {fold} 학습 실패: {str(e)}")
-                    # 기본값 사용
                     oof_pred[val_idx] = 0.0191
             
             oof_predictions[model_name] = oof_pred
@@ -240,7 +395,6 @@ class CTRStackingEnsemble(BaseEnsemble):
             model_type = model.name.lower()
             return ModelFactory.create_model(model_type, params=model.params)
         except:
-            # 복사 실패 시 원본 모델 반환
             return model
     
     def _train_meta_model(self, oof_predictions: pd.DataFrame, y: pd.Series):
@@ -250,7 +404,7 @@ class CTRStackingEnsemble(BaseEnsemble):
             self.meta_model = LogisticRegression(
                 random_state=42, 
                 max_iter=1000,
-                class_weight='balanced'  # CTR 불균형 처리
+                class_weight='balanced'
             )
         elif self.meta_model_type == 'rf':
             self.meta_model = RandomForestClassifier(
@@ -264,7 +418,6 @@ class CTRStackingEnsemble(BaseEnsemble):
         try:
             self.meta_model.fit(oof_predictions, y)
             
-            # 메타 모델 성능 확인
             meta_pred = self.meta_model.predict_proba(oof_predictions)[:, 1]
             metrics_calc = CTRMetrics()
             combined_score = metrics_calc.combined_score(y, meta_pred)
@@ -277,19 +430,15 @@ class CTRStackingEnsemble(BaseEnsemble):
     def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
         """스태킹 예측"""
         if not self.is_fitted:
-            raise ValueError("앙상블 모델이 학습되지 않았습니다.")
+            raise ValueError("앙상블 모델이 학습되지 않았습니다")
         
         try:
-            # 기본 모델 예측을 DataFrame으로 변환
             pred_df = pd.DataFrame(base_predictions)
-            
-            # 메타 모델로 최종 예측
             ensemble_pred = self.meta_model.predict_proba(pred_df)[:, 1]
             
             return ensemble_pred
         except Exception as e:
             logger.error(f"스태킹 예측 실패: {str(e)}")
-            # 기본값으로 평균 사용
             return np.mean(list(base_predictions.values()), axis=0)
 
 class CTRRankAveraging(BaseEnsemble):
@@ -306,22 +455,19 @@ class CTRRankAveraging(BaseEnsemble):
     def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
         """순위 평균 예측"""
         if not self.is_fitted:
-            raise ValueError("앙상블 모델이 학습되지 않았습니다.")
+            raise ValueError("앙상블 모델이 학습되지 않았습니다")
         
         try:
-            # 각 모델의 예측을 순위로 변환
             ranks = []
             for pred in base_predictions.values():
-                rank = pd.Series(pred).rank(pct=True).values  # 백분위 순위
+                rank = pd.Series(pred).rank(pct=True).values
                 ranks.append(rank)
             
-            # 순위 평균
             ensemble_rank = np.mean(ranks, axis=0)
             
             return ensemble_rank
         except Exception as e:
             logger.error(f"순위 평균 예측 실패: {str(e)}")
-            # 기본값으로 평균 사용
             return np.mean(list(base_predictions.values()), axis=0)
 
 class CTREnsembleManager:
@@ -334,6 +480,7 @@ class CTREnsembleManager:
         self.best_ensemble = None
         self.ensemble_results = {}
         self.metrics_calculator = CTRMetrics()
+        self.calibrated_ensemble = None
     
     def add_base_model(self, name: str, model: BaseModel):
         """기본 모델 추가"""
@@ -355,10 +502,15 @@ class CTREnsembleManager:
         elif ensemble_type == 'rank':
             ensemble = CTRRankAveraging()
         
+        elif ensemble_type == 'calibrated':
+            target_ctr = kwargs.get('target_ctr', 0.0201)
+            calibration_method = kwargs.get('calibration_method', 'platt')
+            ensemble = CTRCalibratedEnsemble(target_ctr, calibration_method)
+            self.calibrated_ensemble = ensemble
+        
         else:
             raise ValueError(f"지원하지 않는 앙상블 타입: {ensemble_type}")
         
-        # 기본 모델들 추가
         for name, model in self.base_models.items():
             ensemble.add_base_model(name, model)
         
@@ -371,7 +523,6 @@ class CTREnsembleManager:
         """모든 앙상블 학습"""
         logger.info("모든 앙상블 학습 시작")
         
-        # 기본 모델들의 예측 수집
         base_predictions = {}
         for name, model in self.base_models.items():
             try:
@@ -380,10 +531,8 @@ class CTREnsembleManager:
                 logger.info(f"{name} 모델 예측 완료")
             except Exception as e:
                 logger.error(f"{name} 모델 예측 실패: {str(e)}")
-                # 기본값으로 실제 CTR 사용
                 base_predictions[name] = np.full(len(X), 0.0191)
         
-        # 각 앙상블 학습
         for ensemble_type, ensemble in self.ensembles.items():
             try:
                 ensemble.fit(X, y, base_predictions)
@@ -397,14 +546,12 @@ class CTREnsembleManager:
         
         results = {}
         
-        # 기본 모델들의 검증 예측
         base_predictions = {}
         for name, model in self.base_models.items():
             try:
                 pred = model.predict_proba(X_val)
                 base_predictions[name] = pred
                 
-                # 기본 모델 Combined Score 계산
                 score = self.metrics_calculator.combined_score(y_val, pred)
                 results[f"base_{name}"] = score
                 
@@ -412,7 +559,6 @@ class CTREnsembleManager:
                 logger.error(f"{name} 모델 검증 예측 실패: {str(e)}")
                 results[f"base_{name}"] = 0.0
         
-        # 앙상블 성능 평가
         for ensemble_type, ensemble in self.ensembles.items():
             if ensemble.is_fitted:
                 try:
@@ -422,11 +568,15 @@ class CTREnsembleManager:
                     
                     logger.info(f"{ensemble_type} 앙상블 Combined Score: {score:.4f}")
                     
+                    if ensemble_type == 'calibrated':
+                        predicted_ctr = ensemble_pred.mean()
+                        actual_ctr = y_val.mean()
+                        logger.info(f"보정 앙상블 CTR: 예측 {predicted_ctr:.4f} vs 실제 {actual_ctr:.4f}")
+                    
                 except Exception as e:
                     logger.error(f"{ensemble_type} 앙상블 평가 실패: {str(e)}")
                     results[f"ensemble_{ensemble_type}"] = 0.0
         
-        # 최고 성능 모델/앙상블 선택
         if results:
             best_name = max(results, key=results.get)
             best_score = results[best_name]
@@ -436,7 +586,6 @@ class CTREnsembleManager:
                 self.best_ensemble = self.ensembles[ensemble_type]
                 logger.info(f"최고 성능 앙상블: {ensemble_type} (Combined Score: {best_score:.4f})")
             else:
-                # 기본 모델이 더 좋은 경우
                 logger.info(f"기본 모델이 우수함: {best_name} (Combined Score: {best_score:.4f})")
                 self.best_ensemble = None
         
@@ -446,11 +595,9 @@ class CTREnsembleManager:
     def predict_with_best_ensemble(self, X: pd.DataFrame) -> np.ndarray:
         """최고 성능 앙상블로 예측"""
         if self.best_ensemble is None:
-            # 앙상블이 없으면 최고 성능 기본 모델 사용
             best_model_name = None
             best_score = 0
             
-            # 기본 모델 중 최고 성능 찾기
             for result_name, score in self.ensemble_results.items():
                 if result_name.startswith('base_') and score > best_score:
                     best_score = score
@@ -460,9 +607,8 @@ class CTREnsembleManager:
                 logger.info(f"최고 성능 기본 모델 사용: {best_model_name}")
                 return self.base_models[best_model_name].predict_proba(X)
             else:
-                raise ValueError("사용 가능한 모델이 없습니다.")
+                raise ValueError("사용 가능한 모델이 없습니다")
         
-        # 기본 모델들의 예측
         base_predictions = {}
         for name, model in self.base_models.items():
             try:
@@ -472,7 +618,6 @@ class CTREnsembleManager:
                 logger.error(f"{name} 예측 실패: {str(e)}")
                 base_predictions[name] = np.full(len(X), 0.0191)
         
-        # 앙상블 예측
         return self.best_ensemble.predict_proba(base_predictions)
     
     def save_ensembles(self, output_dir: Path = None):
@@ -483,7 +628,6 @@ class CTREnsembleManager:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # 앙상블 저장
         for ensemble_type, ensemble in self.ensembles.items():
             if ensemble.is_fitted:
                 ensemble_path = output_dir / f"ensemble_{ensemble_type}.pkl"
@@ -496,7 +640,6 @@ class CTREnsembleManager:
                 except Exception as e:
                     logger.error(f"{ensemble_type} 앙상블 저장 실패: {str(e)}")
         
-        # 최고 성능 앙상블 정보 저장
         best_info = {
             'best_ensemble_type': self.best_ensemble.name if self.best_ensemble else None,
             'ensemble_results': self.ensemble_results
@@ -517,7 +660,6 @@ class CTREnsembleManager:
         
         input_dir = Path(input_dir)
         
-        # 앙상블 파일 찾기
         ensemble_files = list(input_dir.glob("ensemble_*.pkl"))
         
         for ensemble_file in ensemble_files:
@@ -533,7 +675,6 @@ class CTREnsembleManager:
             except Exception as e:
                 logger.error(f"{ensemble_file} 앙상블 로딩 실패: {str(e)}")
         
-        # 최고 성능 앙상블 정보 로딩
         info_path = input_dir / "best_ensemble_info.json"
         if info_path.exists():
             try:
@@ -556,8 +697,8 @@ class CTREnsembleManager:
             'fitted_ensembles': sum(1 for e in self.ensembles.values() if e.is_fitted),
             'best_ensemble': self.best_ensemble.name if self.best_ensemble else None,
             'ensemble_results': self.ensemble_results,
-            'base_models_count': len(self.base_models)
+            'base_models_count': len(self.base_models),
+            'calibrated_ensemble_available': self.calibrated_ensemble is not None
         }
 
-# 기존 클래스명 호환성 유지
 EnsembleManager = CTREnsembleManager
