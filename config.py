@@ -1,9 +1,16 @@
 # config.py
 
 import os
-import torch
 from pathlib import Path
 import logging
+
+# PyTorch import 안전하게 처리
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    logging.warning("PyTorch가 설치되지 않았습니다. GPU 기능이 비활성화됩니다.")
 
 class Config:
     """프로젝트 전체 설정 관리"""
@@ -21,7 +28,13 @@ class Config:
     SUBMISSION_PATH = "./sample_submission.csv"
     
     # GPU 및 하드웨어 설정
-    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if TORCH_AVAILABLE:
+        DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        GPU_AVAILABLE = torch.cuda.is_available()
+    else:
+        DEVICE = 'cpu'
+        GPU_AVAILABLE = False
+    
     GPU_MEMORY_LIMIT = 14  # RTX 4060 Ti 16GB 중 14GB 사용
     CUDA_VISIBLE_DEVICES = "0"
     USE_MIXED_PRECISION = True
@@ -71,8 +84,8 @@ class Config:
     XGB_PARAMS = {
         'objective': 'binary:logistic',
         'eval_metric': 'logloss',
-        'tree_method': 'gpu_hist' if torch.cuda.is_available() else 'hist',
-        'gpu_id': 0 if torch.cuda.is_available() else None,
+        'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
+        'gpu_id': 0 if GPU_AVAILABLE else None,
         'max_depth': 10,
         'learning_rate': 0.03,
         'subsample': 0.7,
@@ -90,8 +103,8 @@ class Config:
     CAT_PARAMS = {
         'loss_function': 'Logloss',
         'eval_metric': 'Logloss',
-        'task_type': 'GPU' if torch.cuda.is_available() else 'CPU',
-        'devices': '0' if torch.cuda.is_available() else None,
+        'task_type': 'GPU' if GPU_AVAILABLE else 'CPU',
+        'devices': '0' if GPU_AVAILABLE else None,
         'depth': 10,
         'learning_rate': 0.03,
         'iterations': 2000,
@@ -106,7 +119,7 @@ class Config:
     NN_PARAMS = {
         'hidden_dims': [1024, 512, 256, 128],
         'dropout_rate': 0.4,
-        'batch_size': BATCH_SIZE_GPU if torch.cuda.is_available() else BATCH_SIZE_CPU,
+        'batch_size': BATCH_SIZE_GPU if GPU_AVAILABLE else BATCH_SIZE_CPU,
         'learning_rate': 0.001,
         'weight_decay': 1e-5,
         'epochs': 100,
@@ -175,7 +188,7 @@ class Config:
         'timeout': 100,
         'cache_size': 50000,
         'model_version': 'v2.0',
-        'use_gpu': torch.cuda.is_available()
+        'use_gpu': GPU_AVAILABLE
     }
     
     # 하이퍼파라미터 튜닝 설정
@@ -191,7 +204,10 @@ class Config:
     def setup_directories(cls):
         """필요한 디렉터리 생성"""
         for dir_path in [cls.DATA_DIR, cls.MODEL_DIR, cls.LOG_DIR, cls.OUTPUT_DIR]:
-            dir_path.mkdir(parents=True, exist_ok=True)
+            try:
+                dir_path.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                print(f"디렉터리 생성 실패 {dir_path}: {e}")
     
     @classmethod
     def setup_logging(cls):
@@ -213,33 +229,45 @@ class Config:
             logger.addHandler(console_handler)
         
         if cls.LOGGING_CONFIG['file_handler']:
-            file_handler = logging.FileHandler(cls.LOG_DIR / 'ctr_model.log')
-            file_handler.setFormatter(formatter)
-            logger.addHandler(file_handler)
+            try:
+                file_handler = logging.FileHandler(cls.LOG_DIR / 'ctr_model.log')
+                file_handler.setFormatter(formatter)
+                logger.addHandler(file_handler)
+            except Exception as e:
+                print(f"파일 핸들러 설정 실패: {e}")
         
         return logger
     
     @classmethod
     def setup_gpu_environment(cls):
         """GPU 환경 설정"""
-        if torch.cuda.is_available():
-            # CUDA 환경 변수 설정
-            os.environ['CUDA_VISIBLE_DEVICES'] = cls.CUDA_VISIBLE_DEVICES
-            
-            # GPU 메모리 설정
-            torch.cuda.empty_cache()
-            
-            # Mixed Precision 설정
-            if cls.USE_MIXED_PRECISION:
-                torch.backends.cudnn.benchmark = True
-            
+        if not TORCH_AVAILABLE:
             logger = logging.getLogger(__name__)
-            gpu_name = torch.cuda.get_device_name(0)
-            gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            
-            logger.info(f"GPU 활성화: {gpu_name} ({gpu_memory:.1f}GB)")
-            logger.info(f"Mixed Precision: {cls.USE_MIXED_PRECISION}")
-            
+            logger.warning("PyTorch를 사용할 수 없습니다. CPU 모드로 실행됩니다.")
+            return
+        
+        if torch.cuda.is_available():
+            try:
+                # CUDA 환경 변수 설정
+                os.environ['CUDA_VISIBLE_DEVICES'] = cls.CUDA_VISIBLE_DEVICES
+                
+                # GPU 메모리 설정
+                torch.cuda.empty_cache()
+                
+                # Mixed Precision 설정
+                if cls.USE_MIXED_PRECISION:
+                    torch.backends.cudnn.benchmark = True
+                
+                logger = logging.getLogger(__name__)
+                gpu_name = torch.cuda.get_device_name(0)
+                gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                
+                logger.info(f"GPU 활성화: {gpu_name} ({gpu_memory:.1f}GB)")
+                logger.info(f"Mixed Precision: {cls.USE_MIXED_PRECISION}")
+                
+            except Exception as e:
+                logger = logging.getLogger(__name__)
+                logger.error(f"GPU 환경 설정 실패: {e}")
         else:
             logger = logging.getLogger(__name__)
             logger.warning("CUDA를 사용할 수 없습니다. CPU 모드로 실행됩니다.")
@@ -247,23 +275,32 @@ class Config:
     @classmethod
     def get_memory_config(cls):
         """메모리 설정 반환"""
-        import psutil
-        
-        total_memory = psutil.virtual_memory().total / (1024**3)
-        available_memory = psutil.virtual_memory().available / (1024**3)
-        
-        # 동적 메모리 설정
-        if available_memory > 50:
-            max_memory = min(cls.MAX_MEMORY_GB, available_memory - 5)
-        else:
-            max_memory = available_memory * 0.8
-        
-        return {
-            'max_memory_gb': max_memory,
-            'chunk_size': cls.CHUNK_SIZE,
-            'batch_size': cls.BATCH_SIZE_GPU if torch.cuda.is_available() else cls.BATCH_SIZE_CPU,
-            'prefetch_factor': cls.PREFETCH_FACTOR
-        }
+        try:
+            import psutil
+            
+            total_memory = psutil.virtual_memory().total / (1024**3)
+            available_memory = psutil.virtual_memory().available / (1024**3)
+            
+            # 동적 메모리 설정
+            if available_memory > 50:
+                max_memory = min(cls.MAX_MEMORY_GB, available_memory - 5)
+            else:
+                max_memory = available_memory * 0.8
+            
+            return {
+                'max_memory_gb': max_memory,
+                'chunk_size': cls.CHUNK_SIZE,
+                'batch_size': cls.BATCH_SIZE_GPU if cls.GPU_AVAILABLE else cls.BATCH_SIZE_CPU,
+                'prefetch_factor': cls.PREFETCH_FACTOR
+            }
+        except ImportError:
+            # psutil이 없는 경우 기본값 사용
+            return {
+                'max_memory_gb': cls.MAX_MEMORY_GB,
+                'chunk_size': cls.CHUNK_SIZE,
+                'batch_size': cls.BATCH_SIZE_GPU if cls.GPU_AVAILABLE else cls.BATCH_SIZE_CPU,
+                'prefetch_factor': cls.PREFETCH_FACTOR
+            }
     
     @classmethod
     def get_data_config(cls):
@@ -285,12 +322,16 @@ class Config:
             'target_usage_ratio': cls.TARGET_DATA_USAGE_RATIO
         }
 
-# 환경변수 설정
-os.environ['PYTHONHASHSEED'] = str(Config.RANDOM_STATE)
-os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+# 환경변수 설정 - 안전하게 처리
+try:
+    os.environ['PYTHONHASHSEED'] = str(Config.RANDOM_STATE)
+    os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+except Exception as e:
+    print(f"환경 변수 설정 실패: {e}")
 
 # GPU 환경 설정 (임포트 시 자동 실행)
 try:
-    Config.setup_gpu_environment()
+    if TORCH_AVAILABLE:
+        Config.setup_gpu_environment()
 except Exception as e:
     print(f"GPU 환경 설정 실패: {e}")

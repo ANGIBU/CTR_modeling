@@ -7,17 +7,46 @@ import logging
 from abc import ABC, abstractmethod
 import pickle
 
-# 트리 기반 모델
-import lightgbm as lgb
-import xgboost as xgb
-from catboost import CatBoostClassifier
+# 트리 기반 모델 - 안전한 import
+try:
+    import lightgbm as lgb
+    LIGHTGBM_AVAILABLE = True
+except ImportError:
+    LIGHTGBM_AVAILABLE = False
+    logging.warning("LightGBM이 설치되지 않았습니다.")
 
-# 신경망 모델
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
-from torch.cuda.amp import GradScaler, autocast
+try:
+    import xgboost as xgb
+    XGBOOST_AVAILABLE = True
+except ImportError:
+    XGBOOST_AVAILABLE = False
+    logging.warning("XGBoost가 설치되지 않았습니다.")
+
+try:
+    from catboost import CatBoostClassifier
+    CATBOOST_AVAILABLE = True
+except ImportError:
+    CATBOOST_AVAILABLE = False
+    logging.warning("CatBoost가 설치되지 않았습니다.")
+
+# 신경망 모델 - 안전한 import
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    from torch.utils.data import DataLoader, TensorDataset
+    TORCH_AVAILABLE = True
+    
+    try:
+        from torch.cuda.amp import GradScaler, autocast
+        AMP_AVAILABLE = True
+    except ImportError:
+        AMP_AVAILABLE = False
+        
+except ImportError:
+    TORCH_AVAILABLE = False
+    AMP_AVAILABLE = False
+    logging.warning("PyTorch가 설치되지 않았습니다. DeepCTR 모델을 사용할 수 없습니다.")
 
 # Calibration 모듈
 from sklearn.calibration import CalibratedClassifierCV
@@ -70,13 +99,13 @@ class BaseModel(ABC):
             # Calibration 방법 선택
             if method == 'platt':
                 calibrator = CalibratedClassifierCV(
-                    base_estimator=None, 
+                    estimator=None, 
                     method='sigmoid', 
                     cv=cv_folds
                 )
             elif method == 'isotonic':
                 calibrator = CalibratedClassifierCV(
-                    base_estimator=None, 
+                    estimator=None, 
                     method='isotonic', 
                     cv=cv_folds
                 )
@@ -118,6 +147,9 @@ class LightGBMModel(BaseModel):
     """LightGBM 모델"""
     
     def __init__(self, params: Dict[str, Any] = None):
+        if not LIGHTGBM_AVAILABLE:
+            raise ImportError("LightGBM이 설치되지 않았습니다.")
+            
         default_params = Config.LGBM_PARAMS.copy()
         if params:
             default_params.update(params)
@@ -189,6 +221,9 @@ class XGBoostModel(BaseModel):
     """XGBoost 모델"""
     
     def __init__(self, params: Dict[str, Any] = None):
+        if not XGBOOST_AVAILABLE:
+            raise ImportError("XGBoost가 설치되지 않았습니다.")
+            
         default_params = Config.XGB_PARAMS.copy()
         if params:
             default_params.update(params)
@@ -258,6 +293,9 @@ class CatBoostModel(BaseModel):
     """CatBoost 모델"""
     
     def __init__(self, params: Dict[str, Any] = None):
+        if not CATBOOST_AVAILABLE:
+            raise ImportError("CatBoost가 설치되지 않았습니다.")
+            
         default_params = Config.CAT_PARAMS.copy()
         if params:
             default_params.update(params)
@@ -327,12 +365,14 @@ class CatBoostModel(BaseModel):
         
         return raw_pred
 
-class DeepCTRModel(BaseModel, nn.Module):
+class DeepCTRModel(BaseModel):
     """GPU 기반 딥러닝 CTR 모델"""
     
     def __init__(self, input_dim: int, params: Dict[str, Any] = None):
+        if not TORCH_AVAILABLE:
+            raise ImportError("PyTorch가 설치되지 않았습니다.")
+            
         BaseModel.__init__(self, "DeepCTR", params)
-        nn.Module.__init__(self)
         
         default_params = Config.NN_PARAMS.copy()
         if params:
@@ -340,26 +380,35 @@ class DeepCTRModel(BaseModel, nn.Module):
         self.params = default_params
         
         self.input_dim = input_dim
-        self.device = Config.DEVICE
+        self.device = Config.DEVICE if hasattr(Config, 'DEVICE') else 'cpu'
         
         # 네트워크 구조 정의
         self.network = self._build_network()
         
         # 옵티마이저 및 손실함수
         self.optimizer = None
-        self.scaler = GradScaler() if Config.USE_MIXED_PRECISION else None
+        self.scaler = GradScaler() if AMP_AVAILABLE and Config.USE_MIXED_PRECISION else None
         
         # CTR 특화 가중 손실함수
-        pos_weight = torch.tensor([49.0], device=self.device)  # 1/0.0201 - 1
-        self.criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        
-        self.to(self.device)
-        
-        # Calibration 관련
-        self.temperature = nn.Parameter(torch.ones(1) * 1.5)
-        
+        if TORCH_AVAILABLE:
+            pos_weight = torch.tensor([49.0], device=self.device)  # 1/0.0201 - 1
+            self.criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+            
+            # Calibration 관련
+            self.temperature = nn.Parameter(torch.ones(1) * 1.5)
+            
+            try:
+                self.to(self.device)
+            except Exception as e:
+                logger.warning(f"GPU로 모델 이동 실패: {e}. CPU 사용")
+                self.device = 'cpu'
+                self.to(self.device)
+    
     def _build_network(self):
         """네트워크 구조 생성"""
+        if not TORCH_AVAILABLE:
+            raise ImportError("PyTorch가 필요합니다.")
+            
         hidden_dims = self.params['hidden_dims']
         dropout_rate = self.params['dropout_rate']
         use_batch_norm = self.params.get('use_batch_norm', True)
@@ -403,7 +452,10 @@ class DeepCTRModel(BaseModel, nn.Module):
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
         """딥러닝 모델 학습"""
-        logger.info(f"{self.name} 모델 학습 시작 (GPU: {torch.cuda.is_available()})")
+        if not TORCH_AVAILABLE:
+            raise ImportError("PyTorch가 필요합니다.")
+            
+        logger.info(f"{self.name} 모델 학습 시작 (Device: {self.device})")
         
         self.feature_names = list(X_train.columns)
         
@@ -424,8 +476,12 @@ class DeepCTRModel(BaseModel, nn.Module):
         )
         
         # 데이터 텐서 변환
-        X_train_tensor = torch.FloatTensor(X_train.values).to(self.device)
-        y_train_tensor = torch.FloatTensor(y_train.values).to(self.device)
+        try:
+            X_train_tensor = torch.FloatTensor(X_train.values).to(self.device)
+            y_train_tensor = torch.FloatTensor(y_train.values).to(self.device)
+        except Exception as e:
+            logger.error(f"텐서 변환 실패: {e}")
+            raise
         
         train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
         train_loader = DataLoader(
@@ -433,7 +489,7 @@ class DeepCTRModel(BaseModel, nn.Module):
             batch_size=self.params['batch_size'], 
             shuffle=True,
             num_workers=0,
-            pin_memory=True if torch.cuda.is_available() else False
+            pin_memory=True if self.device != 'cpu' else False
         )
         
         # 검증 데이터 준비
@@ -446,7 +502,7 @@ class DeepCTRModel(BaseModel, nn.Module):
                 val_dataset, 
                 batch_size=self.params['batch_size'],
                 num_workers=0,
-                pin_memory=True if torch.cuda.is_available() else False
+                pin_memory=True if self.device != 'cpu' else False
             )
         
         # 학습 루프
@@ -461,7 +517,7 @@ class DeepCTRModel(BaseModel, nn.Module):
             for batch_X, batch_y in train_loader:
                 self.optimizer.zero_grad()
                 
-                if self.scaler is not None:
+                if self.scaler is not None and AMP_AVAILABLE:
                     with autocast():
                         logits = self.forward(batch_X)
                         loss = self.criterion(logits, batch_y)
@@ -488,7 +544,7 @@ class DeepCTRModel(BaseModel, nn.Module):
                 
                 with torch.no_grad():
                     for batch_X, batch_y in val_loader:
-                        if self.scaler is not None:
+                        if self.scaler is not None and AMP_AVAILABLE:
                             with autocast():
                                 logits = self.forward(batch_X)
                                 loss = self.criterion(logits, batch_y)
@@ -569,7 +625,7 @@ class DeepCTRModel(BaseModel, nn.Module):
                 for i in range(0, len(X_tensor), batch_size):
                     batch = X_tensor[i:i + batch_size]
                     
-                    if self.scaler is not None:
+                    if self.scaler is not None and AMP_AVAILABLE:
                         with autocast():
                             logits = self.forward(batch)
                             proba = torch.sigmoid(logits)
@@ -739,15 +795,23 @@ class ModelFactory:
         """모델 타입에 따라 모델 인스턴스 생성"""
         
         if model_type.lower() == 'lightgbm':
+            if not LIGHTGBM_AVAILABLE:
+                raise ImportError("LightGBM이 설치되지 않았습니다.")
             return LightGBMModel(kwargs.get('params'))
         
         elif model_type.lower() == 'xgboost':
+            if not XGBOOST_AVAILABLE:
+                raise ImportError("XGBoost가 설치되지 않았습니다.")
             return XGBoostModel(kwargs.get('params'))
         
         elif model_type.lower() == 'catboost':
+            if not CATBOOST_AVAILABLE:
+                raise ImportError("CatBoost가 설치되지 않았습니다.")
             return CatBoostModel(kwargs.get('params'))
         
         elif model_type.lower() == 'deepctr':
+            if not TORCH_AVAILABLE:
+                raise ImportError("PyTorch가 설치되지 않았습니다.")
             input_dim = kwargs.get('input_dim')
             if input_dim is None:
                 raise ValueError("DeepCTR 모델에는 input_dim이 필요합니다.")
@@ -762,7 +826,18 @@ class ModelFactory:
     @staticmethod
     def get_available_models() -> List[str]:
         """사용 가능한 모델 타입 리스트"""
-        return ['lightgbm', 'xgboost', 'catboost', 'deepctr', 'logistic']
+        available = ['logistic']  # 항상 사용 가능
+        
+        if LIGHTGBM_AVAILABLE:
+            available.append('lightgbm')
+        if XGBOOST_AVAILABLE:
+            available.append('xgboost')
+        if CATBOOST_AVAILABLE:
+            available.append('catboost')
+        if TORCH_AVAILABLE:
+            available.append('deepctr')
+            
+        return available
 
 class ModelEvaluator:
     """모델 평가 클래스"""

@@ -9,8 +9,16 @@ from sklearn.metrics import (
     precision_recall_curve, roc_curve, confusion_matrix,
     classification_report
 )
-import matplotlib.pyplot as plt
-import seaborn as sns
+
+# matplotlib import 처리
+try:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    logging.warning("matplotlib이 설치되지 않았습니다. 시각화 기능이 비활성화됩니다.")
+
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -388,14 +396,25 @@ class EvaluationVisualizer:
     
     def __init__(self, figsize: Tuple[int, int] = (12, 8)):
         self.figsize = figsize
-        # matplotlib 스타일 설정 수정
-        try:
-            plt.style.use('seaborn-v0_8')
-        except:
+        self.matplotlib_available = MATPLOTLIB_AVAILABLE
+        
+        if self.matplotlib_available:
+            # matplotlib 스타일 안전하게 설정
             try:
-                plt.style.use('seaborn')
-            except:
-                plt.style.use('default')
+                plt.style.available
+                available_styles = plt.style.available
+                
+                if 'seaborn-v0_8' in available_styles:
+                    plt.style.use('seaborn-v0_8')
+                elif 'seaborn' in available_styles:
+                    plt.style.use('seaborn')
+                else:
+                    plt.style.use('default')
+            except Exception:
+                # 모든 스타일 설정이 실패하면 기본값 사용
+                pass
+        else:
+            logger.warning("matplotlib을 사용할 수 없습니다. 시각화 기능이 비활성화됩니다.")
     
     def plot_roc_curves(self, 
                        models_predictions: Dict[str, np.ndarray],
@@ -403,29 +422,37 @@ class EvaluationVisualizer:
                        save_path: Optional[str] = None):
         """ROC 곡선 시각화"""
         
-        plt.figure(figsize=self.figsize)
+        if not self.matplotlib_available:
+            logger.warning("matplotlib을 사용할 수 없어 ROC 곡선을 그릴 수 없습니다.")
+            return
         
-        for model_name, y_pred_proba in models_predictions.items():
-            try:
-                fpr, tpr, _ = roc_curve(y_true, y_pred_proba)
-                auc_score = roc_auc_score(y_true, y_pred_proba)
-                
-                plt.plot(fpr, tpr, label=f'{model_name} (AUC: {auc_score:.3f})')
-                
-            except Exception as e:
-                logger.error(f"{model_name} ROC 곡선 그리기 실패: {str(e)}")
-        
-        plt.plot([0, 1], [0, 1], 'k--', label='Random')
-        plt.xlabel('False Positive Rate')
-        plt.ylabel('True Positive Rate')
-        plt.title('ROC Curves Comparison')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        
-        plt.show()
+        try:
+            plt.figure(figsize=self.figsize)
+            
+            for model_name, y_pred_proba in models_predictions.items():
+                try:
+                    fpr, tpr, _ = roc_curve(y_true, y_pred_proba)
+                    auc_score = roc_auc_score(y_true, y_pred_proba)
+                    
+                    plt.plot(fpr, tpr, label=f'{model_name} (AUC: {auc_score:.3f})')
+                    
+                except Exception as e:
+                    logger.error(f"{model_name} ROC 곡선 그리기 실패: {str(e)}")
+            
+            plt.plot([0, 1], [0, 1], 'k--', label='Random')
+            plt.xlabel('False Positive Rate')
+            plt.ylabel('True Positive Rate')
+            plt.title('ROC Curves Comparison')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            
+            if save_path:
+                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            
+            plt.show()
+            
+        except Exception as e:
+            logger.error(f"ROC 곡선 시각화 실패: {str(e)}")
     
     def plot_precision_recall_curves(self,
                                     models_predictions: Dict[str, np.ndarray],
@@ -433,29 +460,37 @@ class EvaluationVisualizer:
                                     save_path: Optional[str] = None):
         """Precision-Recall 곡선 시각화"""
         
-        plt.figure(figsize=self.figsize)
+        if not self.matplotlib_available:
+            logger.warning("matplotlib을 사용할 수 없어 PR 곡선을 그릴 수 없습니다.")
+            return
         
-        metrics_calc = CTRMetrics()
-        
-        for model_name, y_pred_proba in models_predictions.items():
-            try:
-                pr_auc, precision, recall = metrics_calc.calculate_pr_auc(y_true, y_pred_proba)
-                
-                plt.plot(recall, precision, label=f'{model_name} (PR-AUC: {pr_auc:.3f})')
-                
-            except Exception as e:
-                logger.error(f"{model_name} PR 곡선 그리기 실패: {str(e)}")
-        
-        plt.xlabel('Recall')
-        plt.ylabel('Precision')
-        plt.title('Precision-Recall Curves Comparison')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        
-        plt.show()
+        try:
+            plt.figure(figsize=self.figsize)
+            
+            metrics_calc = CTRMetrics()
+            
+            for model_name, y_pred_proba in models_predictions.items():
+                try:
+                    pr_auc, precision, recall = metrics_calc.calculate_pr_auc(y_true, y_pred_proba)
+                    
+                    plt.plot(recall, precision, label=f'{model_name} (PR-AUC: {pr_auc:.3f})')
+                    
+                except Exception as e:
+                    logger.error(f"{model_name} PR 곡선 그리기 실패: {str(e)}")
+            
+            plt.xlabel('Recall')
+            plt.ylabel('Precision')
+            plt.title('Precision-Recall Curves Comparison')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            
+            if save_path:
+                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            
+            plt.show()
+            
+        except Exception as e:
+            logger.error(f"PR 곡선 시각화 실패: {str(e)}")
     
     def plot_model_comparison(self,
                             comparison_df: pd.DataFrame,
@@ -463,39 +498,47 @@ class EvaluationVisualizer:
                             save_path: Optional[str] = None):
         """모델 성능 비교 차트"""
         
-        if metrics is None:
-            metrics = ['combined_score', 'ap', 'auc', 'f1']
-        
-        # 사용 가능한 지표만 필터링
-        available_metrics = [m for m in metrics if m in comparison_df.columns]
-        
-        if not available_metrics:
-            logger.warning("시각화할 지표가 없습니다.")
+        if not self.matplotlib_available:
+            logger.warning("matplotlib을 사용할 수 없어 모델 비교 차트를 그릴 수 없습니다.")
             return
         
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        axes = axes.flatten()
-        
-        for i, metric in enumerate(available_metrics[:4]):
-            if i < len(axes):
-                ax = axes[i]
-                
-                comparison_df[metric].plot(kind='bar', ax=ax)
-                ax.set_title(f'{metric.upper()} Comparison')
-                ax.set_ylabel(metric)
-                ax.tick_params(axis='x', rotation=45)
-                ax.grid(True, alpha=0.3)
-        
-        # 빈 서브플롯 숨기기
-        for i in range(len(available_metrics), len(axes)):
-            axes[i].set_visible(False)
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        
-        plt.show()
+        try:
+            if metrics is None:
+                metrics = ['combined_score', 'ap', 'auc', 'f1']
+            
+            # 사용 가능한 지표만 필터링
+            available_metrics = [m for m in metrics if m in comparison_df.columns]
+            
+            if not available_metrics:
+                logger.warning("시각화할 지표가 없습니다.")
+                return
+            
+            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+            axes = axes.flatten()
+            
+            for i, metric in enumerate(available_metrics[:4]):
+                if i < len(axes):
+                    ax = axes[i]
+                    
+                    comparison_df[metric].plot(kind='bar', ax=ax)
+                    ax.set_title(f'{metric.upper()} Comparison')
+                    ax.set_ylabel(metric)
+                    ax.tick_params(axis='x', rotation=45)
+                    ax.grid(True, alpha=0.3)
+            
+            # 빈 서브플롯 숨기기
+            for i in range(len(available_metrics), len(axes)):
+                axes[i].set_visible(False)
+            
+            plt.tight_layout()
+            
+            if save_path:
+                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            
+            plt.show()
+            
+        except Exception as e:
+            logger.error(f"모델 비교 차트 시각화 실패: {str(e)}")
     
     def plot_prediction_distribution(self,
                                    y_true: np.ndarray,
@@ -504,33 +547,41 @@ class EvaluationVisualizer:
                                    save_path: Optional[str] = None):
         """예측 확률 분포 시각화"""
         
-        fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+        if not self.matplotlib_available:
+            logger.warning("matplotlib을 사용할 수 없어 예측 분포를 그릴 수 없습니다.")
+            return
         
-        # 클래스별 예측 확률 분포
-        axes[0].hist(y_pred_proba[y_true == 0], bins=50, alpha=0.7, label='Not Clicked', density=True)
-        axes[0].hist(y_pred_proba[y_true == 1], bins=50, alpha=0.7, label='Clicked', density=True)
-        axes[0].set_xlabel('Predicted Probability')
-        axes[0].set_ylabel('Density')
-        axes[0].set_title(f'{model_name} - Prediction Distribution by Class')
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
-        
-        # 전체 예측 확률 분포
-        axes[1].hist(y_pred_proba, bins=50, alpha=0.7, edgecolor='black')
-        axes[1].axvline(y_pred_proba.mean(), color='red', linestyle='--', label=f'Mean: {y_pred_proba.mean():.3f}')
-        axes[1].axvline(y_true.mean(), color='green', linestyle='--', label=f'Actual CTR: {y_true.mean():.3f}')
-        axes[1].set_xlabel('Predicted Probability')
-        axes[1].set_ylabel('Frequency')
-        axes[1].set_title(f'{model_name} - Overall Prediction Distribution')
-        axes[1].legend()
-        axes[1].grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        
-        plt.show()
+        try:
+            fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+            
+            # 클래스별 예측 확률 분포
+            axes[0].hist(y_pred_proba[y_true == 0], bins=50, alpha=0.7, label='Not Clicked', density=True)
+            axes[0].hist(y_pred_proba[y_true == 1], bins=50, alpha=0.7, label='Clicked', density=True)
+            axes[0].set_xlabel('Predicted Probability')
+            axes[0].set_ylabel('Density')
+            axes[0].set_title(f'{model_name} - Prediction Distribution by Class')
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
+            
+            # 전체 예측 확률 분포
+            axes[1].hist(y_pred_proba, bins=50, alpha=0.7, edgecolor='black')
+            axes[1].axvline(y_pred_proba.mean(), color='red', linestyle='--', label=f'Mean: {y_pred_proba.mean():.3f}')
+            axes[1].axvline(y_true.mean(), color='green', linestyle='--', label=f'Actual CTR: {y_true.mean():.3f}')
+            axes[1].set_xlabel('Predicted Probability')
+            axes[1].set_ylabel('Frequency')
+            axes[1].set_title(f'{model_name} - Overall Prediction Distribution')
+            axes[1].legend()
+            axes[1].grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            
+            if save_path:
+                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            
+            plt.show()
+            
+        except Exception as e:
+            logger.error(f"예측 분포 시각화 실패: {str(e)}")
 
 class EvaluationReporter:
     """평가 보고서 생성 클래스"""
@@ -565,7 +616,7 @@ class EvaluationReporter:
                 'best_score': best_score,
                 'data_size': len(y_true),
                 'actual_ctr': y_true.mean(),
-                'target_score': 0.34624  # 목표 점수
+                'target_score': 0.34624
             },
             'detailed_comparison': comparison_df.to_dict() if not comparison_df.empty else {},
             'model_rankings': comparator.rank_models().to_dict() if not comparison_df.empty else {},
@@ -573,7 +624,7 @@ class EvaluationReporter:
         }
         
         # 시각화 생성 (출력 디렉터리가 지정된 경우)
-        if output_dir:
+        if output_dir and MATPLOTLIB_AVAILABLE:
             import os
             os.makedirs(output_dir, exist_ok=True)
             
