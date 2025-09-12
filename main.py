@@ -14,6 +14,9 @@ import sys
 import signal
 
 # 필수 라이브러리 import 안전 처리
+PSUTIL_AVAILABLE = False
+TORCH_AVAILABLE = False
+
 try:
     import psutil
     PSUTIL_AVAILABLE = True
@@ -23,7 +26,19 @@ except ImportError:
 
 try:
     import torch
-    TORCH_AVAILABLE = True
+    if torch.cuda.is_available():
+        # GPU 테스트
+        try:
+            test_tensor = torch.tensor([1.0]).cuda()
+            test_tensor.cpu()
+            del test_tensor
+            torch.cuda.empty_cache()
+            TORCH_AVAILABLE = True
+        except Exception as e:
+            print(f"GPU 테스트 실패: {e}. CPU 모드만 사용")
+            TORCH_AVAILABLE = True
+    else:
+        TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
     print("PyTorch가 설치되지 않았습니다. GPU 기능이 비활성화됩니다.")
@@ -70,7 +85,7 @@ def get_available_memory() -> float:
         try:
             return psutil.virtual_memory().available / (1024**3)
         except:
-            return 32.0  # 기본값
+            return 32.0
     return 32.0
 
 def force_memory_cleanup():
@@ -94,7 +109,7 @@ def setup_logging():
     """로깅 설정"""
     try:
         logger = Config.setup_logging()
-        logger.info("=== 파이프라인 시작 ===")
+        logger.info("=== CTR 모델링 파이프라인 시작 ===")
         return logger
     except Exception as e:
         print(f"로깅 설정 실패: {e}")
@@ -120,6 +135,7 @@ def memory_monitor_decorator(func):
             available_after = get_available_memory()
             logger.info(f"{func.__name__} 완료 - 메모리: {memory_after:.2f} GB, 사용 가능: {available_after:.2f} GB")
             
+            # 메모리 부족 경고
             if available_after < 8:
                 logger.warning("메모리 부족 상황 - 정리 작업 수행")
                 force_memory_cleanup()
@@ -150,28 +166,29 @@ def load_and_preprocess_large_data(config: Config, quick_mode: bool = False) -> 
         logger.error(f"테스트 데이터 파일이 없습니다: {test_path}")
         raise FileNotFoundError(f"테스트 데이터 파일이 없습니다: {test_path}")
     
-    data_loader = DataLoader(config)
-    
     try:
+        data_loader = DataLoader(config)
+        
         available_memory = get_available_memory()
         logger.info(f"사용 가능 메모리: {available_memory:.2f} GB")
         
-        # 메모리 기반 동적 크기 결정
+        # 메모리 기반 동적 크기 결정 (더 보수적으로)
         if quick_mode:
             max_train_size = 100000
             max_test_size = 20000
             logger.info(f"빠른 모드: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
-        elif available_memory > 45:
-            max_train_size = 1000000  # 메모리 문제로 감소
+        elif available_memory > 40:
+            # 64GB 환경에서도 보수적으로
+            max_train_size = 1000000  # 1.5M에서 1M으로 감소
             max_test_size = 250000
             logger.info(f"대용량 모드: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
-        elif available_memory > 30:
-            max_train_size = 800000
-            max_test_size = 200000
+        elif available_memory > 25:
+            max_train_size = 600000  # 800k에서 600k로 감소
+            max_test_size = 150000
             logger.info(f"중간 모드: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
         else:
-            max_train_size = 500000
-            max_test_size = 100000
+            max_train_size = 300000
+            max_test_size = 80000
             logger.info(f"절약 모드: 학습 {max_train_size:,}, 테스트 {max_test_size:,}")
         
         # 대용량 데이터 로딩
@@ -185,15 +202,15 @@ def load_and_preprocess_large_data(config: Config, quick_mode: bool = False) -> 
                 logger.error(f"기본 로딩도 실패: {e2}")
                 raise
         
-        # 메모리 상태 확인
+        # 메모리 상태 확인 후 크기 조정
         current_memory = get_memory_usage()
         available_memory = get_available_memory()
         logger.info(f"데이터 로딩 후 - 사용: {current_memory:.2f} GB, 사용 가능: {available_memory:.2f} GB")
         
         # 메모리 부족 시 점진적 감소
-        if available_memory < 12:
+        if available_memory < 10:
             logger.warning("메모리 부족으로 데이터 크기 조정")
-            target_ratio = max(0.5, available_memory / 20)
+            target_ratio = max(0.4, available_memory / 25)  # 더 보수적으로
             
             new_train_size = int(len(train_df) * target_ratio)
             new_test_size = int(len(test_df) * target_ratio)
@@ -201,7 +218,7 @@ def load_and_preprocess_large_data(config: Config, quick_mode: bool = False) -> 
             logger.info(f"데이터 크기 조정: 학습 {len(train_df):,} → {new_train_size:,}")
             logger.info(f"데이터 크기 조정: 테스트 {len(test_df):,} → {new_test_size:,}")
             
-            if new_train_size > 0 and new_test_size > 0:
+            if new_train_size > 1000 and new_test_size > 100:  # 최소 크기 보장
                 train_df = train_df.sample(n=new_train_size, random_state=42).reset_index(drop=True)
                 test_df = test_df.sample(n=new_test_size, random_state=42).reset_index(drop=True)
             
@@ -263,8 +280,8 @@ def advanced_feature_engineering(train_df: pd.DataFrame,
         available_memory = get_available_memory()
         logger.info(f"피처 엔지니어링 시작 - 사용 가능 메모리: {available_memory:.2f} GB")
         
-        # 메모리 기반 모드 설정
-        memory_efficient_mode = available_memory < 20
+        # 메모리 기반 모드 설정 (더 엄격하게)
+        memory_efficient_mode = available_memory < 15  # 20에서 15로 낮춤
         
         feature_engineer = FeatureEngineer(config)
         feature_engineer.set_memory_efficient_mode(memory_efficient_mode)
@@ -344,11 +361,11 @@ def comprehensive_model_training(X_train: pd.DataFrame,
             except Exception as e:
                 logger.warning(f"GPU 정보 조회 실패: {e}")
         
-        # 메모리 기반 학습 전략
-        if available_memory < 15:
+        # 메모리 기반 학습 전략 (더 보수적으로)
+        if available_memory < 12:
             logger.info("메모리 절약 모드")
-            if len(X_train) > 500000:
-                sample_size = 400000
+            if len(X_train) > 400000:  # 500k에서 400k로 낮춤
+                sample_size = 350000
                 sample_indices = np.random.choice(len(X_train), sample_size, replace=False)
                 X_train = X_train.iloc[sample_indices].reset_index(drop=True)
                 y_train = y_train.iloc[sample_indices].reset_index(drop=True)
@@ -392,8 +409,8 @@ def comprehensive_model_training(X_train: pd.DataFrame,
         if 'catboost' in available_models:
             model_types.append('catboost')
         
-        # GPU 사용 가능시 DeepCTR 추가
-        if gpu_available and available_memory > 20 and 'deepctr' in available_models:
+        # GPU 사용 가능시 DeepCTR 추가 (메모리 여유가 있을 때만)
+        if gpu_available and available_memory > 15 and 'deepctr' in available_models:
             model_types.append('deepctr')
             logger.info("GPU 환경: DeepCTR 모델 추가")
         
@@ -416,9 +433,9 @@ def comprehensive_model_training(X_train: pd.DataFrame,
                 logger.info(f"{model_type} 모델 학습 시작")
                 
                 # 하이퍼파라미터 튜닝 (간소화)
-                if tune_hyperparameters and available_memory > 10:
+                if tune_hyperparameters and available_memory > 8:
                     try:
-                        n_trials = 20 if model_type == 'deepctr' else 30  # trial 수 감소
+                        n_trials = 15 if model_type == 'deepctr' else 20  # trial 수 감소
                         training_pipeline.trainer.hyperparameter_tuning_optuna(
                             model_type, X_train_split, y_train_split, n_trials=n_trials, cv_folds=3
                         )
@@ -470,6 +487,7 @@ def comprehensive_model_training(X_train: pd.DataFrame,
                 
             except Exception as e:
                 logger.error(f"{model_type} 모델 학습 실패: {str(e)}")
+                force_memory_cleanup()
                 continue
         
         # 모델 저장
@@ -538,14 +556,13 @@ def advanced_ensemble_pipeline(trainer: ModelTrainer,
         actual_ctr = y_val.mean()
         logger.info(f"실제 CTR: {actual_ctr:.4f}")
         
-        # 앙상블 타입별 생성
+        # 앙상블 타입별 생성 (메모리 보수적으로)
         ensemble_types = []
         
-        # 메모리 여유가 있을 때 더 많은 앙상블 생성
-        if available_memory > 15:
+        if available_memory > 12:
             ensemble_types = ['weighted', 'calibrated', 'rank']
             logger.info("전체 앙상블 모드")
-        elif available_memory > 10:
+        elif available_memory > 8:
             ensemble_types = ['weighted', 'calibrated']
             logger.info("제한 앙상블 모드")
         else:
@@ -701,7 +718,7 @@ def generate_optimized_predictions(trainer: ModelTrainer,
             logger.warning(f"제출 템플릿 로딩 실패: {e}. 기본 템플릿 생성")
             submission = pd.DataFrame({
                 'id': range(len(X_test)),
-                'clicked': 0.0191
+                'clicked': 0.0201
             })
         
         # 샘플링 모드 확인
@@ -818,12 +835,12 @@ def generate_optimized_predictions(trainer: ModelTrainer,
             predictions = np.full(len(X_test), 0.0201)
             prediction_method = "Default"
         
-        # 추가 CTR 보정 (실제 CTR에 더 가깝게)
+        # CTR 보정 (보수적으로)
         target_ctr = 0.0201
         current_ctr = predictions.mean()
         
-        if abs(current_ctr - target_ctr) > 0.005:
-            logger.info(f"추가 CTR 보정: {current_ctr:.4f} → {target_ctr:.4f}")
+        if abs(current_ctr - target_ctr) > 0.003:  # 0.005에서 0.003으로 엄격하게
+            logger.info(f"CTR 보정: {current_ctr:.4f} → {target_ctr:.4f}")
             
             # 선형 보정
             bias_correction = target_ctr - current_ctr
@@ -895,7 +912,7 @@ def setup_inference_system(config: Config) -> Optional[CTRPredictionAPI]:
     try:
         available_memory = get_available_memory()
         
-        if available_memory < 5:
+        if available_memory < 3:  # 5에서 3으로 낮춤
             logger.warning("메모리 부족으로 추론 시스템 설정 생략")
             return None
         
@@ -982,7 +999,7 @@ def execute_comprehensive_pipeline(args, config: Config, logger):
             logger.info("사용자 중단 요청")
             return {'trainer': trainer, 'submission': None}
         
-        # 4. Calibration 앙상블
+        # 4. Calibration 앙상블 (메모리 여유가 있을 때만)
         available_memory = get_available_memory()
         ensemble_manager = None
         
@@ -1000,11 +1017,11 @@ def execute_comprehensive_pipeline(args, config: Config, logger):
         # 6. 최적화된 예측 생성 (CTR 보정)
         submission = generate_optimized_predictions(trainer, ensemble_manager, X_test, config)
         
-        # 7. 추론 시스템 설정
+        # 7. 추론 시스템 설정 (메모리 여유가 있을 때만)
         available_memory = get_available_memory()
         prediction_api = None
         
-        if available_memory > 3 and not cleanup_required:
+        if available_memory > 2 and not cleanup_required:  # 3에서 2로 낮춤
             prediction_api = setup_inference_system(config)
         else:
             logger.warning("메모리 부족 또는 중단 요청으로 추론 시스템 설정 생략")

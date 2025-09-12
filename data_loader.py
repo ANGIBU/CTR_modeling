@@ -10,8 +10,22 @@ import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from sklearn.model_selection import train_test_split, StratifiedKFold, TimeSeriesSplit
-import psutil
-import pyarrow.parquet as pq
+
+# PyArrow import 안전 처리
+try:
+    import pyarrow.parquet as pq
+    PYARROW_AVAILABLE = True
+except ImportError:
+    PYARROW_AVAILABLE = False
+    logging.warning("PyArrow가 설치되지 않았습니다. 기본 pandas 로딩을 사용합니다.")
+
+# Psutil import 안전 처리
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    logging.warning("psutil이 설치되지 않았습니다. 메모리 모니터링 기능이 제한됩니다.")
 
 from config import Config
 
@@ -23,26 +37,49 @@ class MemoryMonitor:
     @staticmethod
     def get_memory_usage() -> float:
         """현재 프로세스 메모리 사용량 (GB)"""
-        process = psutil.Process()
-        return process.memory_info().rss / (1024**3)
+        if PSUTIL_AVAILABLE:
+            try:
+                process = psutil.Process()
+                return process.memory_info().rss / (1024**3)
+            except:
+                return 0.0
+        return 0.0
     
     @staticmethod
     def get_available_memory() -> float:
         """사용 가능한 메모리 (GB)"""
-        return psutil.virtual_memory().available / (1024**3)
+        if PSUTIL_AVAILABLE:
+            try:
+                return psutil.virtual_memory().available / (1024**3)
+            except:
+                return 32.0
+        return 32.0
     
     @staticmethod
     def get_memory_info() -> Dict[str, float]:
         """메모리 상태 정보"""
-        vm = psutil.virtual_memory()
-        process = psutil.Process()
+        if PSUTIL_AVAILABLE:
+            try:
+                vm = psutil.virtual_memory()
+                process = psutil.Process()
+                
+                return {
+                    'total_gb': vm.total / (1024**3),
+                    'available_gb': vm.available / (1024**3),
+                    'used_gb': vm.used / (1024**3),
+                    'process_gb': process.memory_info().rss / (1024**3),
+                    'usage_percent': vm.percent
+                }
+            except:
+                pass
         
+        # 기본값 반환
         return {
-            'total_gb': vm.total / (1024**3),
-            'available_gb': vm.available / (1024**3),
-            'used_gb': vm.used / (1024**3),
-            'process_gb': process.memory_info().rss / (1024**3),
-            'usage_percent': vm.percent
+            'total_gb': 64.0,
+            'available_gb': 32.0,
+            'used_gb': 32.0,
+            'process_gb': 0.0,
+            'usage_percent': 50.0
         }
 
 class ChunkedParquetReader:
@@ -56,8 +93,19 @@ class ChunkedParquetReader:
         self.current_position = 0
         
     def __enter__(self):
-        self.parquet_file = pq.ParquetFile(self.file_path)
-        self.total_rows = self.parquet_file.metadata.num_rows
+        if PYARROW_AVAILABLE:
+            try:
+                self.parquet_file = pq.ParquetFile(self.file_path)
+                self.total_rows = self.parquet_file.metadata.num_rows
+                return self
+            except Exception as e:
+                logger.warning(f"PyArrow로 파일 열기 실패: {e}. pandas 사용")
+        
+        # PyArrow 실패 시 pandas 사용
+        try:
+            self.total_rows = len(pd.read_parquet(self.file_path, engine='auto'))
+        except:
+            self.total_rows = 1000000  # 기본값
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -75,39 +123,49 @@ class ChunkedParquetReader:
         if start_row >= self.total_rows:
             return pd.DataFrame()
         
-        # 행 그룹 기반으로 읽기
-        row_groups = []
-        current_row = 0
-        
-        for i in range(self.parquet_file.num_row_groups):
-            rg_rows = self.parquet_file.metadata.row_group(i).num_rows
+        try:
+            if PYARROW_AVAILABLE and self.parquet_file:
+                # PyArrow 방식
+                row_groups = []
+                current_row = 0
+                
+                for i in range(self.parquet_file.num_row_groups):
+                    rg_rows = self.parquet_file.metadata.row_group(i).num_rows
+                    
+                    if current_row + rg_rows > start_row:
+                        if current_row < start_row + num_rows:
+                            row_groups.append(i)
+                    
+                    current_row += rg_rows
+                    
+                    if current_row >= start_row + num_rows:
+                        break
+                
+                if row_groups:
+                    table = self.parquet_file.read_row_groups(row_groups)
+                    df = table.to_pandas()
+                    
+                    # 정확한 범위로 슬라이싱
+                    relative_start = max(0, start_row - (current_row - len(df)))
+                    relative_end = min(len(df), relative_start + num_rows)
+                    
+                    if relative_start < len(df):
+                        df = df.iloc[relative_start:relative_end].copy()
+                    else:
+                        df = pd.DataFrame()
+                else:
+                    df = pd.DataFrame()
+            else:
+                # pandas 기본 방식
+                df = pd.read_parquet(self.file_path, engine='auto')
+                df = df.iloc[start_row:start_row + num_rows].copy()
             
-            if current_row + rg_rows > start_row:
-                if current_row < start_row + num_rows:
-                    row_groups.append(i)
+            self.current_position = start_row + len(df)
+            return df
             
-            current_row += rg_rows
-            
-            if current_row >= start_row + num_rows:
-                break
-        
-        if not row_groups:
+        except Exception as e:
+            logger.error(f"청크 읽기 실패: {e}")
             return pd.DataFrame()
-        
-        table = self.parquet_file.read_row_groups(row_groups)
-        df = table.to_pandas()
-        
-        # 정확한 범위로 슬라이싱
-        relative_start = max(0, start_row - current_row + len(df))
-        relative_end = min(len(df), relative_start + num_rows)
-        
-        if relative_start < len(df):
-            df = df.iloc[relative_start:relative_end].copy()
-        else:
-            df = pd.DataFrame()
-        
-        self.current_position = start_row + len(df)
-        return df
     
     def iter_chunks(self) -> Iterator[pd.DataFrame]:
         """청크 단위로 순회"""
@@ -123,11 +181,18 @@ class ChunkedParquetReader:
         """메모리 효율적인 샘플링"""
         if sample_size >= self.total_rows:
             # 전체 데이터 반환
-            return self.parquet_file.read().to_pandas()
+            try:
+                if PYARROW_AVAILABLE and self.parquet_file:
+                    return self.parquet_file.read().to_pandas()
+                else:
+                    return pd.read_parquet(self.file_path, engine='auto')
+            except Exception as e:
+                logger.error(f"전체 데이터 로딩 실패: {e}")
+                return pd.DataFrame()
         
         # 균등 샘플링
         np.random.seed(random_state)
-        step = self.total_rows // sample_size
+        step = max(1, self.total_rows // sample_size)
         
         sample_chunks = []
         current_pos = 0
@@ -161,24 +226,28 @@ class DataLoader:
         # 메모리 설정
         self.memory_config = config.get_memory_config()
         self.data_config = config.get_data_config()
-        
+    
     def load_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """기본 데이터 로딩"""
         try:
             logger.info("기본 데이터 로딩 시작")
             
-            self.train_data = pd.read_parquet(self.config.TRAIN_PATH)
+            # 엔진 자동 선택
+            engine = 'pyarrow' if PYARROW_AVAILABLE else 'auto'
+            
+            self.train_data = pd.read_parquet(self.config.TRAIN_PATH, engine=engine)
             logger.info(f"학습 데이터 형태: {self.train_data.shape}")
             
-            self.test_data = pd.read_parquet(self.config.TEST_PATH)
+            self.test_data = pd.read_parquet(self.config.TEST_PATH, engine=engine)
             logger.info(f"테스트 데이터 형태: {self.test_data.shape}")
             
             self.feature_columns = [col for col in self.train_data.columns 
                                   if col != self.target_column]
             logger.info(f"피처 컬럼 수: {len(self.feature_columns)}")
             
-            actual_ctr = self.train_data[self.target_column].mean()
-            logger.info(f"실제 CTR: {actual_ctr:.4f}")
+            if self.target_column in self.train_data.columns:
+                actual_ctr = self.train_data[self.target_column].mean()
+                logger.info(f"실제 CTR: {actual_ctr:.4f}")
             
             return self.train_data, self.test_data
             
@@ -194,21 +263,21 @@ class DataLoader:
         memory_info = self.memory_monitor.get_memory_info()
         logger.info(f"초기 메모리: 사용가능 {memory_info['available_gb']:.1f}GB / 전체 {memory_info['total_gb']:.1f}GB")
         
-        # 동적 크기 계산
+        # 동적 크기 계산 (더 보수적으로)
         available_memory = memory_info['available_gb']
         
-        if available_memory > 50:
-            # 64GB 환경 최적화
-            max_train_size = 1500000
-            max_test_size = 300000
-            logger.info("대용량 메모리 모드 활성화")
-        elif available_memory > 35:
-            max_train_size = 1000000
+        if available_memory > 40:
+            # 64GB 환경에서도 보수적으로
+            max_train_size = 1200000
             max_test_size = 250000
+            logger.info("대용량 메모리 모드 활성화")
+        elif available_memory > 25:
+            max_train_size = 800000
+            max_test_size = 200000
             logger.info("중간 메모리 모드 활성화")
         else:
-            max_train_size = 500000
-            max_test_size = 150000
+            max_train_size = 400000
+            max_test_size = 100000
             logger.info("제한 메모리 모드 활성화")
         
         try:
@@ -247,48 +316,78 @@ class DataLoader:
         """청킹 기반 학습 데이터 로딩"""
         logger.info("청킹 기반 학습 데이터 로딩 시작")
         
-        with ChunkedParquetReader(self.config.TRAIN_PATH, self.data_config['chunk_size']) as reader:
-            total_rows = reader.total_rows
-            logger.info(f"전체 학습 데이터: {total_rows:,}행")
-            
-            if max_size >= total_rows:
-                # 전체 데이터 로딩
-                logger.info("전체 학습 데이터 로딩")
-                df = reader.parquet_file.read().to_pandas()
-            else:
-                # 샘플링 로딩
-                usage_ratio = max_size / total_rows
-                logger.info(f"학습 데이터 샘플링: {usage_ratio*100:.2f}% ({max_size:,}/{total_rows:,})")
-                df = reader.get_sample(max_size)
-            
-            # 메모리 최적화
-            df = self._optimize_memory_usage(df)
-            
-            logger.info(f"학습 데이터 로딩 완료: {df.shape}")
-            return df
+        try:
+            with ChunkedParquetReader(self.config.TRAIN_PATH, self.data_config['chunk_size']) as reader:
+                total_rows = reader.total_rows
+                logger.info(f"전체 학습 데이터: {total_rows:,}행")
+                
+                if max_size >= total_rows:
+                    # 전체 데이터 로딩
+                    logger.info("전체 학습 데이터 로딩")
+                    engine = 'pyarrow' if PYARROW_AVAILABLE else 'auto'
+                    df = pd.read_parquet(self.config.TRAIN_PATH, engine=engine)
+                else:
+                    # 샘플링 로딩
+                    usage_ratio = max_size / total_rows
+                    logger.info(f"학습 데이터 샘플링: {usage_ratio*100:.2f}% ({max_size:,}/{total_rows:,})")
+                    df = reader.get_sample(max_size)
+                
+                # 메모리 최적화
+                df = self._optimize_memory_usage(df)
+                
+                logger.info(f"학습 데이터 로딩 완료: {df.shape}")
+                return df
+        except Exception as e:
+            logger.error(f"학습 데이터 청킹 로딩 실패: {e}")
+            # 대안: 기본 pandas 로딩
+            try:
+                logger.info("기본 pandas 로딩 시도")
+                engine = 'pyarrow' if PYARROW_AVAILABLE else 'auto'
+                df = pd.read_parquet(self.config.TRAIN_PATH, engine=engine)
+                if len(df) > max_size:
+                    df = df.sample(n=max_size, random_state=42).reset_index(drop=True)
+                return self._optimize_memory_usage(df)
+            except Exception as e2:
+                logger.error(f"기본 로딩도 실패: {e2}")
+                raise
     
     def _load_test_data_chunked(self, max_size: int) -> pd.DataFrame:
         """청킹 기반 테스트 데이터 로딩"""
         logger.info("청킹 기반 테스트 데이터 로딩 시작")
         
-        with ChunkedParquetReader(self.config.TEST_PATH, self.data_config['chunk_size']) as reader:
-            total_rows = reader.total_rows
-            logger.info(f"전체 테스트 데이터: {total_rows:,}행")
-            
-            if max_size >= total_rows:
-                # 전체 데이터 로딩
-                logger.info("전체 테스트 데이터 로딩")
-                df = reader.parquet_file.read().to_pandas()
-            else:
-                # 순차적 샘플링 (시간순 보장)
-                logger.info(f"테스트 데이터 순차 샘플링: {max_size:,}/{total_rows:,}")
-                df = reader.read_chunk(0, max_size)
-            
-            # 메모리 최적화
-            df = self._optimize_memory_usage(df)
-            
-            logger.info(f"테스트 데이터 로딩 완료: {df.shape}")
-            return df
+        try:
+            with ChunkedParquetReader(self.config.TEST_PATH, self.data_config['chunk_size']) as reader:
+                total_rows = reader.total_rows
+                logger.info(f"전체 테스트 데이터: {total_rows:,}행")
+                
+                if max_size >= total_rows:
+                    # 전체 데이터 로딩
+                    logger.info("전체 테스트 데이터 로딩")
+                    engine = 'pyarrow' if PYARROW_AVAILABLE else 'auto'
+                    df = pd.read_parquet(self.config.TEST_PATH, engine=engine)
+                else:
+                    # 순차적 샘플링 (시간순 보장)
+                    logger.info(f"테스트 데이터 순차 샘플링: {max_size:,}/{total_rows:,}")
+                    df = reader.read_chunk(0, max_size)
+                
+                # 메모리 최적화
+                df = self._optimize_memory_usage(df)
+                
+                logger.info(f"테스트 데이터 로딩 완료: {df.shape}")
+                return df
+        except Exception as e:
+            logger.error(f"테스트 데이터 청킹 로딩 실패: {e}")
+            # 대안: 기본 pandas 로딩
+            try:
+                logger.info("기본 pandas 로딩 시도")
+                engine = 'pyarrow' if PYARROW_AVAILABLE else 'auto'
+                df = pd.read_parquet(self.config.TEST_PATH, engine=engine)
+                if len(df) > max_size:
+                    df = df.head(max_size).copy()
+                return self._optimize_memory_usage(df)
+            except Exception as e2:
+                logger.error(f"기본 로딩도 실패: {e2}")
+                raise
     
     def _optimize_memory_usage(self, df: pd.DataFrame) -> pd.DataFrame:
         """메모리 사용량 최적화"""
@@ -300,36 +399,51 @@ class DataLoader:
             # 정수형 최적화
             int_cols = df.select_dtypes(include=['int64']).columns
             for col in int_cols:
-                col_min, col_max = df[col].min(), df[col].max()
-                
-                if col_min >= 0:
-                    if col_max < 255:
-                        df[col] = df[col].astype('uint8')
-                    elif col_max < 65535:
-                        df[col] = df[col].astype('uint16')
-                    elif col_max < 4294967295:
-                        df[col] = df[col].astype('uint32')
-                else:
-                    if col_min > -128 and col_max < 127:
-                        df[col] = df[col].astype('int8')
-                    elif col_min > -32768 and col_max < 32767:
-                        df[col] = df[col].astype('int16')
-                    elif col_min > -2147483648 and col_max < 2147483647:
-                        df[col] = df[col].astype('int32')
+                try:
+                    col_min, col_max = df[col].min(), df[col].max()
+                    
+                    if pd.isna(col_min) or pd.isna(col_max):
+                        continue
+                    
+                    if col_min >= 0:
+                        if col_max < 255:
+                            df[col] = df[col].astype('uint8')
+                        elif col_max < 65535:
+                            df[col] = df[col].astype('uint16')
+                        elif col_max < 4294967295:
+                            df[col] = df[col].astype('uint32')
+                    else:
+                        if col_min > -128 and col_max < 127:
+                            df[col] = df[col].astype('int8')
+                        elif col_min > -32768 and col_max < 32767:
+                            df[col] = df[col].astype('int16')
+                        elif col_min > -2147483648 and col_max < 2147483647:
+                            df[col] = df[col].astype('int32')
+                except Exception as e:
+                    logger.warning(f"{col} 정수형 최적화 실패: {e}")
+                    continue
             
             # 실수형 최적화
             float_cols = df.select_dtypes(include=['float64']).columns
             for col in float_cols:
-                df[col] = pd.to_numeric(df[col], downcast='float')
+                try:
+                    df[col] = pd.to_numeric(df[col], downcast='float')
+                except Exception as e:
+                    logger.warning(f"{col} 실수형 최적화 실패: {e}")
+                    continue
             
             # 범주형 최적화
             object_cols = df.select_dtypes(include=['object']).columns
             for col in object_cols:
-                num_unique = df[col].nunique()
-                total_count = len(df)
-                
-                if num_unique < total_count * 0.5:
-                    df[col] = df[col].astype('category')
+                try:
+                    num_unique = df[col].nunique()
+                    total_count = len(df)
+                    
+                    if num_unique < total_count * 0.5:
+                        df[col] = df[col].astype('category')
+                except Exception as e:
+                    logger.warning(f"{col} 범주형 최적화 실패: {e}")
+                    continue
             
             optimized_memory = df.memory_usage(deep=True).sum() / (1024**2)
             reduction = (original_memory - optimized_memory) / original_memory * 100
@@ -342,7 +456,7 @@ class DataLoader:
         return df
     
     def basic_preprocessing(self, df: pd.DataFrame) -> pd.DataFrame:
-        """강화된 기본 전처리 수행"""
+        """기본 전처리 수행"""
         logger.info("기본 전처리 시작")
         
         df_processed = df.copy()
@@ -365,84 +479,89 @@ class DataLoader:
             # 타입별 결측치 처리
             for col in df_processed.columns:
                 if df_processed[col].isnull().sum() > 0:
-                    col_dtype = str(df_processed[col].dtype)
-                    
-                    # 수치형 변수 처리
-                    if col_dtype in ['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64']:
-                        # 정수형은 0으로 대치
-                        df_processed[col].fillna(0, inplace=True)
-                    elif col_dtype in ['float16', 'float32', 'float64']:
-                        # 실수형은 중앙값으로 대치 (0이 아닌 값들의 중앙값)
-                        non_zero_median = df_processed[df_processed[col] != 0][col].median()
-                        if pd.isna(non_zero_median):
-                            fill_value = 0.0
+                    try:
+                        col_dtype = str(df_processed[col].dtype)
+                        
+                        # 수치형 변수 처리
+                        if col_dtype in ['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64']:
+                            # 정수형은 0으로 대치
+                            df_processed[col].fillna(0, inplace=True)
+                        elif col_dtype in ['float16', 'float32', 'float64']:
+                            # 실수형은 중앙값으로 대치
+                            non_zero_median = df_processed[df_processed[col] != 0][col].median()
+                            if pd.isna(non_zero_median):
+                                fill_value = 0.0
+                            else:
+                                fill_value = non_zero_median
+                            df_processed[col].fillna(fill_value, inplace=True)
+                        # 범주형 변수 처리
+                        elif col_dtype in ['object', 'category', 'string', 'bool']:
+                            # 범주형은 최빈값으로 대치
+                            if len(df_processed[col].mode()) > 0:
+                                mode_val = df_processed[col].mode()[0]
+                            else:
+                                mode_val = 'unknown'
+                            df_processed[col].fillna(mode_val, inplace=True)
                         else:
-                            fill_value = non_zero_median
-                        df_processed[col].fillna(fill_value, inplace=True)
-                    # 범주형 변수 처리
-                    elif col_dtype in ['object', 'category', 'string', 'bool']:
-                        # 범주형은 최빈값으로 대치, 없으면 'unknown'
-                        if len(df_processed[col].mode()) > 0:
-                            mode_val = df_processed[col].mode()[0]
-                        else:
-                            mode_val = 'unknown'
-                        df_processed[col].fillna(mode_val, inplace=True)
-                    else:
-                        # 기타 타입은 0으로 대치
+                            # 기타 타입은 0으로 대치
+                            df_processed[col].fillna(0, inplace=True)
+                    except Exception as e:
+                        logger.warning(f"{col} 결측치 처리 실패: {e}")
                         df_processed[col].fillna(0, inplace=True)
         
-        # 특별한 값 처리
         # 무한값 처리
         numeric_cols = df_processed.select_dtypes(include=[np.number]).columns
         for col in numeric_cols:
-            inf_count = np.isinf(df_processed[col]).sum()
-            if inf_count > 0:
-                logger.warning(f"{col}: 무한값 {inf_count:,}개 발견, 대체 처리")
-                
-                # 유한한 값들의 통계치로 대체
-                finite_values = df_processed[col][np.isfinite(df_processed[col])]
-                if len(finite_values) > 0:
-                    if finite_values.std() == 0:
-                        replacement = finite_values.mean()
+            try:
+                inf_count = np.isinf(df_processed[col]).sum()
+                if inf_count > 0:
+                    logger.warning(f"{col}: 무한값 {inf_count:,}개 발견, 대체 처리")
+                    
+                    # 유한한 값들의 통계치로 대체
+                    finite_values = df_processed[col][np.isfinite(df_processed[col])]
+                    if len(finite_values) > 0:
+                        if finite_values.std() == 0:
+                            replacement = finite_values.mean()
+                        else:
+                            # 99.5퍼센타일과 0.5퍼센타일로 클리핑
+                            upper_bound = finite_values.quantile(0.995)
+                            lower_bound = finite_values.quantile(0.005)
+                            
+                            df_processed.loc[df_processed[col] == np.inf, col] = upper_bound
+                            df_processed.loc[df_processed[col] == -np.inf, col] = lower_bound
                     else:
-                        # 99.5퍼센타일과 0.5퍼센타일로 클리핑
-                        upper_bound = finite_values.quantile(0.995)
-                        lower_bound = finite_values.quantile(0.005)
-                        
-                        df_processed.loc[df_processed[col] == np.inf, col] = upper_bound
-                        df_processed.loc[df_processed[col] == -np.inf, col] = lower_bound
-                else:
-                    df_processed[col].replace([np.inf, -np.inf], 0, inplace=True)
+                        df_processed[col].replace([np.inf, -np.inf], 0, inplace=True)
+            except Exception as e:
+                logger.warning(f"{col} 무한값 처리 실패: {e}")
+                df_processed[col].replace([np.inf, -np.inf], 0, inplace=True)
         
         # 이상치 탐지 및 처리 (수치형 변수에만 적용)
         outlier_cols_processed = 0
-        max_outlier_cols = 20  # 처리할 최대 컬럼 수
+        max_outlier_cols = 20
         
         for col in numeric_cols[:max_outlier_cols]:
             try:
                 if df_processed[col].var() == 0:
-                    continue  # 분산이 0인 상수 컬럼은 스킵
+                    continue
                 
                 q1 = df_processed[col].quantile(0.25)
                 q3 = df_processed[col].quantile(0.75)
                 iqr = q3 - q1
                 
-                if iqr > 0:  # IQR이 0보다 클 때만 처리
-                    lower_bound = q1 - 3 * iqr  # 3 IQR로 완화
+                if iqr > 0:
+                    lower_bound = q1 - 3 * iqr
                     upper_bound = q3 + 3 * iqr
                     
                     outliers_mask = (df_processed[col] < lower_bound) | (df_processed[col] > upper_bound)
                     outlier_count = outliers_mask.sum()
                     
-                    if outlier_count > 0 and outlier_count < len(df_processed) * 0.1:  # 전체의 10% 미만일 때만
+                    if outlier_count > 0 and outlier_count < len(df_processed) * 0.1:
                         # 클리핑 방식으로 이상치 대체
                         df_processed.loc[df_processed[col] < lower_bound, col] = lower_bound
                         df_processed.loc[df_processed[col] > upper_bound, col] = upper_bound
                         
                         outlier_cols_processed += 1
-                        if outlier_cols_processed % 5 == 0:
-                            logger.debug(f"이상치 처리 진행: {outlier_cols_processed}개 컬럼 완료")
-                
+            
             except Exception as e:
                 logger.debug(f"{col} 이상치 처리 실패: {str(e)}")
                 continue
@@ -460,7 +579,7 @@ class DataLoader:
                                 target_func, n_jobs: int = None) -> pd.DataFrame:
         """병렬 데이터 처리"""
         if n_jobs is None:
-            n_jobs = min(6, os.cpu_count())  # 6코어 CPU 최대 활용
+            n_jobs = min(4, os.cpu_count())  # 보수적으로 4개로 제한
         
         logger.info(f"병렬 데이터 처리 시작 ({n_jobs}개 스레드)")
         
@@ -470,18 +589,22 @@ class DataLoader:
         
         processed_chunks = []
         
-        with ThreadPoolExecutor(max_workers=n_jobs) as executor:
-            future_to_chunk = {executor.submit(target_func, chunk): i for i, chunk in enumerate(chunks)}
-            
-            for future in as_completed(future_to_chunk):
-                chunk_idx = future_to_chunk[future]
-                try:
-                    result = future.result()
-                    processed_chunks.append((chunk_idx, result))
-                except Exception as e:
-                    logger.error(f"청크 {chunk_idx} 처리 실패: {str(e)}")
-                    # 원본 청크 사용
-                    processed_chunks.append((chunk_idx, chunks[chunk_idx]))
+        try:
+            with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+                future_to_chunk = {executor.submit(target_func, chunk): i for i, chunk in enumerate(chunks)}
+                
+                for future in as_completed(future_to_chunk):
+                    chunk_idx = future_to_chunk[future]
+                    try:
+                        result = future.result()
+                        processed_chunks.append((chunk_idx, result))
+                    except Exception as e:
+                        logger.error(f"청크 {chunk_idx} 처리 실패: {str(e)}")
+                        # 원본 청크 사용
+                        processed_chunks.append((chunk_idx, chunks[chunk_idx]))
+        except Exception as e:
+            logger.error(f"병렬 처리 실패: {e}")
+            return df
         
         # 순서대로 정렬 후 결합
         processed_chunks.sort(key=lambda x: x[0])
@@ -562,7 +685,7 @@ class DataLoader:
             # 메모리 효율적 분할
             memory_before = self.memory_monitor.get_memory_usage()
             
-            # 인덱스 기반 분할 (복사 최소화)
+            # 인덱스 기반 분할
             train_indices = np.arange(split_idx)
             val_indices = np.arange(split_idx, len(X_train))
             
@@ -639,8 +762,9 @@ class DataLoader:
             test_path = self.config.DATA_DIR / f"test_{suffix}.parquet"
             
             # 메모리 효율적 저장
-            train_df.to_parquet(train_path, index=False, compression='snappy')
-            test_df.to_parquet(test_path, index=False, compression='snappy')
+            engine = 'pyarrow' if PYARROW_AVAILABLE else 'auto'
+            train_df.to_parquet(train_path, index=False, compression='snappy', engine=engine)
+            test_df.to_parquet(test_path, index=False, compression='snappy', engine=engine)
             
             logger.info(f"전처리 데이터 저장 완료: {train_path}, {test_path}")
             
@@ -659,11 +783,11 @@ class DataLoader:
         # 사용 가능 메모리 기반 전략 결정
         available_gb = initial_memory['available_gb']
         
-        if available_gb > 45:
+        if available_gb > 35:
             # 대용량 메모리 모드
             logger.info("대용량 메모리 전략 사용")
             return self.load_large_data_optimized()
-        elif available_gb > 25:
+        elif available_gb > 20:
             # 중간 메모리 모드  
             logger.info("중간 메모리 전략 사용")
             return self._load_medium_data()
@@ -674,15 +798,29 @@ class DataLoader:
     
     def _load_medium_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """중간 크기 데이터 로딩"""
-        max_train_size = 800000
-        max_test_size = 200000
+        max_train_size = 600000
+        max_test_size = 150000
         
-        with ChunkedParquetReader(self.config.TRAIN_PATH, 300000) as train_reader:
-            train_df = train_reader.get_sample(max_train_size)
+        try:
+            with ChunkedParquetReader(self.config.TRAIN_PATH, 200000) as train_reader:
+                train_df = train_reader.get_sample(max_train_size)
+                train_df = self._optimize_memory_usage(train_df)
+        except Exception as e:
+            logger.error(f"중간 크기 학습 데이터 로딩 실패: {e}")
+            engine = 'pyarrow' if PYARROW_AVAILABLE else 'auto'
+            train_df = pd.read_parquet(self.config.TRAIN_PATH, engine=engine)
+            train_df = train_df.sample(n=max_train_size, random_state=42).reset_index(drop=True)
             train_df = self._optimize_memory_usage(train_df)
         
-        with ChunkedParquetReader(self.config.TEST_PATH, 150000) as test_reader:
-            test_df = test_reader.read_chunk(0, max_test_size)
+        try:
+            with ChunkedParquetReader(self.config.TEST_PATH, 100000) as test_reader:
+                test_df = test_reader.read_chunk(0, max_test_size)
+                test_df = self._optimize_memory_usage(test_df)
+        except Exception as e:
+            logger.error(f"중간 크기 테스트 데이터 로딩 실패: {e}")
+            engine = 'pyarrow' if PYARROW_AVAILABLE else 'auto'
+            test_df = pd.read_parquet(self.config.TEST_PATH, engine=engine)
+            test_df = test_df.head(max_test_size).copy()
             test_df = self._optimize_memory_usage(test_df)
         
         logger.info(f"중간 데이터 로딩 완료 - 학습: {train_df.shape}, 테스트: {test_df.shape}")
@@ -690,15 +828,29 @@ class DataLoader:
     
     def _load_small_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """소규모 데이터 로딩"""
-        max_train_size = 400000
-        max_test_size = 100000
+        max_train_size = 300000
+        max_test_size = 80000
         
-        with ChunkedParquetReader(self.config.TRAIN_PATH, 200000) as train_reader:
-            train_df = train_reader.get_sample(max_train_size)
+        try:
+            with ChunkedParquetReader(self.config.TRAIN_PATH, 150000) as train_reader:
+                train_df = train_reader.get_sample(max_train_size)
+                train_df = self._optimize_memory_usage(train_df)
+        except Exception as e:
+            logger.error(f"소규모 학습 데이터 로딩 실패: {e}")
+            engine = 'pyarrow' if PYARROW_AVAILABLE else 'auto'
+            train_df = pd.read_parquet(self.config.TRAIN_PATH, engine=engine)
+            train_df = train_df.sample(n=max_train_size, random_state=42).reset_index(drop=True)
             train_df = self._optimize_memory_usage(train_df)
         
-        with ChunkedParquetReader(self.config.TEST_PATH, 100000) as test_reader:
-            test_df = test_reader.read_chunk(0, max_test_size)
+        try:
+            with ChunkedParquetReader(self.config.TEST_PATH, 80000) as test_reader:
+                test_df = test_reader.read_chunk(0, max_test_size)
+                test_df = self._optimize_memory_usage(test_df)
+        except Exception as e:
+            logger.error(f"소규모 테스트 데이터 로딩 실패: {e}")
+            engine = 'pyarrow' if PYARROW_AVAILABLE else 'auto'
+            test_df = pd.read_parquet(self.config.TEST_PATH, engine=engine)
+            test_df = test_df.head(max_test_size).copy()
             test_df = self._optimize_memory_usage(test_df)
         
         logger.info(f"소규모 데이터 로딩 완료 - 학습: {train_df.shape}, 테스트: {test_df.shape}")
@@ -745,7 +897,7 @@ class DataValidator:
         range_issues = []
         numeric_cols = [col for col in common_cols if train_df[col].dtype in ['int64', 'float64', 'int32', 'float32']]
         
-        for col in numeric_cols[:10]:  # 처음 10개만 검증
+        for col in numeric_cols[:10]:
             try:
                 train_min, train_max = train_df[col].min(), train_df[col].max()
                 test_min, test_max = test_df[col].min(), test_df[col].max()
