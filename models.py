@@ -495,7 +495,7 @@ class CatBoostModel(BaseModel):
         if not CATBOOST_AVAILABLE:
             raise ImportError("CatBoost가 설치되지 않았습니다.")
         
-        # CTR 특화 기본 파라미터
+        # CTR 특화 기본 파라미터 (충돌 방지)
         default_params = {
             'loss_function': 'Logloss',
             'eval_metric': 'Logloss',
@@ -505,7 +505,6 @@ class CatBoostModel(BaseModel):
             'l2_leaf_reg': 10,
             'iterations': 3000,
             'random_seed': Config.RANDOM_STATE,
-            'early_stopping_rounds': 200,
             'verbose': False,
             'auto_class_weights': 'Balanced',
             'max_ctr_complexity': 2,
@@ -513,7 +512,7 @@ class CatBoostModel(BaseModel):
             'bootstrap_type': 'Bayesian',
             'bagging_temperature': 1.0,
             'od_type': 'IncToDec',
-            'od_wait': 200,
+            'od_wait': 200,  # early_stopping_rounds 대신 od_wait 사용
             'leaf_estimation_iterations': 10,
             'leaf_estimation_method': 'Newton',
             'grow_policy': 'Lossguide',
@@ -561,13 +560,24 @@ class CatBoostModel(BaseModel):
                 raise
     
     def _validate_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """CatBoost 파라미터 검증"""
+        """CatBoost 파라미터 검증 (충돌 방지)"""
         safe_params = params.copy()
         
         if 'loss_function' not in safe_params:
             safe_params['loss_function'] = 'Logloss'
         if 'verbose' not in safe_params:
             safe_params['verbose'] = False
+        
+        # early_stopping_rounds와 od_wait 충돌 방지
+        if 'early_stopping_rounds' in safe_params and 'od_wait' in safe_params:
+            logger.warning("CatBoost: early_stopping_rounds와 od_wait 동시 설정 방지. od_wait 사용")
+            safe_params.pop('early_stopping_rounds', None)
+        
+        # early_stopping_rounds만 있는 경우 od_wait로 변경
+        if 'early_stopping_rounds' in safe_params and 'od_wait' not in safe_params:
+            early_stop_value = safe_params.pop('early_stopping_rounds')
+            safe_params['od_wait'] = early_stop_value
+            safe_params['od_type'] = 'IncToDec'
         
         safe_params['depth'] = min(safe_params.get('depth', 6), 10)
         safe_params['thread_count'] = min(safe_params.get('thread_count', 4), 6)
@@ -613,6 +623,16 @@ class CatBoostModel(BaseModel):
             
             try:
                 logger.info("단순화된 CatBoost 학습 시도")
+                simplified_params = {
+                    'loss_function': 'Logloss',
+                    'task_type': 'CPU',
+                    'depth': 6,
+                    'learning_rate': 0.1,
+                    'iterations': 1000,
+                    'verbose': False,
+                    'random_seed': self.params.get('random_seed', 42)
+                }
+                self.model = CatBoostClassifier(**simplified_params)
                 self.model.fit(X_train, y_train, verbose=False)
                 self.is_fitted = True
                 logger.info("단순화된 CatBoost 학습 완료")

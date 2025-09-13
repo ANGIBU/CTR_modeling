@@ -131,7 +131,7 @@ class Config:
         'single_precision_histogram': False
     }
     
-    # CatBoost CTR 파라미터 (성능 최적화)
+    # CatBoost CTR 파라미터 (충돌 해결)
     CAT_PARAMS = {
         'loss_function': 'Logloss',
         'eval_metric': 'Logloss',
@@ -142,7 +142,6 @@ class Config:
         'l2_leaf_reg': 15,  # 증가
         'iterations': 4000,  # 증가
         'random_seed': RANDOM_STATE,
-        'early_stopping_rounds': 200,  # 증가
         'verbose': False,
         'auto_class_weights': 'Balanced',
         'max_ctr_complexity': 3,  # 증가
@@ -150,7 +149,7 @@ class Config:
         'bootstrap_type': 'Bayesian',
         'bagging_temperature': 1.2,  # 증가
         'od_type': 'IncToDec',
-        'od_wait': 200,  # 증가
+        'od_wait': 200,  # early_stopping_rounds 대신 od_wait 사용
         'leaf_estimation_iterations': 15,  # 증가
         'leaf_estimation_method': 'Newton',
         'grow_policy': 'Lossguide',
