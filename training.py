@@ -594,7 +594,7 @@ class CTRModelTrainer:
                         'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 50, 200),
                         'iterations': 1000,
                         'random_seed': self.config.RANDOM_STATE,
-                        'od_wait': 100,  # early_stopping_rounds 대신 od_wait만 사용
+                        'od_wait': 100,
                         'od_type': 'IncToDec',
                         'verbose': False,
                         'auto_class_weights': 'Balanced',
@@ -823,7 +823,7 @@ class CTRModelTrainer:
                 'l2_leaf_reg': 10,
                 'iterations': 3000,
                 'random_seed': self.config.RANDOM_STATE,
-                'od_wait': 200,  # early_stopping_rounds 대신 od_wait 사용
+                'od_wait': 200,
                 'od_type': 'IncToDec',
                 'verbose': False,
                 'auto_class_weights': 'Balanced',

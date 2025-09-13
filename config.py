@@ -66,33 +66,33 @@ class Config:
         'objective': 'binary',
         'metric': 'binary_logloss',
         'boosting_type': 'gbdt',
-        'num_leaves': 511,  # 증가
-        'learning_rate': 0.02,  # 감소하여 정밀도 향상
+        'num_leaves': 511,
+        'learning_rate': 0.02,
         'feature_fraction': 0.75,
         'bagging_fraction': 0.65,
         'bagging_freq': 5,
-        'min_child_samples': 250,  # 증가
-        'min_child_weight': 20,  # 증가
-        'lambda_l1': 2.5,  # 증가
-        'lambda_l2': 2.5,  # 증가
+        'min_child_samples': 250,
+        'min_child_weight': 20,
+        'lambda_l1': 2.5,
+        'lambda_l2': 2.5,
         'verbose': -1,
         'random_state': RANDOM_STATE,
-        'n_estimators': 4000,  # 증가
-        'early_stopping_rounds': 200,  # 증가
+        'n_estimators': 4000,
+        'early_stopping_rounds': 200,
         'scale_pos_weight': 49.0,
         'force_row_wise': True,
         'max_bin': 255,
         'num_threads': NUM_WORKERS,
         'device_type': 'cpu',
-        'min_data_in_leaf': 120,  # 증가
-        'max_depth': 15,  # 증가
+        'min_data_in_leaf': 120,
+        'max_depth': 15,
         'feature_fraction_bynode': 0.75,
         'extra_trees': True,
-        'path_smooth': 1.5,  # 증가
+        'path_smooth': 1.5,
         'grow_policy': 'lossguide',
         'max_leaves': 511,
-        'min_gain_to_split': 0.02,  # 추가
-        'min_sum_hessian_in_leaf': 15.0,  # 추가
+        'min_gain_to_split': 0.02,
+        'min_sum_hessian_in_leaf': 15.0,
         'feature_pre_filter': False,
         'linear_tree': False,
         'cat_smooth': 10.0,
@@ -105,25 +105,25 @@ class Config:
         'eval_metric': 'logloss',
         'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
         'gpu_id': 0 if GPU_AVAILABLE else None,
-        'max_depth': 12,  # 증가
-        'learning_rate': 0.02,  # 감소
+        'max_depth': 12,
+        'learning_rate': 0.02,
         'subsample': 0.75,
         'colsample_bytree': 0.75,
         'colsample_bylevel': 0.75,
         'colsample_bynode': 0.75,
-        'min_child_weight': 20,  # 증가
-        'reg_alpha': 2.5,  # 증가
-        'reg_lambda': 2.5,  # 증가
+        'min_child_weight': 20,
+        'reg_alpha': 2.5,
+        'reg_lambda': 2.5,
         'scale_pos_weight': 49.0,
         'random_state': RANDOM_STATE,
-        'n_estimators': 4000,  # 증가
-        'early_stopping_rounds': 200,  # 증가
+        'n_estimators': 4000,
+        'early_stopping_rounds': 200,
         'max_bin': 255,
         'nthread': NUM_WORKERS,
         'grow_policy': 'lossguide',
         'max_leaves': 511,
-        'gamma': 0.15,  # 증가
-        'max_delta_step': 1,  # 추가
+        'gamma': 0.15,
+        'max_delta_step': 1,
         'monotone_constraints': None,
         'interaction_constraints': None,
         'validate_parameters': True,
@@ -137,27 +137,27 @@ class Config:
         'eval_metric': 'Logloss',
         'task_type': 'GPU' if GPU_AVAILABLE else 'CPU',
         'devices': '0' if GPU_AVAILABLE else None,
-        'depth': 10,  # 증가
-        'learning_rate': 0.02,  # 감소
-        'l2_leaf_reg': 15,  # 증가
-        'iterations': 4000,  # 증가
+        'depth': 10,
+        'learning_rate': 0.02,
+        'l2_leaf_reg': 15,
+        'iterations': 4000,
         'random_seed': RANDOM_STATE,
         'verbose': False,
         'auto_class_weights': 'Balanced',
-        'max_ctr_complexity': 3,  # 증가
+        'max_ctr_complexity': 3,
         'thread_count': NUM_WORKERS,
         'bootstrap_type': 'Bayesian',
-        'bagging_temperature': 1.2,  # 증가
+        'bagging_temperature': 1.2,
         'od_type': 'IncToDec',
-        'od_wait': 200,  # early_stopping_rounds 대신 od_wait만 사용
-        'leaf_estimation_iterations': 15,  # 증가
+        'od_wait': 200,
+        'leaf_estimation_iterations': 15,
         'leaf_estimation_method': 'Newton',
         'grow_policy': 'Lossguide',
         'max_leaves': 511,
-        'min_data_in_leaf': 120,  # 증가
-        'rsm': 0.75,  # 추가
-        'sampling_frequency': 'PerTreeLevel',  # 추가
-        'leaf_estimation_backtracking': 'AnyImprovement',  # 추가
+        'min_data_in_leaf': 120,
+        'rsm': 0.75,
+        'sampling_frequency': 'PerTreeLevel',
+        'leaf_estimation_backtracking': 'AnyImprovement',
         'has_time': False,
         'allow_const_label': False,
         'score_function': 'Cosine'
@@ -165,25 +165,25 @@ class Config:
     
     # 딥러닝 모델 파라미터 (GPU 최적화)
     NN_PARAMS = {
-        'hidden_dims': [1024, 512, 256, 128, 64],  # 확장
+        'hidden_dims': [1024, 512, 256, 128, 64],
         'dropout_rate': 0.35,
         'batch_size': BATCH_SIZE_GPU if GPU_AVAILABLE else BATCH_SIZE_CPU,
         'learning_rate': 0.0008,
-        'weight_decay': 2e-5,  # 증가
-        'epochs': 100,  # 증가
-        'patience': 20,  # 증가
+        'weight_decay': 2e-5,
+        'epochs': 100,
+        'patience': 20,
         'use_batch_norm': True,
-        'activation': 'gelu',  # 변경
+        'activation': 'gelu',
         'use_residual': True,
-        'use_attention': True,  # 활성화
-        'attention_heads': 8,  # 추가
+        'use_attention': True,
+        'attention_heads': 8,
         'focal_loss_alpha': 0.25,
-        'focal_loss_gamma': 2.5,  # 증가
-        'label_smoothing': 0.1,  # 추가
-        'gradient_clip_val': 1.0,  # 추가
-        'scheduler_type': 'cosine',  # 추가
-        'warmup_epochs': 10,  # 추가
-        'min_lr': 1e-6  # 추가
+        'focal_loss_gamma': 2.5,
+        'label_smoothing': 0.1,
+        'gradient_clip_val': 1.0,
+        'scheduler_type': 'cosine',
+        'warmup_epochs': 10,
+        'min_lr': 1e-6
     }
     
     # Calibration 설정 (강화)
@@ -192,41 +192,41 @@ class Config:
         'platt_scaling': True,
         'isotonic_regression': True,
         'temperature_scaling': True,
-        'cv_folds': 5,  # 증가
-        'calibration_sample_size': 100000,  # 증가
-        'bias_correction': True,  # 추가
-        'distribution_matching': True,  # 추가
-        'quantile_calibration': True,  # 추가
-        'ensemble_calibration': True,  # 추가
-        'calibration_methods': ['platt', 'isotonic', 'temperature', 'beta'],  # 확장
-        'cross_validation_calibration': True,  # 추가
-        'calibration_regularization': 0.01  # 추가
+        'cv_folds': 5,
+        'calibration_sample_size': 100000,
+        'bias_correction': True,
+        'distribution_matching': True,
+        'quantile_calibration': True,
+        'ensemble_calibration': True,
+        'calibration_methods': ['platt', 'isotonic', 'temperature', 'beta'],
+        'cross_validation_calibration': True,
+        'calibration_regularization': 0.01
     }
     
     # 피처 엔지니어링 설정 (강화)
     FEATURE_CONFIG = {
-        'target_encoding_smoothing': 300,  # 증가
-        'frequency_threshold': 150,  # 증가
+        'target_encoding_smoothing': 300,
+        'frequency_threshold': 150,
         'interaction_features': True,
         'time_features': True,
         'statistical_features': True,
         'preserve_ids': True,
         'id_hash_features': True,
-        'polynomial_features': True,  # 활성화
+        'polynomial_features': True,
         'max_polynomial_degree': 2,
-        'binning_features': True,  # 추가
-        'quantile_features': True,  # 추가
-        'rank_features': True,  # 추가
-        'group_statistics': True,  # 추가
-        'lag_features': True,  # 추가
-        'rolling_features': True,  # 추가
-        'fourier_features': False,  # 추가
-        'pca_features': False,  # 추가
-        'clustering_features': True,  # 추가
-        'text_features': False,  # 추가
-        'max_features': 2000,  # 추가
-        'feature_selection_method': 'mutual_info',  # 추가
-        'feature_selection_k': 1500  # 추가
+        'binning_features': True,
+        'quantile_features': True,
+        'rank_features': True,
+        'group_statistics': True,
+        'lag_features': True,
+        'rolling_features': True,
+        'fourier_features': False,
+        'pca_features': False,
+        'clustering_features': True,
+        'text_features': False,
+        'max_features': 2000,
+        'feature_selection_method': 'mutual_info',
+        'feature_selection_k': 1500
     }
     
     # 평가 설정 (정밀화)
@@ -236,43 +236,43 @@ class Config:
         'actual_ctr': 0.0201,
         'pos_weight': 0.0201,
         'neg_weight': 0.9799,
-        'target_score': 0.36000,  # 목표 상향 조정
-        'bootstrap_samples': 1000,  # 추가
-        'confidence_interval': 0.95,  # 추가
-        'stability_threshold': 0.02,  # 추가
-        'performance_metrics': ['ap', 'wll', 'auc', 'f1', 'precision', 'recall'],  # 확장
-        'ctr_tolerance': 0.001,  # 추가
-        'bias_penalty_weight': 2.0,  # 추가
-        'calibration_weight': 0.3  # 추가
+        'target_score': 0.36000,
+        'bootstrap_samples': 1000,
+        'confidence_interval': 0.95,
+        'stability_threshold': 0.02,
+        'performance_metrics': ['ap', 'wll', 'auc', 'f1', 'precision', 'recall'],
+        'ctr_tolerance': 0.001,
+        'bias_penalty_weight': 2.0,
+        'calibration_weight': 0.3
     }
     
     # 앙상블 설정 (대폭 강화)
     ENSEMBLE_CONFIG = {
-        'use_optimal_ensemble': True,  # 추가
-        'use_stabilized_ensemble': True,  # 추가
-        'use_meta_learning': True,  # 추가
+        'use_optimal_ensemble': True,
+        'use_stabilized_ensemble': True,
+        'use_meta_learning': True,
         'use_stacking': True,
         'meta_model': 'ridge',
         'calibration_ensemble': True,
-        'optimization_method': 'combined',  # 추가
-        'diversification_method': 'rank_weighted',  # 추가
-        'meta_model_type': 'ridge',  # 추가
-        'use_meta_features': True,  # 추가
-        'ensemble_types': ['optimal', 'stabilized', 'meta', 'calibrated', 'weighted'],  # 확장
+        'optimization_method': 'combined',
+        'diversification_method': 'rank_weighted',
+        'meta_model_type': 'ridge',
+        'use_meta_features': True,
+        'ensemble_types': ['optimal', 'stabilized', 'meta', 'calibrated', 'weighted'],
         'blend_weights': {
             'lgbm': 0.30,
             'xgb': 0.25,
             'cat': 0.25,
             'deepctr': 0.20
         },
-        'ensemble_optimization_trials': 200,  # 추가
-        'ensemble_cv_folds': 5,  # 추가
-        'ensemble_early_stopping': 50,  # 추가
-        'ensemble_regularization': 0.01,  # 추가
-        'dynamic_weighting': True,  # 추가
-        'adaptive_blending': True,  # 추가
-        'temporal_ensemble': True,  # 추가
-        'multi_level_ensemble': True  # 추가
+        'ensemble_optimization_trials': 200,
+        'ensemble_cv_folds': 5,
+        'ensemble_early_stopping': 50,
+        'ensemble_regularization': 0.01,
+        'dynamic_weighting': True,
+        'adaptive_blending': True,
+        'temporal_ensemble': True,
+        'multi_level_ensemble': True
     }
     
     # 로깅 설정
@@ -281,51 +281,51 @@ class Config:
         'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         'file_handler': True,
         'console_handler': True,
-        'detailed_logging': True,  # 추가
-        'performance_logging': True,  # 추가
-        'memory_logging': True,  # 추가
-        'model_logging': True  # 추가
+        'detailed_logging': True,
+        'performance_logging': True,
+        'memory_logging': True,
+        'model_logging': True
     }
     
     # 실시간 추론 설정 (최적화)
     INFERENCE_CONFIG = {
-        'batch_size': 20000,  # 증가
-        'timeout': 600,  # 증가
-        'cache_size': 100000,  # 증가
-        'model_version': 'v3.0',  # 버전 업
+        'batch_size': 20000,
+        'timeout': 600,
+        'cache_size': 100000,
+        'model_version': 'v3.0',
         'use_gpu': GPU_AVAILABLE,
-        'parallel_inference': True,  # 추가
-        'inference_optimization': True,  # 추가
-        'model_compilation': True,  # 추가
-        'quantization': False,  # 추가
-        'tensorrt_optimization': False,  # 추가
-        'onnx_optimization': False,  # 추가
-        'async_inference': True,  # 추가
-        'memory_pool': True,  # 추가
-        'connection_pool_size': 100  # 추가
+        'parallel_inference': True,
+        'inference_optimization': True,
+        'model_compilation': True,
+        'quantization': False,
+        'tensorrt_optimization': False,
+        'onnx_optimization': False,
+        'async_inference': True,
+        'memory_pool': True,
+        'connection_pool_size': 100
     }
     
     # 하이퍼파라미터 튜닝 설정 (강화)
     TUNING_CONFIG = {
-        'n_trials': 50,  # 증가
-        'timeout': 7200,  # 증가
+        'n_trials': 50,
+        'timeout': 7200,
         'parallel_jobs': 1,
         'pruner': 'MedianPruner',
         'sampler': 'TPESampler',
-        'optimization_direction': 'maximize',  # 추가
-        'study_storage': None,  # 추가
-        'load_if_exists': True,  # 추가
-        'enable_pruning': True,  # 추가
-        'n_startup_trials': 10,  # 추가
-        'n_warmup_steps': 5,  # 추가
-        'interval_steps': 1,  # 추가
-        'percentile': 50.0,  # 추가
-        'min_resource': 1,  # 추가
-        'max_resource': 81,  # 추가
-        'reduction_factor': 3,  # 추가
-        'bootstrap_count': 100,  # 추가
-        'multi_objective': False,  # 추가
-        'custom_sampler_params': {  # 추가
+        'optimization_direction': 'maximize',
+        'study_storage': None,
+        'load_if_exists': True,
+        'enable_pruning': True,
+        'n_startup_trials': 10,
+        'n_warmup_steps': 5,
+        'interval_steps': 1,
+        'percentile': 50.0,
+        'min_resource': 1,
+        'max_resource': 81,
+        'reduction_factor': 3,
+        'bootstrap_count': 100,
+        'multi_objective': False,
+        'custom_sampler_params': {
             'consider_prior': True,
             'prior_weight': 1.0,
             'consider_magic_clip': True,
@@ -340,26 +340,26 @@ class Config:
     # 메모리 관리 설정 (정밀화)
     MEMORY_CONFIG = {
         'auto_gc': True,
-        'gc_threshold': 0.8,  # 메모리 사용률 80% 시 정리
-        'force_gc_interval': 1000,  # 1000 배치마다 강제 정리
+        'gc_threshold': 0.8,
+        'force_gc_interval': 1000,
         'memory_monitoring': True,
-        'memory_limit_warning': 0.9,  # 90% 사용시 경고
-        'memory_limit_error': 0.95,  # 95% 사용시 오류
-        'chunk_memory_limit': 5.0,  # 청크당 5GB 제한
-        'batch_memory_limit': 2.0,  # 배치당 2GB 제한
-        'model_memory_limit': 8.0,  # 모델당 8GB 제한
-        'ensemble_memory_limit': 12.0,  # 앙상블당 12GB 제한
-        'swap_usage_limit': 0.1,  # 스왑 10% 제한
-        'memory_profiling': True,  # 메모리 프로파일링
-        'memory_optimization': True,  # 메모리 최적화
-        'lazy_loading': True,  # 지연 로딩
-        'memory_mapping': True,  # 메모리 매핑
-        'compressed_storage': False  # 압축 저장
+        'memory_limit_warning': 0.9,
+        'memory_limit_error': 0.95,
+        'chunk_memory_limit': 5.0,
+        'batch_memory_limit': 2.0,
+        'model_memory_limit': 8.0,
+        'ensemble_memory_limit': 12.0,
+        'swap_usage_limit': 0.1,
+        'memory_profiling': True,
+        'memory_optimization': True,
+        'lazy_loading': True,
+        'memory_mapping': True,
+        'compressed_storage': False
     }
     
     # GPU 설정 (RTX 4060 Ti 최적화)
     GPU_CONFIG = {
-        'gpu_memory_fraction': 0.85,  # GPU 메모리 85% 사용
+        'gpu_memory_fraction': 0.85,
         'allow_growth': True,
         'mixed_precision': USE_MIXED_PRECISION,
         'tensor_core_optimization': True,
@@ -391,7 +391,7 @@ class Config:
         'shared_memory': True,
         'parallel_backend': 'threading',
         'parallel_feature_engineering': True,
-        'parallel_model_training': False,  # 메모리 절약
+        'parallel_model_training': False,
         'parallel_inference': True,
         'parallel_evaluation': True,
         'thread_local_storage': True,
@@ -559,7 +559,7 @@ class Config:
             # 우선순위 설정
             if cls.PARALLEL_CONFIG['priority_scheduling']:
                 try:
-                    os.nice(-5)  # 높은 우선순위
+                    os.nice(-5)
                 except:
                     pass
             
