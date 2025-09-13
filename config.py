@@ -23,9 +23,9 @@ class Config:
     OUTPUT_DIR = BASE_DIR / "output"
     
     # 데이터 파일 경로
-    TRAIN_PATH = "./train.parquet"
-    TEST_PATH = "./test.parquet"
-    SUBMISSION_PATH = "./sample_submission.csv"
+    TRAIN_PATH = "/data/train.parquet"
+    TEST_PATH = "/data/test.parquet" 
+    SUBMISSION_PATH = "/data/sample_submission.csv"
     
     # GPU 및 하드웨어 설정 (RTX 4060 Ti 16GB 최적화)
     if TORCH_AVAILABLE:
