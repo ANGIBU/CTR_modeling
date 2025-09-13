@@ -149,7 +149,7 @@ class Config:
         'bootstrap_type': 'Bayesian',
         'bagging_temperature': 1.2,  # 증가
         'od_type': 'IncToDec',
-        'od_wait': 200,  # early_stopping_rounds 대신 od_wait 사용
+        'od_wait': 200,  # early_stopping_rounds 대신 od_wait만 사용
         'leaf_estimation_iterations': 15,  # 증가
         'leaf_estimation_method': 'Newton',
         'grow_policy': 'Lossguide',

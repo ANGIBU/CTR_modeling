@@ -256,6 +256,14 @@ class CTRModelTrainer:
                     fixed_params['task_type'] = 'CPU'
                     fixed_params.pop('devices', None)
                 
+                # CatBoost 특화: early_stopping_rounds와 od_wait 충돌 해결
+                if 'early_stopping_rounds' in fixed_params:
+                    early_stop_val = fixed_params.pop('early_stopping_rounds')
+                    if 'od_wait' not in fixed_params:
+                        fixed_params['od_wait'] = early_stop_val
+                        fixed_params['od_type'] = 'IncToDec'
+                    logger.info("CatBoost: early_stopping_rounds를 od_wait로 변경")
+                
                 # CTR 특화 파라미터 조정
                 fixed_params['depth'] = min(fixed_params.get('depth', 8), 10)
                 fixed_params['thread_count'] = min(fixed_params.get('thread_count', 6), 6)
@@ -586,7 +594,8 @@ class CTRModelTrainer:
                         'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 50, 200),
                         'iterations': 1000,
                         'random_seed': self.config.RANDOM_STATE,
-                        'early_stopping_rounds': 100,
+                        'od_wait': 100,  # early_stopping_rounds 대신 od_wait 사용
+                        'od_type': 'IncToDec',
                         'verbose': False,
                         'auto_class_weights': 'Balanced',
                         'thread_count': 6,
@@ -814,14 +823,14 @@ class CTRModelTrainer:
                 'l2_leaf_reg': 10,
                 'iterations': 3000,
                 'random_seed': self.config.RANDOM_STATE,
-                'od_wait': 200,
+                'od_wait': 200,  # early_stopping_rounds 대신 od_wait 사용
+                'od_type': 'IncToDec',
                 'verbose': False,
                 'auto_class_weights': 'Balanced',
                 'max_ctr_complexity': 2,
                 'thread_count': 6,
                 'bootstrap_type': 'Bayesian',
                 'bagging_temperature': 1.0,
-                'od_type': 'IncToDec',
                 'leaf_estimation_iterations': 10,
                 'leaf_estimation_method': 'Newton',
                 'grow_policy': 'Lossguide',
@@ -952,7 +961,7 @@ class CTRModelTrainer:
             except Exception as e:
                 logger.error(f"CTR Calibrator 로딩 실패: {str(e)}")
         
-        self.trained_models = {name: {'model': model} for name, model in loaded_models.items()}
+        self.trained_models = {name: {'model': model, 'training_time': 0.0} for name, model in loaded_models.items()}
         
         return loaded_models
     
