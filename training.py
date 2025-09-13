@@ -961,7 +961,15 @@ class CTRModelTrainer:
             except Exception as e:
                 logger.error(f"CTR Calibrator 로딩 실패: {str(e)}")
         
-        self.trained_models = {name: {'model': model, 'training_time': 0.0} for name, model in loaded_models.items()}
+        self.trained_models = {
+            name: {
+                'model': model, 
+                'training_time': 0.0,
+                'params': {},
+                'calibrated': False,
+                'memory_used': 0.0
+            } for name, model in loaded_models.items()
+        }
         
         return loaded_models
     

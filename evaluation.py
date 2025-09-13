@@ -653,69 +653,76 @@ class ModelComparator:
     def _calculate_stability_metrics(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> Dict[str, float]:
         """모델 안정성 지표 계산"""
         try:
-            # 배열 길이 맞추기 및 타입 통일
-            if hasattr(y_true, 'values'):
-                y_true_array = y_true.values
-            else:
-                y_true_array = np.array(y_true)
-            
-            if hasattr(y_pred_proba, 'values'):
-                y_pred_array = y_pred_proba.values
-            else:
-                y_pred_array = np.array(y_pred_proba)
+            # 배열 타입 변환 및 길이 확인
+            y_true_array = np.asarray(y_true).flatten()
+            y_pred_array = np.asarray(y_pred_proba).flatten()
             
             # 배열 길이 통일
             min_len = min(len(y_true_array), len(y_pred_array))
+            if min_len == 0:
+                logger.warning("빈 배열로 인해 안정성 지표 계산 불가")
+                return self._get_default_stability_metrics()
+            
             y_true_array = y_true_array[:min_len]
             y_pred_array = y_pred_array[:min_len]
             
-            # 부트스트래핑 기반 안정성
-            n_bootstrap = 50  # 메모리 절약을 위해 횟수 줄임
+            # 부트스트래핑 기반 안정성 계산
+            n_bootstrap = 30  # 메모리 및 성능 최적화
             scores = []
             
-            for _ in range(n_bootstrap):
-                # 부트스트래핑 샘플링 (인덱스 기반)
-                indices = np.random.choice(min_len, size=min(min_len, 50000), replace=True)
-                boot_y_true = y_true_array[indices]
-                boot_y_pred = y_pred_array[indices]
-                
-                score = self.metrics_calculator.combined_score(boot_y_true, boot_y_pred)
-                if score > 0:  # 유효한 점수만 포함
-                    scores.append(score)
+            sample_size = min(min_len, 10000)  # 샘플 크기 제한
             
-            if scores:
+            for i in range(n_bootstrap):
+                try:
+                    # 부트스트래핑 샘플링
+                    indices = np.random.choice(min_len, size=sample_size, replace=True)
+                    boot_y_true = y_true_array[indices]
+                    boot_y_pred = y_pred_array[indices]
+                    
+                    # 유효성 검사
+                    if len(np.unique(boot_y_true)) < 2:
+                        continue
+                    
+                    score = self.metrics_calculator.combined_score(boot_y_true, boot_y_pred)
+                    if score > 0 and not np.isnan(score) and not np.isinf(score):
+                        scores.append(score)
+                        
+                except Exception as e:
+                    logger.debug(f"부트스트래핑 {i+1} 실패: {e}")
+                    continue
+            
+            # 결과 계산
+            if len(scores) >= 3:  # 최소한의 유효한 점수 필요
                 scores = np.array(scores)
                 
                 stability_metrics = {
-                    'stability_mean': scores.mean(),
-                    'stability_std': scores.std(),
-                    'stability_cv': scores.std() / scores.mean() if scores.mean() > 0 else float('inf'),
-                    'stability_ci_lower': np.percentile(scores, 2.5),
-                    'stability_ci_upper': np.percentile(scores, 97.5),
-                    'stability_range': np.percentile(scores, 97.5) - np.percentile(scores, 2.5)
+                    'stability_mean': float(scores.mean()),
+                    'stability_std': float(scores.std()),
+                    'stability_cv': float(scores.std() / scores.mean()) if scores.mean() > 0 else float('inf'),
+                    'stability_ci_lower': float(np.percentile(scores, 2.5)),
+                    'stability_ci_upper': float(np.percentile(scores, 97.5)),
+                    'stability_range': float(np.percentile(scores, 97.5) - np.percentile(scores, 2.5))
                 }
             else:
-                stability_metrics = {
-                    'stability_mean': 0.0,
-                    'stability_std': 0.0,
-                    'stability_cv': float('inf'),
-                    'stability_ci_lower': 0.0,
-                    'stability_ci_upper': 0.0,
-                    'stability_range': 0.0
-                }
+                logger.warning("유효한 부트스트래핑 점수가 부족합니다")
+                stability_metrics = self._get_default_stability_metrics()
             
             return stability_metrics
             
         except Exception as e:
             logger.warning(f"안정성 지표 계산 실패: {e}")
-            return {
-                'stability_mean': 0.0,
-                'stability_std': 0.0,
-                'stability_cv': float('inf'),
-                'stability_ci_lower': 0.0,
-                'stability_ci_upper': 0.0,
-                'stability_range': 0.0
-            }
+            return self._get_default_stability_metrics()
+    
+    def _get_default_stability_metrics(self) -> Dict[str, float]:
+        """기본 안정성 지표 반환"""
+        return {
+            'stability_mean': 0.0,
+            'stability_std': 0.0,
+            'stability_cv': float('inf'),
+            'stability_ci_lower': 0.0,
+            'stability_ci_upper': 0.0,
+            'stability_range': 0.0
+        }
     
     def rank_models(self, 
                    ranking_metric: str = 'ctr_optimized_score') -> pd.DataFrame:
@@ -776,13 +783,23 @@ class ModelComparator:
                         corr = 1.0
                     else:
                         try:
-                            corr = np.corrcoef(models_predictions[name1], models_predictions[name2])[0, 1]
-                            if np.isnan(corr):
+                            pred1 = np.asarray(models_predictions[name1]).flatten()
+                            pred2 = np.asarray(models_predictions[name2]).flatten()
+                            
+                            # 배열 길이 통일
+                            min_len = min(len(pred1), len(pred2))
+                            if min_len > 0:
+                                pred1 = pred1[:min_len]
+                                pred2 = pred2[:min_len]
+                                corr = np.corrcoef(pred1, pred2)[0, 1]
+                                if np.isnan(corr):
+                                    corr = 0.0
+                            else:
                                 corr = 0.0
                         except:
                             corr = 0.0
                     
-                    correlation_matrix[name1][name2] = corr
+                    correlation_matrix[name1][name2] = float(corr)
                     
                     if i < j:  # 중복 제거
                         correlations.append(abs(corr))
@@ -793,11 +810,11 @@ class ModelComparator:
             
             # 추가 다양성 지표
             diversity_metrics = {
-                'diversity_score': diversity_score,
-                'average_correlation': avg_correlation,
-                'max_correlation': max(correlations) if correlations else 0.0,
-                'min_correlation': min(correlations) if correlations else 0.0,
-                'correlation_std': np.std(correlations) if correlations else 0.0,
+                'diversity_score': float(diversity_score),
+                'average_correlation': float(avg_correlation),
+                'max_correlation': float(max(correlations)) if correlations else 0.0,
+                'min_correlation': float(min(correlations)) if correlations else 0.0,
+                'correlation_std': float(np.std(correlations)) if correlations else 0.0,
                 'correlation_matrix': correlation_matrix
             }
             
@@ -810,81 +827,95 @@ class ModelComparator:
     def analyze_model_stability(self, 
                               models_predictions: Dict[str, np.ndarray],
                               y_true: np.ndarray,
-                              n_bootstrap: int = 50) -> Dict[str, Dict[str, float]]:
+                              n_bootstrap: int = 30) -> Dict[str, Dict[str, float]]:
         """모델 안정성 분석 (부트스트래핑)"""
         
         stability_results = {}
         
         for model_name, y_pred_proba in models_predictions.items():
             try:
-                # 배열 길이 맞추기 및 타입 통일
-                if hasattr(y_true, 'values'):
-                    y_true_array = y_true.values
-                else:
-                    y_true_array = np.array(y_true)
-                
-                if hasattr(y_pred_proba, 'values'):
-                    y_pred_array = y_pred_proba.values
-                else:
-                    y_pred_array = np.array(y_pred_proba)
+                # 배열 타입 변환 및 길이 확인
+                y_true_array = np.asarray(y_true).flatten()
+                y_pred_array = np.asarray(y_pred_proba).flatten()
                 
                 # 배열 길이 통일
                 min_len = min(len(y_true_array), len(y_pred_array))
+                if min_len == 0:
+                    logger.warning(f"{model_name}: 빈 배열로 인해 안정성 분석 불가")
+                    stability_results[model_name] = self._get_default_model_stability()
+                    continue
+                
                 y_true_array = y_true_array[:min_len]
                 y_pred_array = y_pred_array[:min_len]
                 
                 scores = []
                 ctr_biases = []
                 
-                for _ in range(n_bootstrap):
-                    # 부트스트래핑 샘플링 (메모리 절약을 위해 크기 제한)
-                    sample_size = min(min_len, 50000)
-                    indices = np.random.choice(min_len, size=sample_size, replace=True)
-                    y_true_bootstrap = y_true_array[indices]
-                    y_pred_bootstrap = y_pred_array[indices]
-                    
-                    # 점수 및 CTR 편향 계산
-                    score = self.metrics_calculator.ctr_optimized_score(y_true_bootstrap, y_pred_bootstrap)
-                    ctr_bias = abs(y_pred_bootstrap.mean() - y_true_bootstrap.mean())
-                    
-                    if score > 0:  # 유효한 점수만 포함
-                        scores.append(score)
-                        ctr_biases.append(ctr_bias)
+                sample_size = min(min_len, 10000)  # 메모리 절약
                 
-                if scores:
+                for i in range(n_bootstrap):
+                    try:
+                        # 부트스트래핑 샘플링
+                        indices = np.random.choice(min_len, size=sample_size, replace=True)
+                        y_true_bootstrap = y_true_array[indices]
+                        y_pred_bootstrap = y_pred_array[indices]
+                        
+                        # 유효성 검사
+                        if len(np.unique(y_true_bootstrap)) < 2:
+                            continue
+                        
+                        # 점수 및 CTR 편향 계산
+                        score = self.metrics_calculator.ctr_optimized_score(y_true_bootstrap, y_pred_bootstrap)
+                        ctr_bias = abs(y_pred_bootstrap.mean() - y_true_bootstrap.mean())
+                        
+                        if score > 0 and not np.isnan(score) and not np.isinf(score):
+                            scores.append(score)
+                            ctr_biases.append(ctr_bias)
+                            
+                    except Exception as e:
+                        logger.debug(f"{model_name} 부트스트래핑 {i+1} 실패: {e}")
+                        continue
+                
+                if len(scores) >= 3:
                     scores = np.array(scores)
                     ctr_biases = np.array(ctr_biases)
                     
                     stability_results[model_name] = {
-                        'mean_score': scores.mean(),
-                        'std_score': scores.std(),
-                        'cv_score': scores.std() / scores.mean() if scores.mean() > 0 else float('inf'),
-                        'ci_lower': np.percentile(scores, 2.5),
-                        'ci_upper': np.percentile(scores, 97.5),
-                        'score_range': np.percentile(scores, 97.5) - np.percentile(scores, 2.5),
-                        'mean_ctr_bias': ctr_biases.mean(),
-                        'std_ctr_bias': ctr_biases.std(),
-                        'max_ctr_bias': ctr_biases.max(),
-                        'stability_ratio': 1.0 / (1.0 + scores.std()) if scores.std() > 0 else 1.0
+                        'mean_score': float(scores.mean()),
+                        'std_score': float(scores.std()),
+                        'cv_score': float(scores.std() / scores.mean()) if scores.mean() > 0 else float('inf'),
+                        'ci_lower': float(np.percentile(scores, 2.5)),
+                        'ci_upper': float(np.percentile(scores, 97.5)),
+                        'score_range': float(np.percentile(scores, 97.5) - np.percentile(scores, 2.5)),
+                        'mean_ctr_bias': float(ctr_biases.mean()),
+                        'std_ctr_bias': float(ctr_biases.std()),
+                        'max_ctr_bias': float(ctr_biases.max()),
+                        'stability_ratio': float(1.0 / (1.0 + scores.std())) if scores.std() > 0 else 1.0
                     }
                 else:
-                    stability_results[model_name] = {
-                        'mean_score': 0.0, 'std_score': 0.0, 'cv_score': float('inf'),
-                        'ci_lower': 0.0, 'ci_upper': 0.0, 'score_range': 0.0,
-                        'mean_ctr_bias': 0.0, 'std_ctr_bias': 0.0, 'max_ctr_bias': 0.0,
-                        'stability_ratio': 0.0
-                    }
+                    logger.warning(f"{model_name}: 유효한 부트스트래핑 점수가 부족")
+                    stability_results[model_name] = self._get_default_model_stability()
                 
             except Exception as e:
                 logger.error(f"{model_name} 안정성 분석 실패: {str(e)}")
-                stability_results[model_name] = {
-                    'mean_score': 0.0, 'std_score': 0.0, 'cv_score': float('inf'),
-                    'ci_lower': 0.0, 'ci_upper': 0.0, 'score_range': 0.0,
-                    'mean_ctr_bias': 0.0, 'std_ctr_bias': 0.0, 'max_ctr_bias': 0.0,
-                    'stability_ratio': 0.0
-                }
+                stability_results[model_name] = self._get_default_model_stability()
         
         return stability_results
+    
+    def _get_default_model_stability(self) -> Dict[str, float]:
+        """기본 모델 안정성 지표 반환"""
+        return {
+            'mean_score': 0.0, 
+            'std_score': 0.0, 
+            'cv_score': float('inf'),
+            'ci_lower': 0.0, 
+            'ci_upper': 0.0, 
+            'score_range': 0.0,
+            'mean_ctr_bias': 0.0, 
+            'std_ctr_bias': 0.0, 
+            'max_ctr_bias': 0.0,
+            'stability_ratio': 0.0
+        }
 
 class EvaluationVisualizer:
     """평가 결과 시각화 클래스"""
@@ -1118,7 +1149,7 @@ class EvaluationReporter:
         best_model, best_score = comparator.get_best_model('ctr_optimized_score')
         
         # 안정성 분석
-        stability_results = comparator.analyze_model_stability(models_predictions, y_true, n_bootstrap=50)
+        stability_results = comparator.analyze_model_stability(models_predictions, y_true, n_bootstrap=30)
         
         # 다양성 분석
         diversity_results = comparator.analyze_model_diversity(models_predictions)
