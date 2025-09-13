@@ -427,7 +427,7 @@ def comprehensive_model_training(X_train: pd.DataFrame,
                 if tune_hyperparameters and available_memory > 15:
                     try:
                         n_trials = 20 if model_type == 'deepctr' else 30
-                        training_pipeline.trainer.hyperparameter_tuning_optuna(
+                        training_pipeline.trainer.hyperparameter_tuning_ctr_optuna(
                             model_type, X_train_split, y_train_split, n_trials=n_trials, cv_folds=3
                         )
                     except Exception as e:
@@ -435,7 +435,7 @@ def comprehensive_model_training(X_train: pd.DataFrame,
                 
                 # 교차검증 평가
                 try:
-                    cv_result = training_pipeline.trainer.cross_validate_model(
+                    cv_result = training_pipeline.trainer.cross_validate_ctr_model(
                         model_type, X_train_split, y_train_split, cv_folds=3
                     )
                     
