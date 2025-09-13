@@ -814,7 +814,7 @@ class CTRModelTrainer:
                 'l2_leaf_reg': 10,
                 'iterations': 3000,
                 'random_seed': self.config.RANDOM_STATE,
-                'early_stopping_rounds': 200,
+                'od_wait': 200,
                 'verbose': False,
                 'auto_class_weights': 'Balanced',
                 'max_ctr_complexity': 2,
@@ -822,7 +822,6 @@ class CTRModelTrainer:
                 'bootstrap_type': 'Bayesian',
                 'bagging_temperature': 1.0,
                 'od_type': 'IncToDec',
-                'od_wait': 200,
                 'leaf_estimation_iterations': 10,
                 'leaf_estimation_method': 'Newton',
                 'grow_policy': 'Lossguide',
@@ -893,8 +892,8 @@ class CTRModelTrainer:
                 
                 metadata = {
                     'model_type': model_name,
-                    'training_time': model_info['training_time'],
-                    'params': model_info['params'],
+                    'training_time': model_info.get('training_time', 0.0),
+                    'params': model_info.get('params', {}),
                     'calibrated': model_info.get('calibrated', False),
                     'memory_used': model_info.get('memory_used', 0.0),
                     'device': str(self.device),
