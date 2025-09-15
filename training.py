@@ -176,12 +176,14 @@ class CTRModelTrainer:
             logger.info(f"{model_type} CTR 모델 학습 완료 (소요시간: {training_time:.2f}초)")
             logger.info(f"메모리 사용량: {memory_before:.2f}GB → {memory_after:.2f}GB")
             
+            # 수정된 trained_models 구조 - 일관된 키 사용
             self.trained_models[model_type] = {
                 'model': model,
-                'training_time': training_time,
                 'params': params or {},
+                'training_time': training_time,
                 'calibrated': apply_calibration,
-                'memory_used': memory_after - memory_before
+                'memory_used': memory_after - memory_before,
+                'cv_result': None  # 교차검증에서 추가됨
             }
             
             self._cleanup_memory_after_training(model_type)
@@ -199,6 +201,7 @@ class CTRModelTrainer:
         
         try:
             if model_type.lower() == 'lightgbm':
+                # LightGBM 파라미터 충돌 방지
                 if 'is_unbalance' in fixed_params and 'scale_pos_weight' in fixed_params:
                     fixed_params.pop('is_unbalance', None)
                     logger.info("LightGBM: is_unbalance 제거하여 충돌 방지")
@@ -207,12 +210,14 @@ class CTRModelTrainer:
                 fixed_params.setdefault('metric', 'binary_logloss')
                 fixed_params.setdefault('verbose', -1)
                 
+                # 안전한 범위로 제한
                 fixed_params['num_leaves'] = min(fixed_params.get('num_leaves', 255), 511)
                 fixed_params['max_bin'] = min(fixed_params.get('max_bin', 255), 255)
                 fixed_params['num_threads'] = min(fixed_params.get('num_threads', 6), 6)
                 fixed_params['force_row_wise'] = True
                 fixed_params['scale_pos_weight'] = fixed_params.get('scale_pos_weight', 49.0)
                 
+                # CTR 특화 정규화
                 fixed_params['lambda_l1'] = max(fixed_params.get('lambda_l1', 2.0), 1.0)
                 fixed_params['lambda_l2'] = max(fixed_params.get('lambda_l2', 2.0), 1.0)
                 fixed_params['min_child_samples'] = max(fixed_params.get('min_child_samples', 200), 100)
@@ -228,11 +233,13 @@ class CTRModelTrainer:
                     fixed_params['tree_method'] = 'hist'
                     fixed_params.pop('gpu_id', None)
                 
+                # 안전한 범위로 제한
                 fixed_params['max_depth'] = min(fixed_params.get('max_depth', 8), 12)
                 fixed_params['max_bin'] = min(fixed_params.get('max_bin', 255), 255)
                 fixed_params['nthread'] = min(fixed_params.get('nthread', 6), 6)
                 fixed_params['scale_pos_weight'] = fixed_params.get('scale_pos_weight', 49.0)
                 
+                # CTR 특화 정규화
                 fixed_params['reg_alpha'] = max(fixed_params.get('reg_alpha', 2.0), 1.0)
                 fixed_params['reg_lambda'] = max(fixed_params.get('reg_lambda', 2.0), 1.0)
                 fixed_params['min_child_weight'] = max(fixed_params.get('min_child_weight', 15), 10)
@@ -251,20 +258,28 @@ class CTRModelTrainer:
                     fixed_params['task_type'] = 'CPU'
                     fixed_params.pop('devices', None)
                 
-                if 'early_stopping_rounds' in fixed_params:
-                    early_stop_val = fixed_params.pop('early_stopping_rounds')
-                    if 'od_wait' not in fixed_params:
-                        fixed_params['od_wait'] = early_stop_val
-                        fixed_params['od_type'] = 'IncToDec'
-                    logger.info("CatBoost: early_stopping_rounds를 od_wait로 변경")
+                # CatBoost 파라미터 충돌 완전 방지
+                conflicting_params = ['early_stopping_rounds', 'use_best_model', 'eval_set']
+                for param in conflicting_params:
+                    if param in fixed_params:
+                        if param == 'early_stopping_rounds':
+                            early_stop_val = fixed_params.pop(param)
+                            if 'od_wait' not in fixed_params:
+                                fixed_params['od_wait'] = early_stop_val
+                                fixed_params['od_type'] = 'IncToDec'
+                            logger.info(f"CatBoost: {param}를 od_wait로 변경")
+                        else:
+                            fixed_params.pop(param)
+                            logger.info(f"CatBoost: {param} 파라미터 제거")
                 
+                # 안전한 범위로 제한
                 fixed_params['depth'] = min(fixed_params.get('depth', 8), 10)
                 fixed_params['thread_count'] = min(fixed_params.get('thread_count', 6), 6)
                 fixed_params['auto_class_weights'] = 'Balanced'
                 
+                # CTR 특화 설정
                 fixed_params['l2_leaf_reg'] = max(fixed_params.get('l2_leaf_reg', 10), 5)
                 fixed_params['min_data_in_leaf'] = max(fixed_params.get('min_data_in_leaf', 100), 50)
-                
                 fixed_params['grow_policy'] = 'Lossguide'
                 fixed_params['max_leaves'] = min(fixed_params.get('max_leaves', 255), 511)
                 
@@ -397,6 +412,11 @@ class CTRModelTrainer:
                     
                     y_pred_proba = model.predict_proba(X_val_fold)
                     
+                    # 예측값 다양성 검증
+                    unique_predictions = len(np.unique(y_pred_proba))
+                    if unique_predictions < 100:
+                        logger.warning(f"폴드 {fold + 1}: 예측값 다양성 부족 (고유값: {unique_predictions})")
+                    
                     ap_score = metrics_calculator.average_precision(y_val_fold, y_pred_proba)
                     wll_score = metrics_calculator.weighted_log_loss(y_val_fold, y_pred_proba)
                     combined_score = metrics_calculator.combined_score(y_val_fold, y_pred_proba)
@@ -435,7 +455,7 @@ class CTRModelTrainer:
             
             if not valid_scores:
                 logger.warning(f"{model_type} CTR 모든 폴드가 실패했습니다")
-                return {
+                cv_results = {
                     'model_type': model_type,
                     'combined_mean': 0.0,
                     'combined_std': 0.0,
@@ -443,21 +463,25 @@ class CTRModelTrainer:
                     'scores_detail': cv_scores,
                     'params': params or {}
                 }
-            
-            cv_results = {
-                'model_type': model_type,
-                'combined_mean': np.mean(valid_scores),
-                'combined_std': np.std(valid_scores) if len(valid_scores) > 1 else 0.0,
-                'ctr_bias_mean': np.mean(valid_ctr_scores) if valid_ctr_scores else 0.0,
-                'ctr_bias_std': np.std(valid_ctr_scores) if len(valid_ctr_scores) > 1 else 0.0,
-                'scores_detail': cv_scores,
-                'params': params or {},
-                'successful_folds': len(valid_scores),
-                'avg_training_time': np.mean([t for t in cv_scores['training_times'] if t > 0]),
-                'avg_memory_usage': np.mean([m for m in cv_scores['memory_usage'] if m > 0])
-            }
+            else:
+                cv_results = {
+                    'model_type': model_type,
+                    'combined_mean': np.mean(valid_scores),
+                    'combined_std': np.std(valid_scores) if len(valid_scores) > 1 else 0.0,
+                    'ctr_bias_mean': np.mean(valid_ctr_scores) if valid_ctr_scores else 0.0,
+                    'ctr_bias_std': np.std(valid_ctr_scores) if len(valid_ctr_scores) > 1 else 0.0,
+                    'scores_detail': cv_scores,
+                    'params': params or {},
+                    'successful_folds': len(valid_scores),
+                    'avg_training_time': np.mean([t for t in cv_scores['training_times'] if t > 0]),
+                    'avg_memory_usage': np.mean([m for m in cv_scores['memory_usage'] if m > 0])
+                }
             
             self.cv_results[model_type] = cv_results
+            
+            # trained_models에 cv_result 업데이트
+            if model_type in self.trained_models:
+                self.trained_models[model_type]['cv_result'] = cv_results
             
             logger.info(f"{model_type} CTR 교차검증 완료")
             logger.info(f"평균 Combined Score: {cv_results['combined_mean']:.4f} (±{cv_results['combined_std']:.4f})")
@@ -869,7 +893,7 @@ class CTRModelTrainer:
             logger.warning(f"메모리 정리 실패: {e}")
     
     def save_models(self, output_dir: Path = None):
-        """모델 및 Calibrator 저장"""
+        """모델 및 Calibrator 저장 - 일관된 구조 사용"""
         if output_dir is None:
             output_dir = self.config.MODEL_DIR
         
@@ -882,15 +906,18 @@ class CTRModelTrainer:
             try:
                 model_path = output_dir / f"{model_name}_model.pkl"
                 
+                # 실제 모델 객체 저장
                 with open(model_path, 'wb') as f:
                     pickle.dump(model_info['model'], f)
                 
+                # 일관된 메타데이터 구조 사용
                 metadata = {
                     'model_type': model_name,
                     'training_time': model_info.get('training_time', 0.0),
                     'params': model_info.get('params', {}),
                     'calibrated': model_info.get('calibrated', False),
                     'memory_used': model_info.get('memory_used', 0.0),
+                    'cv_result': model_info.get('cv_result', None),
                     'device': str(self.device),
                     'ctr_optimized': True
                 }
@@ -904,6 +931,7 @@ class CTRModelTrainer:
             except Exception as e:
                 logger.error(f"{model_name} CTR 모델 저장 실패: {str(e)}")
         
+        # Calibrator 저장
         if self.calibrators:
             calibrator_path = output_dir / "ctr_calibrators.pkl"
             try:
@@ -912,6 +940,26 @@ class CTRModelTrainer:
                 logger.info(f"CTR Calibrator 저장 완료: {calibrator_path}")
             except Exception as e:
                 logger.error(f"CTR Calibrator 저장 실패: {str(e)}")
+        
+        # CV 결과 저장
+        if self.cv_results:
+            cv_results_path = output_dir / "cv_results.json"
+            try:
+                with open(cv_results_path, 'w') as f:
+                    json.dump(self.cv_results, f, indent=2, default=str)
+                logger.info(f"CV 결과 저장 완료: {cv_results_path}")
+            except Exception as e:
+                logger.error(f"CV 결과 저장 실패: {str(e)}")
+        
+        # Best parameters 저장
+        if self.best_params:
+            best_params_path = output_dir / "best_params.json"
+            try:
+                with open(best_params_path, 'w') as f:
+                    json.dump(self.best_params, f, indent=2, default=str)
+                logger.info(f"최적 파라미터 저장 완료: {best_params_path}")
+            except Exception as e:
+                logger.error(f"최적 파라미터 저장 실패: {str(e)}")
     
     def load_models(self, input_dir: Path = None) -> Dict[str, BaseModel]:
         """저장된 CTR 모델 로딩"""
@@ -935,9 +983,39 @@ class CTRModelTrainer:
                 loaded_models[model_name] = model
                 logger.info(f"{model_name} CTR 모델 로딩 완료")
                 
+                # 메타데이터 로딩
+                metadata_file = input_dir / f"{model_name}_metadata.json"
+                if metadata_file.exists():
+                    try:
+                        with open(metadata_file, 'r') as f:
+                            metadata = json.load(f)
+                        
+                        # 일관된 구조로 trained_models 설정
+                        self.trained_models[model_name] = {
+                            'model': model,
+                            'params': metadata.get('params', {}),
+                            'training_time': metadata.get('training_time', 0.0),
+                            'calibrated': metadata.get('calibrated', False),
+                            'memory_used': metadata.get('memory_used', 0.0),
+                            'cv_result': metadata.get('cv_result', None)
+                        }
+                        
+                    except Exception as e:
+                        logger.warning(f"{model_name} 메타데이터 로딩 실패: {e}")
+                        # 기본 구조로 설정
+                        self.trained_models[model_name] = {
+                            'model': model,
+                            'params': {},
+                            'training_time': 0.0,
+                            'calibrated': False,
+                            'memory_used': 0.0,
+                            'cv_result': None
+                        }
+                
             except Exception as e:
                 logger.error(f"{model_file} CTR 모델 로딩 실패: {str(e)}")
         
+        # Calibrator 로딩
         calibrator_path = input_dir / "ctr_calibrators.pkl"
         if calibrator_path.exists():
             try:
@@ -947,15 +1025,25 @@ class CTRModelTrainer:
             except Exception as e:
                 logger.error(f"CTR Calibrator 로딩 실패: {str(e)}")
         
-        self.trained_models = {
-            name: {
-                'model': model, 
-                'training_time': 0.0,
-                'params': {},
-                'calibrated': False,
-                'memory_used': 0.0
-            } for name, model in loaded_models.items()
-        }
+        # CV 결과 로딩
+        cv_results_path = input_dir / "cv_results.json"
+        if cv_results_path.exists():
+            try:
+                with open(cv_results_path, 'r') as f:
+                    self.cv_results = json.load(f)
+                logger.info("CV 결과 로딩 완료")
+            except Exception as e:
+                logger.error(f"CV 결과 로딩 실패: {str(e)}")
+        
+        # Best parameters 로딩
+        best_params_path = input_dir / "best_params.json"
+        if best_params_path.exists():
+            try:
+                with open(best_params_path, 'r') as f:
+                    self.best_params = json.load(f)
+                logger.info("최적 파라미터 로딩 완료")
+            except Exception as e:
+                logger.error(f"최적 파라미터 로딩 실패: {str(e)}")
         
         return loaded_models
     
@@ -994,6 +1082,7 @@ class CTRModelTrainer:
         
         return summary
 
+# 호환성을 위한 alias
 ModelTrainer = CTRModelTrainer
 
 class TrainingPipeline:
@@ -1035,6 +1124,7 @@ class TrainingPipeline:
                 else:
                     n_trials = 10
             
+            # 하이퍼파라미터 튜닝
             if tune_hyperparameters and OPTUNA_AVAILABLE:
                 logger.info("CTR 하이퍼파라미터 튜닝 단계")
                 for model_type in model_types:
@@ -1057,6 +1147,7 @@ class TrainingPipeline:
             else:
                 logger.info("CTR 하이퍼파라미터 튜닝 생략")
             
+            # 교차검증
             logger.info("CTR 교차검증 평가 단계")
             for model_type in model_types:
                 try:
@@ -1076,6 +1167,7 @@ class TrainingPipeline:
                     logger.error(f"{model_type} CTR 교차검증 실패: {str(e)}")
                     MemoryTracker.force_cleanup()
             
+            # 최종 모델 학습
             logger.info("CTR 최종 모델 학습 단계")
             logger.info(f"학습 전 메모리 상태: {self.memory_tracker.get_available_memory():.2f}GB")
             
@@ -1083,11 +1175,13 @@ class TrainingPipeline:
             
             logger.info(f"학습 후 메모리 상태: {self.memory_tracker.get_available_memory():.2f}GB")
             
+            # 모델 저장
             try:
                 self.trainer.save_models()
             except Exception as e:
                 logger.warning(f"CTR 모델 저장 실패: {str(e)}")
             
+            # 결과 요약
             pipeline_time = time.time() - pipeline_start_time
             summary = self.trainer.get_training_summary()
             summary['total_pipeline_time'] = pipeline_time

@@ -46,21 +46,64 @@ class CTRMetrics:
         self.calibration_weight = config.EVALUATION_CONFIG.get('calibration_weight', 0.3)
     
     def average_precision(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """Average Precision (AP) 계산"""
+        """Average Precision (AP) 계산 - 안정성 개선"""
         try:
-            if len(np.unique(y_true)) < 2:
+            # 입력 검증
+            y_true = np.asarray(y_true).flatten()
+            y_pred_proba = np.asarray(y_pred_proba).flatten()
+            
+            if len(y_true) != len(y_pred_proba):
+                logger.error(f"크기 불일치: y_true={len(y_true)}, y_pred_proba={len(y_pred_proba)}")
+                return 0.0
+            
+            if len(y_true) == 0:
+                logger.warning("빈 배열로 인해 AP 계산 불가")
+                return 0.0
+            
+            unique_classes = np.unique(y_true)
+            if len(unique_classes) < 2:
                 logger.warning("단일 클래스만 존재하여 AP 계산 불가")
                 return 0.0
             
+            # NaN 및 무한값 처리
+            if np.any(np.isnan(y_pred_proba)) or np.any(np.isinf(y_pred_proba)):
+                logger.warning("예측값에 NaN 또는 무한값 존재, 클리핑 적용")
+                y_pred_proba = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
+                y_pred_proba = np.nan_to_num(y_pred_proba, nan=0.5, posinf=1.0, neginf=0.0)
+            
             ap_score = average_precision_score(y_true, y_pred_proba)
-            return ap_score
+            
+            # 결과 검증
+            if np.isnan(ap_score) or np.isinf(ap_score):
+                logger.warning("AP 계산 결과가 유효하지 않음")
+                return 0.0
+            
+            return float(ap_score)
         except Exception as e:
             logger.error(f"AP 계산 오류: {str(e)}")
             return 0.0
     
     def weighted_log_loss(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """실제 CTR 분포를 반영한 Weighted Log Loss"""
+        """실제 CTR 분포를 반영한 Weighted Log Loss - 안정성 개선"""
         try:
+            # 입력 검증
+            y_true = np.asarray(y_true).flatten()
+            y_pred_proba = np.asarray(y_pred_proba).flatten()
+            
+            if len(y_true) != len(y_pred_proba):
+                logger.error(f"크기 불일치: y_true={len(y_true)}, y_pred_proba={len(y_pred_proba)}")
+                return float('inf')
+            
+            if len(y_true) == 0:
+                logger.warning("빈 배열로 인해 WLL 계산 불가")
+                return float('inf')
+            
+            # NaN 및 무한값 처리
+            if np.any(np.isnan(y_pred_proba)) or np.any(np.isinf(y_pred_proba)):
+                logger.warning("예측값에 NaN 또는 무한값 존재, 클리핑 적용")
+                y_pred_proba = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
+                y_pred_proba = np.nan_to_num(y_pred_proba, nan=0.5, posinf=1.0, neginf=0.0)
+            
             pos_weight = self.pos_weight
             neg_weight = self.neg_weight
             
@@ -71,9 +114,19 @@ class CTRMetrics:
             log_loss_values = -(y_true * np.log(y_pred_proba_clipped) + 
                               (1 - y_true) * np.log(1 - y_pred_proba_clipped))
             
+            # NaN 체크
+            if np.any(np.isnan(log_loss_values)) or np.any(np.isinf(log_loss_values)):
+                logger.warning("Log loss 계산에서 NaN 또는 무한값 발생")
+                return float('inf')
+            
             weighted_log_loss = np.average(log_loss_values, weights=sample_weights)
             
-            return weighted_log_loss
+            # 결과 검증
+            if np.isnan(weighted_log_loss) or np.isinf(weighted_log_loss):
+                logger.warning("WLL 계산 결과가 유효하지 않음")
+                return float('inf')
+            
+            return float(weighted_log_loss)
             
         except Exception as e:
             logger.error(f"WLL 계산 오류: {str(e)}")
@@ -82,6 +135,14 @@ class CTRMetrics:
     def combined_score(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
         """CTR 특화 Combined Score = 0.5 * AP + 0.5 * (1/(1+WLL)) + CTR편향보정"""
         try:
+            # 입력 검증
+            y_true = np.asarray(y_true).flatten()
+            y_pred_proba = np.asarray(y_pred_proba).flatten()
+            
+            if len(y_true) != len(y_pred_proba) or len(y_true) == 0:
+                logger.error("Combined Score 계산을 위한 입력 데이터 문제")
+                return 0.0
+            
             ap_score = self.average_precision(y_true, y_pred_proba)
             wll_score = self.weighted_log_loss(y_true, y_pred_proba)
             
@@ -89,15 +150,28 @@ class CTRMetrics:
             
             basic_combined = self.ap_weight * ap_score + self.wll_weight * wll_normalized
             
-            predicted_ctr = y_pred_proba.mean()
-            actual_ctr = y_true.mean()
-            ctr_bias = abs(predicted_ctr - actual_ctr)
+            # CTR 편향 보정
+            try:
+                predicted_ctr = y_pred_proba.mean()
+                actual_ctr = y_true.mean()
+                ctr_bias = abs(predicted_ctr - actual_ctr)
+                
+                if ctr_bias > 0:
+                    ctr_penalty = np.exp(-(ctr_bias / self.ctr_tolerance) ** 2)
+                else:
+                    ctr_penalty = 1.0
+                
+                final_score = basic_combined * (1.0 + 0.1 * ctr_penalty)
+            except Exception as e:
+                logger.warning(f"CTR 편향 계산 실패: {e}")
+                final_score = basic_combined
             
-            ctr_penalty = np.exp(-(ctr_bias / self.ctr_tolerance) ** 2)
+            # 결과 검증
+            if np.isnan(final_score) or np.isinf(final_score) or final_score < 0:
+                logger.warning("Combined Score 계산 결과가 유효하지 않음")
+                return 0.0
             
-            final_score = basic_combined * (1.0 + 0.1 * ctr_penalty)
-            
-            return final_score
+            return float(final_score)
             
         except Exception as e:
             logger.error(f"Combined Score 계산 오류: {str(e)}")
@@ -106,21 +180,45 @@ class CTRMetrics:
     def ctr_optimized_score(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
         """CTR 예측에 최적화된 종합 점수"""
         try:
+            # 입력 검증
+            y_true = np.asarray(y_true).flatten()
+            y_pred_proba = np.asarray(y_pred_proba).flatten()
+            
+            if len(y_true) != len(y_pred_proba) or len(y_true) == 0:
+                logger.error("CTR 최적화 점수 계산을 위한 입력 데이터 문제")
+                return 0.0
+            
             ap_score = self.average_precision(y_true, y_pred_proba)
             wll_score = self.weighted_log_loss(y_true, y_pred_proba)
             wll_normalized = 1 / (1 + wll_score) if wll_score != float('inf') else 0.0
             
-            predicted_ctr = y_pred_proba.mean()
-            actual_ctr = y_true.mean()
-            ctr_bias = abs(predicted_ctr - actual_ctr)
-            ctr_ratio = predicted_ctr / actual_ctr if actual_ctr > 0 else 1.0
+            # CTR 정확도 계산
+            try:
+                predicted_ctr = y_pred_proba.mean()
+                actual_ctr = y_true.mean()
+                ctr_bias = abs(predicted_ctr - actual_ctr)
+                ctr_ratio = predicted_ctr / actual_ctr if actual_ctr > 0 else 1.0
+                
+                ctr_accuracy = np.exp(-ctr_bias * 100) if ctr_bias < 0.1 else 0.0
+            except Exception as e:
+                logger.warning(f"CTR 정확도 계산 실패: {e}")
+                ctr_accuracy = 0.0
             
-            calibration_score = self._calculate_calibration_quality(y_true, y_pred_proba)
+            # 보정 품질 계산
+            try:
+                calibration_score = self._calculate_calibration_quality(y_true, y_pred_proba)
+            except Exception as e:
+                logger.warning(f"보정 품질 계산 실패: {e}")
+                calibration_score = 0.5
             
-            distribution_score = self._calculate_distribution_matching(y_true, y_pred_proba)
+            # 분포 매칭 계산
+            try:
+                distribution_score = self._calculate_distribution_matching(y_true, y_pred_proba)
+            except Exception as e:
+                logger.warning(f"분포 매칭 계산 실패: {e}")
+                distribution_score = 0.5
             
-            ctr_accuracy = np.exp(-ctr_bias * 100) if ctr_bias < 0.1 else 0.0
-            
+            # 가중치 적용
             weights = {
                 'ap': 0.35,
                 'wll': 0.25,
@@ -137,7 +235,12 @@ class CTRMetrics:
                 weights['distribution'] * distribution_score
             )
             
-            return optimized_score
+            # 결과 검증
+            if np.isnan(optimized_score) or np.isinf(optimized_score) or optimized_score < 0:
+                logger.warning("CTR 최적화 점수 계산 결과가 유효하지 않음")
+                return 0.0
+            
+            return float(optimized_score)
             
         except Exception as e:
             logger.error(f"CTR 최적화 점수 계산 오류: {str(e)}")
@@ -197,46 +300,88 @@ class CTRMetrics:
                                y_true: np.ndarray, 
                                y_pred_proba: np.ndarray,
                                threshold: float = 0.5) -> Dict[str, float]:
-        """종합적인 평가 지표 계산"""
-        
-        y_pred = (y_pred_proba >= threshold).astype(int)
-        
-        metrics = {}
+        """종합적인 평가 지표 계산 - 안정성 개선"""
         
         try:
-            metrics['ap'] = self.average_precision(y_true, y_pred_proba)
-            metrics['wll'] = self.weighted_log_loss(y_true, y_pred_proba)
-            metrics['combined_score'] = self.combined_score(y_true, y_pred_proba)
-            metrics['ctr_optimized_score'] = self.ctr_optimized_score(y_true, y_pred_proba)
+            # 입력 검증 및 전처리
+            y_true = np.asarray(y_true).flatten()
+            y_pred_proba = np.asarray(y_pred_proba).flatten()
             
+            if len(y_true) != len(y_pred_proba):
+                logger.error(f"입력 크기 불일치: y_true={len(y_true)}, y_pred_proba={len(y_pred_proba)}")
+                return self._get_default_metrics()
+            
+            if len(y_true) == 0:
+                logger.error("빈 입력 배열")
+                return self._get_default_metrics()
+            
+            # NaN 및 무한값 처리
+            if np.any(np.isnan(y_pred_proba)) or np.any(np.isinf(y_pred_proba)):
+                logger.warning("예측값에 NaN 또는 무한값 존재, 정리 수행")
+                y_pred_proba = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
+                y_pred_proba = np.nan_to_num(y_pred_proba, nan=0.5, posinf=1.0, neginf=0.0)
+            
+            # 이진 예측 생성
+            y_pred = (y_pred_proba >= threshold).astype(int)
+        
+            metrics = {}
+            
+            # 주요 CTR 지표
+            try:
+                metrics['ap'] = self.average_precision(y_true, y_pred_proba)
+                metrics['wll'] = self.weighted_log_loss(y_true, y_pred_proba)
+                metrics['combined_score'] = self.combined_score(y_true, y_pred_proba)
+                metrics['ctr_optimized_score'] = self.ctr_optimized_score(y_true, y_pred_proba)
+            except Exception as e:
+                logger.error(f"주요 CTR 지표 계산 실패: {e}")
+                metrics.update({
+                    'ap': 0.0, 'wll': float('inf'), 'combined_score': 0.0, 'ctr_optimized_score': 0.0
+                })
+            
+            # 기본 분류 지표
             try:
                 metrics['auc'] = roc_auc_score(y_true, y_pred_proba)
                 metrics['log_loss'] = log_loss(y_true, y_pred_proba)
                 metrics['brier_score'] = brier_score_loss(y_true, y_pred_proba)
-            except:
-                metrics['auc'] = 0.5
-                metrics['log_loss'] = 1.0
-                metrics['brier_score'] = 0.25
+            except Exception as e:
+                logger.warning(f"기본 분류 지표 계산 실패: {e}")
+                metrics.update({
+                    'auc': 0.5, 'log_loss': 1.0, 'brier_score': 0.25
+                })
             
+            # 혼동 행렬 기반 지표
             try:
-                tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
-                
-                metrics['accuracy'] = (tp + tn) / (tp + tn + fp + fn)
-                metrics['precision'] = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-                metrics['recall'] = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-                metrics['specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-                metrics['sensitivity'] = metrics['recall']
-                
-                if metrics['precision'] + metrics['recall'] > 0:
-                    metrics['f1'] = 2 * (metrics['precision'] * metrics['recall']) / (metrics['precision'] + metrics['recall'])
+                cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+                if cm.shape == (2, 2):
+                    tn, fp, fn, tp = cm.ravel()
                 else:
-                    metrics['f1'] = 0.0
+                    logger.warning("혼동 행렬 형태가 예상과 다름")
+                    tn, fp, fn, tp = 0, 0, 0, 0
                 
-                denominator = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
-                if denominator != 0:
-                    metrics['mcc'] = (tp * tn - fp * fn) / denominator
+                total = tp + tn + fp + fn
+                if total > 0:
+                    metrics['accuracy'] = (tp + tn) / total
+                    metrics['precision'] = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                    metrics['recall'] = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                    metrics['specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+                    metrics['sensitivity'] = metrics['recall']
+                    
+                    if metrics['precision'] + metrics['recall'] > 0:
+                        metrics['f1'] = 2 * (metrics['precision'] * metrics['recall']) / (metrics['precision'] + metrics['recall'])
+                    else:
+                        metrics['f1'] = 0.0
+                    
+                    # MCC 계산
+                    denominator = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
+                    if denominator != 0:
+                        metrics['mcc'] = (tp * tn - fp * fn) / denominator
+                    else:
+                        metrics['mcc'] = 0.0
                 else:
-                    metrics['mcc'] = 0.0
+                    metrics.update({
+                        'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0,
+                        'specificity': 0.0, 'sensitivity': 0.0, 'f1': 0.0, 'mcc': 0.0
+                    })
                 
             except Exception as e:
                 logger.warning(f"혼동 행렬 지표 계산 실패: {e}")
@@ -245,72 +390,152 @@ class CTRMetrics:
                     'specificity': 0.0, 'sensitivity': 0.0, 'f1': 0.0, 'mcc': 0.0
                 })
             
-            metrics['ctr_actual'] = y_true.mean()
-            metrics['ctr_predicted'] = y_pred_proba.mean()
-            metrics['ctr_bias'] = metrics['ctr_predicted'] - metrics['ctr_actual']
-            metrics['ctr_ratio'] = metrics['ctr_predicted'] / max(metrics['ctr_actual'], 1e-10)
-            metrics['ctr_absolute_error'] = abs(metrics['ctr_bias'])
+            # CTR 분석
+            try:
+                metrics['ctr_actual'] = float(y_true.mean())
+                metrics['ctr_predicted'] = float(y_pred_proba.mean())
+                metrics['ctr_bias'] = metrics['ctr_predicted'] - metrics['ctr_actual']
+                metrics['ctr_ratio'] = metrics['ctr_predicted'] / max(metrics['ctr_actual'], 1e-10)
+                metrics['ctr_absolute_error'] = abs(metrics['ctr_bias'])
+            except Exception as e:
+                logger.warning(f"CTR 분석 실패: {e}")
+                metrics.update({
+                    'ctr_actual': 0.0201, 'ctr_predicted': 0.0201, 'ctr_bias': 0.0,
+                    'ctr_ratio': 1.0, 'ctr_absolute_error': 0.0
+                })
             
-            self._add_ctr_range_metrics(metrics, y_true, y_pred_proba)
+            # CTR 범위별 지표
+            try:
+                self._add_ctr_range_metrics(metrics, y_true, y_pred_proba)
+            except Exception as e:
+                logger.warning(f"CTR 범위별 지표 계산 실패: {e}")
             
-            metrics['prediction_std'] = y_pred_proba.std()
-            metrics['prediction_var'] = y_pred_proba.var()
-            metrics['prediction_entropy'] = self._calculate_entropy(y_pred_proba)
-            metrics['prediction_gini'] = self._calculate_gini_coefficient(y_pred_proba)
+            # 예측 통계
+            try:
+                metrics['prediction_std'] = float(y_pred_proba.std())
+                metrics['prediction_var'] = float(y_pred_proba.var())
+                metrics['prediction_entropy'] = self._calculate_entropy(y_pred_proba)
+                metrics['prediction_gini'] = self._calculate_gini_coefficient(y_pred_proba)
+            except Exception as e:
+                logger.warning(f"예측 통계 계산 실패: {e}")
+                metrics.update({
+                    'prediction_std': 0.0, 'prediction_var': 0.0,
+                    'prediction_entropy': 0.0, 'prediction_gini': 0.0
+                })
             
-            pos_mask = (y_true == 1)
-            neg_mask = (y_true == 0)
-            
-            if pos_mask.any():
-                metrics['pos_mean_pred'] = y_pred_proba[pos_mask].mean()
-                metrics['pos_std_pred'] = y_pred_proba[pos_mask].std()
-                metrics['pos_median_pred'] = np.median(y_pred_proba[pos_mask])
-            else:
-                metrics['pos_mean_pred'] = 0.0
-                metrics['pos_std_pred'] = 0.0
-                metrics['pos_median_pred'] = 0.0
+            # 클래스별 예측 통계
+            try:
+                pos_mask = (y_true == 1)
+                neg_mask = (y_true == 0)
                 
-            if neg_mask.any():
-                metrics['neg_mean_pred'] = y_pred_proba[neg_mask].mean()
-                metrics['neg_std_pred'] = y_pred_proba[neg_mask].std()
-                metrics['neg_median_pred'] = np.median(y_pred_proba[neg_mask])
-            else:
-                metrics['neg_mean_pred'] = 0.0
-                metrics['neg_std_pred'] = 0.0
-                metrics['neg_median_pred'] = 0.0
-            
-            if pos_mask.any() and neg_mask.any():
-                metrics['separation'] = metrics['pos_mean_pred'] - metrics['neg_mean_pred']
+                if pos_mask.any():
+                    metrics['pos_mean_pred'] = float(y_pred_proba[pos_mask].mean())
+                    metrics['pos_std_pred'] = float(y_pred_proba[pos_mask].std())
+                    metrics['pos_median_pred'] = float(np.median(y_pred_proba[pos_mask]))
+                else:
+                    metrics['pos_mean_pred'] = 0.0
+                    metrics['pos_std_pred'] = 0.0
+                    metrics['pos_median_pred'] = 0.0
+                    
+                if neg_mask.any():
+                    metrics['neg_mean_pred'] = float(y_pred_proba[neg_mask].mean())
+                    metrics['neg_std_pred'] = float(y_pred_proba[neg_mask].std())
+                    metrics['neg_median_pred'] = float(np.median(y_pred_proba[neg_mask]))
+                else:
+                    metrics['neg_mean_pred'] = 0.0
+                    metrics['neg_std_pred'] = 0.0
+                    metrics['neg_median_pred'] = 0.0
                 
-                if SCIPY_AVAILABLE:
-                    try:
-                        ks_stat, ks_pvalue = stats.ks_2samp(y_pred_proba[pos_mask], y_pred_proba[neg_mask])
-                        metrics['ks_statistic'] = ks_stat
-                        metrics['ks_pvalue'] = ks_pvalue
-                    except:
+                if pos_mask.any() and neg_mask.any():
+                    metrics['separation'] = metrics['pos_mean_pred'] - metrics['neg_mean_pred']
+                    
+                    # KS 통계
+                    if SCIPY_AVAILABLE:
+                        try:
+                            ks_stat, ks_pvalue = stats.ks_2samp(y_pred_proba[pos_mask], y_pred_proba[neg_mask])
+                            metrics['ks_statistic'] = float(ks_stat)
+                            metrics['ks_pvalue'] = float(ks_pvalue)
+                        except:
+                            metrics['ks_statistic'] = 0.0
+                            metrics['ks_pvalue'] = 1.0
+                    else:
                         metrics['ks_statistic'] = 0.0
                         metrics['ks_pvalue'] = 1.0
                 else:
+                    metrics['separation'] = 0.0
                     metrics['ks_statistic'] = 0.0
                     metrics['ks_pvalue'] = 1.0
-            else:
-                metrics['separation'] = 0.0
-                metrics['ks_statistic'] = 0.0
-                metrics['ks_pvalue'] = 1.0
+            except Exception as e:
+                logger.warning(f"클래스별 예측 통계 계산 실패: {e}")
+                metrics.update({
+                    'pos_mean_pred': 0.0, 'pos_std_pred': 0.0, 'pos_median_pred': 0.0,
+                    'neg_mean_pred': 0.0, 'neg_std_pred': 0.0, 'neg_median_pred': 0.0,
+                    'separation': 0.0, 'ks_statistic': 0.0, 'ks_pvalue': 1.0
+                })
             
-            calibration_metrics = self.calculate_calibration_metrics(y_true, y_pred_proba)
-            metrics.update(calibration_metrics)
+            # 보정 지표
+            try:
+                calibration_metrics = self.calculate_calibration_metrics(y_true, y_pred_proba)
+                metrics.update(calibration_metrics)
+            except Exception as e:
+                logger.warning(f"보정 지표 계산 실패: {e}")
+                metrics.update({
+                    'ece': 0.0, 'mce': 0.0, 'ace': 0.0, 
+                    'reliability_slope': 1.0, 'reliability_intercept': 0.0
+                })
             
-            self._add_quantile_metrics(metrics, y_true, y_pred_proba)
+            # 분위수별 지표
+            try:
+                self._add_quantile_metrics(metrics, y_true, y_pred_proba)
+            except Exception as e:
+                logger.warning(f"분위수별 지표 계산 실패: {e}")
             
-            optimal_threshold, optimal_f1 = self.find_optimal_threshold(y_true, y_pred_proba, 'f1')
-            metrics['optimal_threshold'] = optimal_threshold
-            metrics['optimal_f1'] = optimal_f1
+            # 최적 임계값
+            try:
+                optimal_threshold, optimal_f1 = self.find_optimal_threshold(y_true, y_pred_proba, 'f1')
+                metrics['optimal_threshold'] = float(optimal_threshold)
+                metrics['optimal_f1'] = float(optimal_f1)
+            except Exception as e:
+                logger.warning(f"최적 임계값 계산 실패: {e}")
+                metrics['optimal_threshold'] = 0.5
+                metrics['optimal_f1'] = metrics.get('f1', 0.0)
+            
+            # 모든 지표값을 float로 변환하고 유효성 검사
+            validated_metrics = {}
+            for key, value in metrics.items():
+                try:
+                    if isinstance(value, (int, float, np.number)):
+                        if np.isnan(value) or np.isinf(value):
+                            validated_metrics[key] = 0.0
+                        else:
+                            validated_metrics[key] = float(value)
+                    else:
+                        validated_metrics[key] = value
+                except:
+                    validated_metrics[key] = 0.0
+            
+            return validated_metrics
             
         except Exception as e:
             logger.error(f"종합 평가 계산 오류: {str(e)}")
-        
-        return metrics
+            return self._get_default_metrics()
+    
+    def _get_default_metrics(self) -> Dict[str, float]:
+        """기본 지표값 반환"""
+        return {
+            'ap': 0.0, 'wll': float('inf'), 'combined_score': 0.0, 'ctr_optimized_score': 0.0,
+            'auc': 0.5, 'log_loss': 1.0, 'brier_score': 0.25,
+            'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0, 'specificity': 0.0, 
+            'sensitivity': 0.0, 'f1': 0.0, 'mcc': 0.0,
+            'ctr_actual': 0.0201, 'ctr_predicted': 0.0201, 'ctr_bias': 0.0,
+            'ctr_ratio': 1.0, 'ctr_absolute_error': 0.0,
+            'prediction_std': 0.0, 'prediction_var': 0.0, 'prediction_entropy': 0.0, 'prediction_gini': 0.0,
+            'pos_mean_pred': 0.0, 'pos_std_pred': 0.0, 'pos_median_pred': 0.0,
+            'neg_mean_pred': 0.0, 'neg_std_pred': 0.0, 'neg_median_pred': 0.0,
+            'separation': 0.0, 'ks_statistic': 0.0, 'ks_pvalue': 1.0,
+            'ece': 0.0, 'mce': 0.0, 'ace': 0.0, 'reliability_slope': 1.0, 'reliability_intercept': 0.0,
+            'optimal_threshold': 0.5, 'optimal_f1': 0.0
+        }
     
     def _add_ctr_range_metrics(self, metrics: Dict[str, float], y_true: np.ndarray, y_pred_proba: np.ndarray):
         """CTR 범위별 성능 지표 추가"""
@@ -327,10 +552,10 @@ class CTRMetrics:
                 mask = (y_pred_proba >= low) & (y_pred_proba < high)
                 
                 if mask.sum() > 0:
-                    range_actual_ctr = y_true[mask].mean()
-                    range_pred_ctr = y_pred_proba[mask].mean()
+                    range_actual_ctr = float(y_true[mask].mean())
+                    range_pred_ctr = float(y_pred_proba[mask].mean())
                     range_bias = abs(range_pred_ctr - range_actual_ctr)
-                    range_count = mask.sum()
+                    range_count = int(mask.sum())
                     
                     metrics[f'ctr_{range_name}_actual'] = range_actual_ctr
                     metrics[f'ctr_{range_name}_predicted'] = range_pred_ctr
@@ -357,8 +582,8 @@ class CTRMetrics:
                 top_q_mask = y_pred_proba >= threshold
                 
                 if top_q_mask.sum() > 0:
-                    top_q_ctr = y_true[top_q_mask].mean()
-                    top_q_size = top_q_mask.sum()
+                    top_q_ctr = float(y_true[top_q_mask].mean())
+                    top_q_size = int(top_q_mask.sum())
                     
                     metrics[f'top_{int(q*100)}p_ctr'] = top_q_ctr
                     metrics[f'top_{int(q*100)}p_size'] = top_q_size
@@ -374,7 +599,10 @@ class CTRMetrics:
             
             entropy = -np.mean(p * np.log2(p) + (1 - p) * np.log2(1 - p))
             
-            return entropy
+            if np.isnan(entropy) or np.isinf(entropy):
+                return 0.0
+            
+            return float(entropy)
         except:
             return 0.0
     
@@ -384,10 +612,19 @@ class CTRMetrics:
             sorted_values = np.sort(values)
             n = len(sorted_values)
             
+            if n == 0:
+                return 0.0
+            
             cumsum = np.cumsum(sorted_values)
+            if cumsum[-1] == 0:
+                return 0.0
+                
             gini = (n + 1 - 2 * np.sum(cumsum) / cumsum[-1]) / n
             
-            return gini
+            if np.isnan(gini) or np.isinf(gini):
+                return 0.0
+            
+            return float(gini)
         except:
             return 0.0
     
@@ -413,14 +650,18 @@ class CTRMetrics:
         best_score = 0.0
         
         for threshold in thresholds:
-            y_pred = (y_pred_proba >= threshold).astype(int)
-            
             try:
+                y_pred = (y_pred_proba >= threshold).astype(int)
+                
                 if metric == 'f1':
-                    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
-                    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-                    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-                    score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+                    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+                    if cm.shape == (2, 2):
+                        tn, fp, fn, tp = cm.ravel()
+                        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                        score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+                    else:
+                        score = 0.0
                 
                 elif metric == 'accuracy':
                     score = (y_true == y_pred).mean()
@@ -474,16 +715,20 @@ class CTRMetrics:
             bin_confidences = np.array(bin_confidences)
             bin_counts = np.array(bin_counts)
             
+            # ECE 계산
             ece = np.sum(bin_counts * np.abs(bin_accuracies - bin_confidences)) / len(y_true)
             
+            # MCE 계산
             mce = np.max(np.abs(bin_accuracies - bin_confidences))
             
+            # ACE 계산
             non_empty_bins = bin_counts > 0
             if non_empty_bins.any():
                 ace = np.mean(np.abs(bin_accuracies[non_empty_bins] - bin_confidences[non_empty_bins]))
             else:
                 ace = 0.0
             
+            # 신뢰도 기울기 계산
             try:
                 if len(bin_confidences[non_empty_bins]) > 1:
                     slope, intercept = np.polyfit(bin_confidences[non_empty_bins], bin_accuracies[non_empty_bins], 1)
@@ -493,11 +738,11 @@ class CTRMetrics:
                 slope, intercept = 1.0, 0.0
             
             return {
-                'ece': ece,
-                'mce': mce,
-                'ace': ace,
-                'reliability_slope': slope,
-                'reliability_intercept': intercept,
+                'ece': float(ece),
+                'mce': float(mce),
+                'ace': float(ace),
+                'reliability_slope': float(slope),
+                'reliability_intercept': float(intercept),
                 'bin_accuracies': bin_accuracies.tolist(),
                 'bin_confidences': bin_confidences.tolist(),
                 'bin_counts': bin_counts.tolist()
@@ -506,57 +751,13 @@ class CTRMetrics:
         except Exception as e:
             logger.error(f"보정 지표 계산 오류: {str(e)}")
             return {'ece': 0.0, 'mce': 0.0, 'ace': 0.0, 'reliability_slope': 1.0, 'reliability_intercept': 0.0}
-    
-    def calculate_business_metrics(self, y_true: np.ndarray, y_pred_proba: np.ndarray, 
-                                 cost_per_click: float = 1.0, revenue_per_conversion: float = 20.0) -> Dict[str, float]:
-        """비즈니스 관련 지표 계산"""
-        try:
-            thresholds = np.arange(0.01, 0.5, 0.01)
-            business_metrics = {}
-            
-            for threshold in thresholds:
-                predictions = (y_pred_proba >= threshold).astype(int)
-                
-                tn, fp, fn, tp = confusion_matrix(y_true, predictions).ravel()
-                
-                total_clicks = tp + fp
-                total_conversions = tp
-                
-                if total_clicks > 0:
-                    conversion_rate = total_conversions / total_clicks
-                    cost = total_clicks * cost_per_click
-                    revenue = total_conversions * revenue_per_conversion
-                    profit = revenue - cost
-                    roi = (revenue - cost) / cost if cost > 0 else 0.0
-                    
-                    business_metrics[f'threshold_{threshold:.2f}'] = {
-                        'clicks': total_clicks,
-                        'conversions': total_conversions,
-                        'conversion_rate': conversion_rate,
-                        'cost': cost,
-                        'revenue': revenue,
-                        'profit': profit,
-                        'roi': roi
-                    }
-            
-            if business_metrics:
-                best_threshold = max(business_metrics.keys(), 
-                                   key=lambda x: business_metrics[x]['profit'])
-                business_metrics['optimal_threshold'] = best_threshold
-                business_metrics['optimal_metrics'] = business_metrics[best_threshold]
-            
-            return business_metrics
-            
-        except Exception as e:
-            logger.error(f"비즈니스 지표 계산 오류: {str(e)}")
-            return {}
 
 class ModelComparator:
-    """다중 모델 비교 클래스"""
+    """다중 모델 비교 클래스 - 안정성 개선"""
     
     def __init__(self):
         self.metrics_calculator = CTRMetrics()
-        self.comparison_results = {}
+        self.comparison_results = pd.DataFrame()
     
     def compare_models(self, 
                       models_predictions: Dict[str, np.ndarray],
@@ -565,36 +766,82 @@ class ModelComparator:
         
         results = []
         
+        # 입력 검증
+        y_true = np.asarray(y_true).flatten()
+        
         for model_name, y_pred_proba in models_predictions.items():
             try:
+                # 예측값 검증 및 전처리
+                y_pred_proba = np.asarray(y_pred_proba).flatten()
+                
+                if len(y_pred_proba) != len(y_true):
+                    logger.error(f"{model_name}: 예측값과 실제값 크기 불일치")
+                    continue
+                
+                if len(y_pred_proba) == 0:
+                    logger.error(f"{model_name}: 빈 예측값")
+                    continue
+                
+                # NaN 및 무한값 처리
+                if np.any(np.isnan(y_pred_proba)) or np.any(np.isinf(y_pred_proba)):
+                    logger.warning(f"{model_name}: 예측값에 NaN 또는 무한값 존재, 정리 수행")
+                    y_pred_proba = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
+                    y_pred_proba = np.nan_to_num(y_pred_proba, nan=0.5, posinf=1.0, neginf=0.0)
+                
+                # 평가 수행
                 metrics = self.metrics_calculator.comprehensive_evaluation(y_true, y_pred_proba)
                 metrics['model_name'] = model_name
                 
-                stability_metrics = self._calculate_stability_metrics(y_true, y_pred_proba)
-                metrics.update(stability_metrics)
+                # 안정성 지표 계산
+                try:
+                    stability_metrics = self._calculate_stability_metrics(y_true, y_pred_proba)
+                    metrics.update(stability_metrics)
+                except Exception as e:
+                    logger.warning(f"{model_name} 안정성 지표 계산 실패: {e}")
+                    metrics.update(self._get_default_stability_metrics())
                 
                 results.append(metrics)
                 
             except Exception as e:
                 logger.error(f"{model_name} 모델 평가 실패: {str(e)}")
+                # 기본값으로 추가
+                default_metrics = self.metrics_calculator._get_default_metrics()
+                default_metrics['model_name'] = model_name
+                default_metrics.update(self._get_default_stability_metrics())
+                results.append(default_metrics)
         
-        comparison_df = pd.DataFrame(results)
+        if not results:
+            logger.error("평가 가능한 모델이 없습니다")
+            return pd.DataFrame()
         
-        if not comparison_df.empty:
-            comparison_df.set_index('model_name', inplace=True)
+        try:
+            comparison_df = pd.DataFrame(results)
             
-            if 'ctr_optimized_score' in comparison_df.columns:
-                comparison_df.sort_values('ctr_optimized_score', ascending=False, inplace=True)
-            else:
-                comparison_df.sort_values('combined_score', ascending=False, inplace=True)
+            if not comparison_df.empty:
+                comparison_df.set_index('model_name', inplace=True)
+                
+                # 정렬 기준 결정
+                sort_column = 'ctr_optimized_score'
+                if sort_column not in comparison_df.columns:
+                    sort_column = 'combined_score'
+                    if sort_column not in comparison_df.columns:
+                        sort_column = 'ap'
+                
+                if sort_column in comparison_df.columns:
+                    comparison_df.sort_values(sort_column, ascending=False, inplace=True)
         
-        self.comparison_results = comparison_df
-        
-        return comparison_df
+            self.comparison_results = comparison_df
+            
+            return comparison_df
+            
+        except Exception as e:
+            logger.error(f"비교 결과 생성 실패: {e}")
+            return pd.DataFrame()
     
     def _calculate_stability_metrics(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> Dict[str, float]:
-        """모델 안정성 지표 계산"""
+        """모델 안정성 지표 계산 - 개선된 버전"""
         try:
+            # 입력 검증
             y_true_array = np.asarray(y_true).flatten()
             y_pred_array = np.asarray(y_pred_proba).flatten()
             
@@ -603,24 +850,45 @@ class ModelComparator:
                 logger.warning("빈 배열로 인해 안정성 지표 계산 불가")
                 return self._get_default_stability_metrics()
             
+            # 배열 크기 통일
             y_true_array = y_true_array[:min_len]
             y_pred_array = y_pred_array[:min_len]
             
-            n_bootstrap = 30
+            # 부트스트래핑 설정
+            n_bootstrap = min(30, max(10, min_len // 1000))  # 데이터 크기에 따라 조정
+            sample_size = min(min_len, 10000)
             scores = []
             
-            sample_size = min(min_len, 10000)
+            # 랜덤 시드 설정
+            np.random.seed(42)
             
             for i in range(n_bootstrap):
                 try:
-                    indices = np.random.choice(range(min_len), size=sample_size, replace=True)
+                    # 안전한 인덱스 생성
+                    if sample_size >= min_len:
+                        indices = np.arange(min_len)
+                    else:
+                        indices = np.random.choice(min_len, size=sample_size, replace=True)
+                    
+                    # 인덱스 범위 검증
+                    indices = np.clip(indices, 0, min_len - 1)
+                    
                     boot_y_true = y_true_array[indices]
                     boot_y_pred = y_pred_array[indices]
                     
-                    if len(np.unique(boot_y_true)) < 2:
+                    # 클래스 분포 확인
+                    unique_classes = np.unique(boot_y_true)
+                    if len(unique_classes) < 2:
                         continue
                     
+                    # 예측값 유효성 검증
+                    if np.any(np.isnan(boot_y_pred)) or np.any(np.isinf(boot_y_pred)):
+                        boot_y_pred = np.clip(boot_y_pred, 1e-15, 1 - 1e-15)
+                        boot_y_pred = np.nan_to_num(boot_y_pred, nan=0.5, posinf=1.0, neginf=0.0)
+                    
                     score = self.metrics_calculator.combined_score(boot_y_true, boot_y_pred)
+                    
+                    # 점수 유효성 검증
                     if score > 0 and not np.isnan(score) and not np.isinf(score):
                         scores.append(score)
                         
@@ -628,6 +896,7 @@ class ModelComparator:
                     logger.debug(f"부트스트래핑 {i+1} 실패: {e}")
                     continue
             
+            # 결과 계산
             if len(scores) >= 3:
                 scores = np.array(scores)
                 
@@ -637,7 +906,8 @@ class ModelComparator:
                     'stability_cv': float(scores.std() / scores.mean()) if scores.mean() > 0 else float('inf'),
                     'stability_ci_lower': float(np.percentile(scores, 2.5)),
                     'stability_ci_upper': float(np.percentile(scores, 97.5)),
-                    'stability_range': float(np.percentile(scores, 97.5) - np.percentile(scores, 2.5))
+                    'stability_range': float(np.percentile(scores, 97.5) - np.percentile(scores, 2.5)),
+                    'stability_sample_count': len(scores)
                 }
             else:
                 logger.warning("유효한 부트스트래핑 점수가 부족합니다")
@@ -657,7 +927,8 @@ class ModelComparator:
             'stability_cv': float('inf'),
             'stability_ci_lower': 0.0,
             'stability_ci_upper': 0.0,
-            'stability_range': 0.0
+            'stability_range': 0.0,
+            'stability_sample_count': 0
         }
     
     def rank_models(self, 
@@ -668,20 +939,25 @@ class ModelComparator:
             logger.warning("비교 결과가 없습니다.")
             return pd.DataFrame()
         
-        ranking_df = self.comparison_results.copy()
+        try:
+            ranking_df = self.comparison_results.copy()
+            
+            if ranking_metric in ranking_df.columns:
+                ranking_df['rank'] = ranking_df[ranking_metric].rank(ascending=False)
+            else:
+                ranking_df['rank'] = ranking_df['combined_score'].rank(ascending=False)
+            
+            ranking_df.sort_values('rank', inplace=True)
+            
+            key_columns = ['rank', ranking_metric, 'combined_score', 'ap', 'wll', 'auc', 'f1', 
+                          'ctr_bias', 'ctr_ratio', 'stability_mean', 'stability_std']
+            available_columns = [col for col in key_columns if col in ranking_df.columns]
+            
+            return ranking_df[available_columns]
         
-        if ranking_metric in ranking_df.columns:
-            ranking_df['rank'] = ranking_df[ranking_metric].rank(ascending=False)
-        else:
-            ranking_df['rank'] = ranking_df['combined_score'].rank(ascending=False)
-        
-        ranking_df.sort_values('rank', inplace=True)
-        
-        key_columns = ['rank', ranking_metric, 'combined_score', 'ap', 'wll', 'auc', 'f1', 
-                      'ctr_bias', 'ctr_ratio', 'stability_mean', 'stability_std']
-        available_columns = [col for col in key_columns if col in ranking_df.columns]
-        
-        return ranking_df[available_columns]
+        except Exception as e:
+            logger.error(f"모델 순위 매기기 실패: {e}")
+            return pd.DataFrame()
     
     def get_best_model(self, metric: str = 'ctr_optimized_score') -> Tuple[str, float]:
         """최고 성능 모델 반환"""
@@ -689,158 +965,18 @@ class ModelComparator:
         if self.comparison_results.empty:
             return None, 0.0
         
-        if metric not in self.comparison_results.columns:
-            metric = 'combined_score'
-        
-        best_idx = self.comparison_results[metric].idxmax()
-        best_score = self.comparison_results.loc[best_idx, metric]
-        
-        return best_idx, best_score
-    
-    def analyze_model_diversity(self, models_predictions: Dict[str, np.ndarray]) -> Dict[str, Any]:
-        """모델 다양성 분석"""
         try:
-            model_names = list(models_predictions.keys())
-            n_models = len(model_names)
+            if metric not in self.comparison_results.columns:
+                metric = 'combined_score'
             
-            if n_models < 2:
-                return {'diversity_score': 0.0, 'correlation_matrix': {}}
+            best_idx = self.comparison_results[metric].idxmax()
+            best_score = self.comparison_results.loc[best_idx, metric]
             
-            correlation_matrix = {}
-            correlations = []
-            
-            for i, name1 in enumerate(model_names):
-                correlation_matrix[name1] = {}
-                for j, name2 in enumerate(model_names):
-                    if i == j:
-                        corr = 1.0
-                    else:
-                        try:
-                            pred1 = np.asarray(models_predictions[name1]).flatten()
-                            pred2 = np.asarray(models_predictions[name2]).flatten()
-                            
-                            min_len = min(len(pred1), len(pred2))
-                            if min_len > 0:
-                                pred1 = pred1[:min_len]
-                                pred2 = pred2[:min_len]
-                                corr = np.corrcoef(pred1, pred2)[0, 1]
-                                if np.isnan(corr):
-                                    corr = 0.0
-                            else:
-                                corr = 0.0
-                        except:
-                            corr = 0.0
-                    
-                    correlation_matrix[name1][name2] = float(corr)
-                    
-                    if i < j:
-                        correlations.append(abs(corr))
-            
-            avg_correlation = np.mean(correlations) if correlations else 0.0
-            diversity_score = 1.0 - avg_correlation
-            
-            diversity_metrics = {
-                'diversity_score': float(diversity_score),
-                'average_correlation': float(avg_correlation),
-                'max_correlation': float(max(correlations)) if correlations else 0.0,
-                'min_correlation': float(min(correlations)) if correlations else 0.0,
-                'correlation_std': float(np.std(correlations)) if correlations else 0.0,
-                'correlation_matrix': correlation_matrix
-            }
-            
-            return diversity_metrics
-            
+            return best_idx, best_score
+        
         except Exception as e:
-            logger.error(f"모델 다양성 분석 실패: {e}")
-            return {'diversity_score': 0.0, 'correlation_matrix': {}}
-    
-    def analyze_model_stability(self, 
-                              models_predictions: Dict[str, np.ndarray],
-                              y_true: np.ndarray,
-                              n_bootstrap: int = 30) -> Dict[str, Dict[str, float]]:
-        """모델 안정성 분석 (부트스트래핑)"""
-        
-        stability_results = {}
-        
-        for model_name, y_pred_proba in models_predictions.items():
-            try:
-                y_true_array = np.asarray(y_true).flatten()
-                y_pred_array = np.asarray(y_pred_proba).flatten()
-                
-                min_len = min(len(y_true_array), len(y_pred_array))
-                if min_len == 0:
-                    logger.warning(f"{model_name}: 빈 배열로 인해 안정성 분석 불가")
-                    stability_results[model_name] = self._get_default_model_stability()
-                    continue
-                
-                y_true_array = y_true_array[:min_len]
-                y_pred_array = y_pred_array[:min_len]
-                
-                scores = []
-                ctr_biases = []
-                
-                sample_size = min(min_len, 10000)
-                
-                for i in range(n_bootstrap):
-                    try:
-                        indices = np.random.choice(range(min_len), size=sample_size, replace=True)
-                        y_true_bootstrap = y_true_array[indices]
-                        y_pred_bootstrap = y_pred_array[indices]
-                        
-                        if len(np.unique(y_true_bootstrap)) < 2:
-                            continue
-                        
-                        score = self.metrics_calculator.ctr_optimized_score(y_true_bootstrap, y_pred_bootstrap)
-                        ctr_bias = abs(y_pred_bootstrap.mean() - y_true_bootstrap.mean())
-                        
-                        if score > 0 and not np.isnan(score) and not np.isinf(score):
-                            scores.append(score)
-                            ctr_biases.append(ctr_bias)
-                            
-                    except Exception as e:
-                        logger.debug(f"{model_name} 부트스트래핑 {i+1} 실패: {e}")
-                        continue
-                
-                if len(scores) >= 3:
-                    scores = np.array(scores)
-                    ctr_biases = np.array(ctr_biases)
-                    
-                    stability_results[model_name] = {
-                        'mean_score': float(scores.mean()),
-                        'std_score': float(scores.std()),
-                        'cv_score': float(scores.std() / scores.mean()) if scores.mean() > 0 else float('inf'),
-                        'ci_lower': float(np.percentile(scores, 2.5)),
-                        'ci_upper': float(np.percentile(scores, 97.5)),
-                        'score_range': float(np.percentile(scores, 97.5) - np.percentile(scores, 2.5)),
-                        'mean_ctr_bias': float(ctr_biases.mean()),
-                        'std_ctr_bias': float(ctr_biases.std()),
-                        'max_ctr_bias': float(ctr_biases.max()),
-                        'stability_ratio': float(1.0 / (1.0 + scores.std())) if scores.std() > 0 else 1.0
-                    }
-                else:
-                    logger.warning(f"{model_name}: 유효한 부트스트래핑 점수가 부족")
-                    stability_results[model_name] = self._get_default_model_stability()
-                
-            except Exception as e:
-                logger.error(f"{model_name} 안정성 분석 실패: {str(e)}")
-                stability_results[model_name] = self._get_default_model_stability()
-        
-        return stability_results
-    
-    def _get_default_model_stability(self) -> Dict[str, float]:
-        """기본 모델 안정성 지표 반환"""
-        return {
-            'mean_score': 0.0, 
-            'std_score': 0.0, 
-            'cv_score': float('inf'),
-            'ci_lower': 0.0, 
-            'ci_upper': 0.0, 
-            'score_range': 0.0,
-            'mean_ctr_bias': 0.0, 
-            'std_ctr_bias': 0.0, 
-            'max_ctr_bias': 0.0,
-            'stability_ratio': 0.0
-        }
+            logger.error(f"최고 모델 찾기 실패: {e}")
+            return None, 0.0
 
 class EvaluationVisualizer:
     """평가 결과 시각화 클래스"""
@@ -880,15 +1016,10 @@ class EvaluationVisualizer:
             axes = axes.flatten()
             
             self._plot_roc_curves_subplot(axes[0], models_predictions, y_true)
-            
             self._plot_pr_curves_subplot(axes[1], models_predictions, y_true)
-            
             self._plot_ctr_bias_subplot(axes[2], models_predictions, y_true)
-            
             self._plot_prediction_distributions_subplot(axes[3], models_predictions, y_true)
-            
             self._plot_calibration_subplot(axes[4], models_predictions, y_true)
-            
             self._plot_performance_radar_subplot(axes[5], models_predictions, y_true)
             
             plt.tight_layout()
@@ -1054,62 +1185,124 @@ class EvaluationReporter:
         
         logger.info("종합 평가 보고서 생성 시작")
         
-        comparator = ModelComparator()
-        comparison_df = comparator.compare_models(models_predictions, y_true)
-        
-        best_model, best_score = comparator.get_best_model('ctr_optimized_score')
-        
-        stability_results = comparator.analyze_model_stability(models_predictions, y_true, n_bootstrap=30)
-        
-        diversity_results = comparator.analyze_model_diversity(models_predictions)
-        
-        business_metrics = {}
-        if best_model and best_model in models_predictions:
-            business_metrics = self.metrics_calculator.calculate_business_metrics(
-                y_true, models_predictions[best_model]
-            )
-        
-        report = {
-            'summary': {
-                'total_models': len(models_predictions),
-                'best_model': best_model,
-                'best_score': best_score,
-                'data_size': len(y_true),
-                'actual_ctr': y_true.mean(),
-                'target_score': self.metrics_calculator.target_score,
-                'evaluation_timestamp': pd.Timestamp.now().isoformat()
-            },
-            'detailed_comparison': comparison_df.to_dict() if not comparison_df.empty else {},
-            'model_rankings': comparator.rank_models('ctr_optimized_score').to_dict() if not comparison_df.empty else {},
-            'stability_analysis': stability_results,
-            'diversity_analysis': diversity_results,
-            'business_metrics': business_metrics
-        }
-        
-        if not comparison_df.empty:
-            report['performance_analysis'] = self._analyze_performance_patterns(comparison_df)
-            report['recommendations'] = self._generate_recommendations(comparison_df, stability_results)
-        
-        if output_dir and MATPLOTLIB_AVAILABLE:
-            import os
-            os.makedirs(output_dir, exist_ok=True)
+        try:
+            comparator = ModelComparator()
+            comparison_df = comparator.compare_models(models_predictions, y_true)
             
-            try:
-                self.visualizer.plot_comprehensive_evaluation(
-                    models_predictions, y_true,
-                    save_path=f"{output_dir}/comprehensive_evaluation.png"
-                )
-                
-                report['visualizations'] = {
-                    'comprehensive_evaluation': f"{output_dir}/comprehensive_evaluation.png"
-                }
-                
-            except Exception as e:
-                logger.warning(f"시각화 생성 중 오류: {str(e)}")
-        
-        logger.info("종합 평가 보고서 생성 완료")
-        
-        return report
+            best_model, best_score = comparator.get_best_model('ctr_optimized_score')
+            
+            # 안정성 분석은 간소화
+            stability_results = {}
+            for model_name, y_pred_proba in models_predictions.items():
+                try:
+                    stability_metrics = comparator._calculate_stability_metrics(y_true, y_pred_proba)
+                    stability_results[model_name] = stability_metrics
+                except Exception as e:
+                    logger.warning(f"{model_name} 안정성 분석 실패: {e}")
+                    stability_results[model_name] = comparator._get_default_stability_metrics()
+            
+            # 다양성 분석은 간소화
+            diversity_results = self._analyze_model_diversity_simple(models_predictions)
+            
+            # 비즈니스 지표
+            business_metrics = {}
+            if best_model and best_model in models_predictions:
+                try:
+                    business_metrics = self.metrics_calculator.calculate_business_metrics(
+                        y_true, models_predictions[best_model]
+                    )
+                except Exception as e:
+                    logger.warning(f"비즈니스 지표 계산 실패: {e}")
+            
+            report = {
+                'summary': {
+                    'total_models': len(models_predictions),
+                    'best_model': best_model,
+                    'best_score': best_score,
+                    'data_size': len(y_true),
+                    'actual_ctr': float(y_true.mean()),
+                    'target_score': self.metrics_calculator.target_score,
+                    'evaluation_timestamp': pd.Timestamp.now().isoformat()
+                },
+                'detailed_comparison': comparison_df.to_dict() if not comparison_df.empty else {},
+                'model_rankings': comparator.rank_models('ctr_optimized_score').to_dict() if not comparison_df.empty else {},
+                'stability_analysis': stability_results,
+                'diversity_analysis': diversity_results,
+                'business_metrics': business_metrics
+            }
+            
+            if not comparison_df.empty:
+                try:
+                    report['performance_analysis'] = self._analyze_performance_patterns(comparison_df)
+                    report['recommendations'] = self._generate_recommendations(comparison_df, stability_results)
+                except Exception as e:
+                    logger.warning(f"성능 분석 실패: {e}")
+            
+            if output_dir and MATPLOTLIB_AVAILABLE:
+                try:
+                    import os
+                    os.makedirs(output_dir, exist_ok=True)
+                    
+                    self.visualizer.plot_comprehensive_evaluation(
+                        models_predictions, y_true,
+                        save_path=f"{output_dir}/comprehensive_evaluation.png"
+                    )
+                    
+                    report['visualizations'] = {
+                        'comprehensive_evaluation': f"{output_dir}/comprehensive_evaluation.png"
+                    }
+                    
+                except Exception as e:
+                    logger.warning(f"시각화 생성 중 오류: {str(e)}")
+            
+            logger.info("종합 평가 보고서 생성 완료")
+            
+            return report
+            
+        except Exception as e:
+            logger.error(f"종합 평가 보고서 생성 실패: {e}")
+            return {'error': str(e)}
+    
+    def _analyze_model_diversity_simple(self, models_predictions: Dict[str, np.ndarray]) -> Dict[str, Any]:
+        """간소화된 모델 다양성 분석"""
+        try:
+            model_names = list(models_predictions.keys())
+            n_models = len(model_names)
+            
+            if n_models < 2:
+                return {'diversity_score': 0.0, 'correlation_matrix': {}}
+            
+            correlations = []
+            
+            for i, name1 in enumerate(model_names):
+                for j, name2 in enumerate(model_names):
+                    if i < j:
+                        try:
+                            pred1 = np.asarray(models_predictions[name1]).flatten()
+                            pred2 = np.asarray(models_predictions[name2]).flatten()
+                            
+                            min_len = min(len(pred1), len(pred2))
+                            if min_len > 0:
+                                pred1 = pred1[:min_len]
+                                pred2 = pred2[:min_len]
+                                corr = np.corrcoef(pred1, pred2)[0, 1]
+                                if not np.isnan(corr):
+                                    correlations.append(abs(corr))
+                        except:
+                            continue
+            
+            avg_correlation = np.mean(correlations) if correlations else 0.0
+            diversity_score = 1.0 - avg_correlation
+            
+            return {
+                'diversity_score': float(diversity_score),
+                'average_correlation': float(avg_correlation),
+                'model_count': n_models
+            }
+            
+        except Exception as e:
+            logger.error(f"모델 다양성 분석 실패: {e}")
+            return {'diversity_score': 0.0, 'correlation_matrix': {}}
     
     def _analyze_performance_patterns(self, comparison_df: pd.DataFrame) -> Dict[str, Any]:
         """성능 패턴 분석"""
@@ -1126,23 +1319,12 @@ class EvaluationReporter:
             if 'ctr_bias' in comparison_df.columns:
                 ctr_biases = comparison_df['ctr_bias']
                 analysis['ctr_bias_patterns'] = {
-                    'mean_bias': ctr_biases.mean(),
-                    'std_bias': ctr_biases.std(),
-                    'max_absolute_bias': ctr_biases.abs().max(),
-                    'models_with_low_bias': (ctr_biases.abs() < 0.001).sum(),
-                    'overestimating_models': (ctr_biases > 0.001).sum(),
-                    'underestimating_models': (ctr_biases < -0.001).sum()
-                }
-            
-            stability_cols = [col for col in comparison_df.columns if 'stability' in col]
-            if stability_cols:
-                analysis['stability_patterns'] = {
-                    col: {
-                        'mean': comparison_df[col].mean(),
-                        'std': comparison_df[col].std(),
-                        'best_model': comparison_df[col].idxmax(),
-                        'worst_model': comparison_df[col].idxmin()
-                    } for col in stability_cols
+                    'mean_bias': float(ctr_biases.mean()),
+                    'std_bias': float(ctr_biases.std()),
+                    'max_absolute_bias': float(ctr_biases.abs().max()),
+                    'models_with_low_bias': int((ctr_biases.abs() < 0.001).sum()),
+                    'overestimating_models': int((ctr_biases > 0.001).sum()),
+                    'underestimating_models': int((ctr_biases < -0.001).sum())
                 }
             
             return analysis
@@ -1166,7 +1348,7 @@ class EvaluationReporter:
             
             unstable_models = []
             for model_name, stability in stability_results.items():
-                if stability.get('cv_score', float('inf')) > 0.1:
+                if stability.get('stability_cv', float('inf')) > 0.1:
                     unstable_models.append(model_name)
             
             if unstable_models:

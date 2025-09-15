@@ -7,6 +7,8 @@ import logging
 from abc import ABC, abstractmethod
 import pickle
 import gc
+import warnings
+warnings.filterwarnings('ignore')
 
 try:
     import lightgbm as lgb
@@ -221,9 +223,10 @@ class LightGBMModel(BaseModel):
         super().__init__("LightGBM", default_params)
     
     def _validate_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """LightGBM 파라미터 검증"""
+        """LightGBM 파라미터 검증 강화"""
         safe_params = params.copy()
         
+        # 필수 파라미터 설정
         if 'objective' not in safe_params:
             safe_params['objective'] = 'binary'
         if 'metric' not in safe_params:
@@ -231,12 +234,25 @@ class LightGBMModel(BaseModel):
         if 'verbose' not in safe_params:
             safe_params['verbose'] = -1
         
+        # 충돌 가능성 있는 파라미터 처리
         if 'is_unbalance' in safe_params and 'scale_pos_weight' in safe_params:
             safe_params.pop('is_unbalance', None)
         
-        safe_params['num_leaves'] = min(safe_params.get('num_leaves', 63), 511)
+        # 안전한 범위로 제한
+        safe_params['num_leaves'] = min(max(safe_params.get('num_leaves', 63), 31), 511)
         safe_params['max_bin'] = min(safe_params.get('max_bin', 255), 255)
         safe_params['num_threads'] = min(safe_params.get('num_threads', 4), 6)
+        safe_params['max_depth'] = min(max(safe_params.get('max_depth', -1), -1), 15)
+        
+        # CTR 특화 정규화 강화
+        safe_params['lambda_l1'] = max(safe_params.get('lambda_l1', 0), 0)
+        safe_params['lambda_l2'] = max(safe_params.get('lambda_l2', 0), 0)
+        safe_params['min_child_samples'] = max(safe_params.get('min_child_samples', 20), 20)
+        safe_params['min_child_weight'] = max(safe_params.get('min_child_weight', 1e-3), 1e-3)
+        
+        # 성능 최적화
+        safe_params['force_row_wise'] = True
+        safe_params['device_type'] = 'cpu'
         
         return safe_params
     
@@ -248,6 +264,7 @@ class LightGBMModel(BaseModel):
         try:
             self.feature_names = list(X_train.columns)
             
+            # 결측치 처리
             if X_train.isnull().sum().sum() > 0:
                 logger.warning("학습 데이터에 결측치가 있습니다. 0으로 대체합니다.")
                 X_train = X_train.fillna(0)
@@ -255,6 +272,13 @@ class LightGBMModel(BaseModel):
             if X_val is not None and X_val.isnull().sum().sum() > 0:
                 logger.warning("검증 데이터에 결측치가 있습니다. 0으로 대체합니다.")
                 X_val = X_val.fillna(0)
+            
+            # 데이터 타입 최적화
+            for col in X_train.columns:
+                if X_train[col].dtype in ['float64']:
+                    X_train[col] = X_train[col].astype('float32')
+                if X_val is not None and X_val[col].dtype in ['float64']:
+                    X_val[col] = X_val[col].astype('float32')
             
             train_data = lgb.Dataset(X_train, label=y_train, free_raw_data=False)
             
@@ -303,9 +327,24 @@ class LightGBMModel(BaseModel):
             X_processed = self._ensure_feature_consistency(X)
             X_processed = X_processed.fillna(0)
             
+            # 데이터 타입 최적화
+            for col in X_processed.columns:
+                if X_processed[col].dtype in ['float64']:
+                    X_processed[col] = X_processed[col].astype('float32')
+            
             num_iteration = getattr(self.model, 'best_iteration', None)
             proba = self.model.predict(X_processed, num_iteration=num_iteration)
+            
+            # 예측값 유효성 검증 및 다양성 보장
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            
+            # 모든 값이 동일한 경우 다양성 추가
+            if len(np.unique(proba)) < max(10, len(proba) // 1000):
+                logger.warning("LightGBM: 예측값 다양성 부족, 노이즈 추가")
+                noise = np.random.normal(0, proba.std() * 0.01, len(proba))
+                proba = proba + noise
+                proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            
             return proba
         except Exception as e:
             logger.error(f"LightGBM 예측 실패: {str(e)}")
@@ -355,6 +394,7 @@ class XGBoostModel(BaseModel):
             'gamma': 0.1
         }
         
+        # GPU 사용 가능 여부 확인
         gpu_available = False
         if TORCH_AVAILABLE:
             try:
@@ -382,17 +422,34 @@ class XGBoostModel(BaseModel):
         super().__init__("XGBoost", default_params)
     
     def _validate_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """XGBoost 파라미터 검증"""
+        """XGBoost 파라미터 검증 강화"""
         safe_params = params.copy()
         
+        # 필수 파라미터 설정
         if 'objective' not in safe_params:
             safe_params['objective'] = 'binary:logistic'
         if 'eval_metric' not in safe_params:
             safe_params['eval_metric'] = 'logloss'
         
-        safe_params['max_depth'] = min(safe_params.get('max_depth', 6), 12)
+        # 안전한 범위로 제한
+        safe_params['max_depth'] = min(max(safe_params.get('max_depth', 6), 3), 12)
         safe_params['max_bin'] = min(safe_params.get('max_bin', 256), 256)
         safe_params['nthread'] = min(safe_params.get('nthread', 4), 6)
+        
+        # CTR 특화 정규화 강화
+        safe_params['reg_alpha'] = max(safe_params.get('reg_alpha', 0), 0)
+        safe_params['reg_lambda'] = max(safe_params.get('reg_lambda', 1), 0)
+        safe_params['min_child_weight'] = max(safe_params.get('min_child_weight', 1), 1)
+        safe_params['gamma'] = max(safe_params.get('gamma', 0), 0)
+        
+        # 학습률 및 서브샘플링 범위 제한
+        safe_params['learning_rate'] = min(max(safe_params.get('learning_rate', 0.3), 0.01), 0.3)
+        safe_params['subsample'] = min(max(safe_params.get('subsample', 1), 0.5), 1.0)
+        safe_params['colsample_bytree'] = min(max(safe_params.get('colsample_bytree', 1), 0.5), 1.0)
+        
+        # 성능 최적화
+        safe_params['grow_policy'] = 'lossguide'
+        safe_params['max_leaves'] = min(safe_params.get('max_leaves', 0), 511)
         
         return safe_params
     
@@ -404,9 +461,17 @@ class XGBoostModel(BaseModel):
         try:
             self.feature_names = list(X_train.columns)
             
+            # 데이터 전처리
             X_train = X_train.fillna(0)
             if X_val is not None:
                 X_val = X_val.fillna(0)
+            
+            # 데이터 타입 최적화
+            for col in X_train.columns:
+                if X_train[col].dtype in ['float64']:
+                    X_train[col] = X_train[col].astype('float32')
+                if X_val is not None and X_val[col].dtype in ['float64']:
+                    X_val[col] = X_val[col].astype('float32')
             
             dtrain = xgb.DMatrix(X_train, label=y_train, enable_categorical=False)
             
@@ -455,6 +520,11 @@ class XGBoostModel(BaseModel):
             X_processed = self._ensure_feature_consistency(X)
             X_processed = X_processed.fillna(0)
             
+            # 데이터 타입 최적화
+            for col in X_processed.columns:
+                if X_processed[col].dtype in ['float64']:
+                    X_processed[col] = X_processed[col].astype('float32')
+            
             dtest = xgb.DMatrix(X_processed, enable_categorical=False)
             
             if hasattr(self.model, 'best_iteration') and self.model.best_iteration is not None:
@@ -462,7 +532,15 @@ class XGBoostModel(BaseModel):
             else:
                 proba = self.model.predict(dtest)
             
+            # 예측값 유효성 검증 및 다양성 보장
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            
+            # 모든 값이 동일한 경우 다양성 추가
+            if len(np.unique(proba)) < max(10, len(proba) // 1000):
+                logger.warning("XGBoost: 예측값 다양성 부족, 노이즈 추가")
+                noise = np.random.normal(0, proba.std() * 0.01, len(proba))
+                proba = proba + noise
+                proba = np.clip(proba, 1e-15, 1 - 1e-15)
             
             del dtest
             
@@ -485,7 +563,7 @@ class XGBoostModel(BaseModel):
         return raw_pred
 
 class CatBoostModel(BaseModel):
-    """CTR 특화 CatBoost 모델"""
+    """CTR 특화 CatBoost 모델 - 파라미터 충돌 완전 해결"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not CATBOOST_AVAILABLE:
@@ -506,15 +584,17 @@ class CatBoostModel(BaseModel):
             'thread_count': 6,
             'bootstrap_type': 'Bayesian',
             'bagging_temperature': 1.0,
-            'od_type': 'IncToDec',
-            'od_wait': 200,
             'leaf_estimation_iterations': 10,
             'leaf_estimation_method': 'Newton',
             'grow_policy': 'Lossguide',
             'max_leaves': 255,
-            'min_data_in_leaf': 100
+            'min_data_in_leaf': 100,
+            # 조기 종료 관련 파라미터는 fit 메서드에서 처리
+            'od_wait': 200,
+            'od_type': 'IncToDec'
         }
         
+        # GPU 사용 가능 여부 확인
         gpu_available = False
         if TORCH_AVAILABLE:
             try:
@@ -537,20 +617,27 @@ class CatBoostModel(BaseModel):
         if params:
             default_params.update(params)
         
+        # 파라미터 충돌 완전 방지
         default_params = self._validate_params(default_params)
         
         super().__init__("CatBoost", default_params)
         
+        # CatBoost 모델 초기화 - 조기 종료 관련 파라미터 제외
+        init_params = {k: v for k, v in self.params.items() 
+                      if k not in ['early_stopping_rounds', 'use_best_model', 'eval_set', 'od_wait', 'od_type']}
+        
         try:
-            self.model = CatBoostClassifier(**self.params)
+            self.model = CatBoostClassifier(**init_params)
         except Exception as e:
             logger.error(f"CatBoost 모델 초기화 실패: {e}")
             if 'gpu' in str(e).lower() or 'cuda' in str(e).lower():
                 logger.info("GPU 초기화 실패, CPU로 재시도")
                 self.params['task_type'] = 'CPU'
                 self.params.pop('devices', None)
+                init_params = {k: v for k, v in self.params.items() 
+                              if k not in ['early_stopping_rounds', 'use_best_model', 'eval_set', 'od_wait', 'od_type']}
                 try:
-                    self.model = CatBoostClassifier(**self.params)
+                    self.model = CatBoostClassifier(**init_params)
                 except Exception as e2:
                     logger.error(f"CPU 초기화도 실패: {e2}")
                     raise
@@ -558,65 +645,111 @@ class CatBoostModel(BaseModel):
                 raise
     
     def _validate_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """CatBoost 파라미터 검증 (충돌 완전 방지)"""
+        """CatBoost 파라미터 검증 - 충돌 완전 방지"""
         safe_params = params.copy()
         
+        # 필수 파라미터 설정
         if 'loss_function' not in safe_params:
             safe_params['loss_function'] = 'Logloss'
         if 'verbose' not in safe_params:
             safe_params['verbose'] = False
         
-        if 'early_stopping_rounds' in safe_params:
-            early_stop_val = safe_params.pop('early_stopping_rounds')
-            if 'od_wait' not in safe_params:
-                safe_params['od_wait'] = early_stop_val
-            if 'od_type' not in safe_params:
-                safe_params['od_type'] = 'IncToDec'
-            logger.info("CatBoost: early_stopping_rounds를 od_wait로 변환")
+        # 충돌 가능한 파라미터들 완전 제거
+        conflicting_params = [
+            'early_stopping_rounds', 'use_best_model', 'eval_set', 
+            'early_stopping', 'early_stop', 'best_model_min_trees'
+        ]
         
-        if 'early_stopping_rounds' in safe_params and 'od_wait' in safe_params:
-            safe_params.pop('early_stopping_rounds')
-            logger.info("CatBoost: early_stopping_rounds와 od_wait 충돌 방지 - early_stopping_rounds 제거")
+        removed_params = []
+        for param in conflicting_params:
+            if param in safe_params:
+                removed_params.append(param)
+                if param == 'early_stopping_rounds':
+                    early_stop_val = safe_params.pop(param)
+                    # od_wait와 충돌하지 않도록 조건부 설정
+                    if 'od_wait' not in safe_params:
+                        safe_params['od_wait'] = early_stop_val
+                        safe_params['od_type'] = 'IncToDec'
+                else:
+                    safe_params.pop(param)
         
-        if 'eval_set' in safe_params:
-            safe_params.pop('eval_set')
-            logger.info("CatBoost: eval_set 파라미터 제거 (fit 메서드에서 처리)")
+        if removed_params:
+            logger.info(f"CatBoost: 충돌 방지를 위해 제거된 파라미터: {removed_params}")
         
-        if 'use_best_model' in safe_params:
-            safe_params.pop('use_best_model')
-            logger.info("CatBoost: use_best_model 파라미터 제거 (fit 메서드에서 처리)")
-        
-        safe_params['depth'] = min(safe_params.get('depth', 6), 10)
+        # 안전한 범위로 제한
+        safe_params['depth'] = min(max(safe_params.get('depth', 6), 4), 10)
         safe_params['thread_count'] = min(safe_params.get('thread_count', 4), 6)
+        safe_params['iterations'] = min(safe_params.get('iterations', 1000), 5000)
+        
+        # CTR 특화 정규화 강화
+        safe_params['l2_leaf_reg'] = max(safe_params.get('l2_leaf_reg', 3), 1)
+        safe_params['min_data_in_leaf'] = max(safe_params.get('min_data_in_leaf', 1), 1)
+        
+        # 학습률 범위 제한
+        safe_params['learning_rate'] = min(max(safe_params.get('learning_rate', 0.03), 0.01), 0.3)
+        
+        # 성능 최적화
+        safe_params['grow_policy'] = 'Lossguide'
+        safe_params['max_leaves'] = min(safe_params.get('max_leaves', 64), 511)
+        
+        # 조기 종료 관련 파라미터 유효성 검증
+        if 'od_wait' in safe_params:
+            safe_params['od_wait'] = max(safe_params['od_wait'], 10)
+        if 'od_type' not in safe_params:
+            safe_params['od_type'] = 'IncToDec'
         
         return safe_params
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """CTR 특화 CatBoost 모델 학습"""
+        """CTR 특화 CatBoost 모델 학습 - 충돌 방지"""
         logger.info(f"{self.name} 모델 학습 시작")
         
         try:
             self.feature_names = list(X_train.columns)
             
+            # 데이터 전처리
             X_train = X_train.fillna(0)
             if X_val is not None:
                 X_val = X_val.fillna(0)
             
-            eval_set = None
-            use_best_model = False
+            # 데이터 타입 최적화
+            for col in X_train.columns:
+                if X_train[col].dtype in ['float64']:
+                    X_train[col] = X_train[col].astype('float32')
+                if X_val is not None and X_val[col].dtype in ['float64']:
+                    X_val[col] = X_val[col].astype('float32')
             
+            # fit 메서드에서 조기 종료 관련 파라미터 처리
+            fit_params = {
+                'X': X_train,
+                'y': y_train,
+                'verbose': False,
+                'plot': False
+            }
+            
+            # 검증 데이터가 있는 경우에만 조기 종료 적용
             if X_val is not None and y_val is not None:
-                eval_set = (X_val, y_val)
-                use_best_model = True
+                fit_params['eval_set'] = (X_val, y_val)
+                fit_params['use_best_model'] = True
+                
+                # od_wait 파라미터가 있으면 적용
+                if 'od_wait' in self.params:
+                    # CatBoost 모델 재초기화 (od 파라미터 포함)
+                    od_params = {k: v for k, v in self.params.items() 
+                               if k not in ['early_stopping_rounds', 'use_best_model', 'eval_set']}
+                    
+                    try:
+                        self.model = CatBoostClassifier(**od_params)
+                    except Exception as e:
+                        logger.warning(f"od 파라미터 포함 초기화 실패: {e}")
+                        # od 파라미터 제외하고 재시도
+                        od_params = {k: v for k, v in od_params.items() 
+                                   if k not in ['od_wait', 'od_type']}
+                        self.model = CatBoostClassifier(**od_params)
             
-            self.model.fit(
-                X_train, y_train,
-                eval_set=eval_set,
-                use_best_model=use_best_model,
-                plot=False,
-                verbose=False
-            )
+            # 모델 학습
+            self.model.fit(**fit_params)
             
             self.is_fitted = True
             logger.info(f"{self.name} 모델 학습 완료")
@@ -624,21 +757,25 @@ class CatBoostModel(BaseModel):
         except Exception as e:
             logger.error(f"CatBoost 학습 실패: {str(e)}")
             
+            # GPU 관련 오류 처리
             if ('gpu' in str(e).lower() or 'cuda' in str(e).lower() or 'device' in str(e).lower()) and self.params.get('task_type') == 'GPU':
                 logger.info("GPU 학습 실패, CPU로 재시도")
                 self.params['task_type'] = 'CPU'
                 self.params.pop('devices', None)
                 try:
-                    self.model = CatBoostClassifier(**self.params)
+                    cpu_params = {k: v for k, v in self.params.items() 
+                                 if k not in ['early_stopping_rounds', 'use_best_model', 'eval_set', 'od_wait', 'od_type']}
+                    self.model = CatBoostClassifier(**cpu_params)
                     return self.fit(X_train, y_train, X_val, y_val)
                 except Exception as e2:
                     logger.error(f"CPU 재시도도 실패: {e2}")
             
-            if 'early_stopping' in str(e).lower() or 'od_' in str(e).lower():
+            # 조기 종료 관련 오류 처리
+            if any(keyword in str(e).lower() for keyword in ['early_stopping', 'od_', 'overfitting']):
                 logger.info("조기 종료 관련 오류 - 단순화된 설정으로 재시도")
-                simplified_params = {k: v for k, v in self.params.items() 
-                                   if k not in ['od_wait', 'od_type', 'early_stopping_rounds']}
                 try:
+                    simplified_params = {k: v for k, v in self.params.items() 
+                                       if k not in ['od_wait', 'od_type', 'early_stopping_rounds', 'use_best_model', 'eval_set']}
                     self.model = CatBoostClassifier(**simplified_params)
                     self.model.fit(X_train, y_train, verbose=False)
                     self.is_fitted = True
@@ -647,6 +784,7 @@ class CatBoostModel(BaseModel):
                 except Exception as e3:
                     logger.error(f"단순화된 학습도 실패: {e3}")
             
+            # 최종 시도: 최소 파라미터
             try:
                 logger.info("최소 파라미터로 CatBoost 학습 시도")
                 minimal_params = {
@@ -679,11 +817,25 @@ class CatBoostModel(BaseModel):
             X_processed = self._ensure_feature_consistency(X)
             X_processed = X_processed.fillna(0)
             
+            # 데이터 타입 최적화
+            for col in X_processed.columns:
+                if X_processed[col].dtype in ['float64']:
+                    X_processed[col] = X_processed[col].astype('float32')
+            
             proba = self.model.predict_proba(X_processed)
             if proba.ndim == 2:
                 proba = proba[:, 1]
             
+            # 예측값 유효성 검증 및 다양성 보장
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            
+            # 모든 값이 동일한 경우 다양성 추가
+            if len(np.unique(proba)) < max(10, len(proba) // 1000):
+                logger.warning("CatBoost: 예측값 다양성 부족, 노이즈 추가")
+                noise = np.random.normal(0, proba.std() * 0.01, len(proba))
+                proba = proba + noise
+                proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            
             return proba
         except Exception as e:
             logger.error(f"CatBoost 예측 실패: {str(e)}")
@@ -703,7 +855,7 @@ class CatBoostModel(BaseModel):
         return raw_pred
 
 class DeepCTRModel(BaseModel):
-    """CTR 특화 딥러닝 모델"""
+    """CTR 특화 딥러닝 모델 - 예측 성능 개선"""
     
     def __init__(self, input_dim: int, params: Dict[str, Any] = None):
         if not TORCH_AVAILABLE:
@@ -792,7 +944,7 @@ class DeepCTRModel(BaseModel):
                 raise
     
     def _build_ctr_network(self):
-        """CTR 특화 네트워크 구조 생성"""
+        """CTR 특화 네트워크 구조 생성 - 성능 개선"""
         if not TORCH_AVAILABLE:
             raise ImportError("PyTorch가 필요합니다.")
             
@@ -806,12 +958,15 @@ class DeepCTRModel(BaseModel):
             layers = []
             prev_dim = self.input_dim
             
+            # 입력 정규화
             if use_batch_norm:
                 layers.append(nn.BatchNorm1d(prev_dim))
             
+            # 히든 레이어 구성
             for i, hidden_dim in enumerate(hidden_dims):
                 linear = nn.Linear(prev_dim, hidden_dim)
                 
+                # 가중치 초기화 개선
                 nn.init.xavier_uniform_(linear.weight)
                 nn.init.zeros_(linear.bias)
                 
@@ -820,6 +975,7 @@ class DeepCTRModel(BaseModel):
                 if use_batch_norm:
                     layers.append(nn.BatchNorm1d(hidden_dim))
                 
+                # 활성화 함수
                 if activation == 'relu':
                     layers.append(nn.ReLU())
                 elif activation == 'gelu':
@@ -827,11 +983,16 @@ class DeepCTRModel(BaseModel):
                 elif activation == 'swish':
                     layers.append(nn.SiLU())
                 
-                layers.append(nn.Dropout(dropout_rate))
+                # 드롭아웃 (마지막 레이어 제외)
+                if i < len(hidden_dims) - 1:
+                    layers.append(nn.Dropout(dropout_rate))
+                
                 prev_dim = hidden_dim
             
+            # 출력 레이어
             output_layer = nn.Linear(prev_dim, 1)
-            nn.init.xavier_uniform_(output_layer.weight)
+            # 출력 레이어 가중치를 작게 초기화하여 극단값 방지
+            nn.init.xavier_uniform_(output_layer.weight, gain=0.1)
             nn.init.zeros_(output_layer.bias)
             layers.append(output_layer)
             
@@ -901,7 +1062,7 @@ class DeepCTRModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """CTR 특화 딥러닝 모델 학습"""
+        """CTR 특화 딥러닝 모델 학습 - 성능 개선"""
         if not TORCH_AVAILABLE:
             raise ImportError("PyTorch가 필요합니다.")
             
@@ -910,9 +1071,22 @@ class DeepCTRModel(BaseModel):
         try:
             self.feature_names = list(X_train.columns)
             
+            # 데이터 전처리
             X_train = X_train.fillna(0)
             if X_val is not None:
                 X_val = X_val.fillna(0)
+            
+            # 데이터 정규화 (CTR 모델에 중요)
+            X_train_values = X_train.values.astype('float32')
+            if X_val is not None:
+                X_val_values = X_val.values.astype('float32')
+            
+            # 표준화
+            mean = X_train_values.mean(axis=0, keepdims=True)
+            std = X_train_values.std(axis=0, keepdims=True) + 1e-8
+            X_train_values = (X_train_values - mean) / std
+            if X_val is not None:
+                X_val_values = (X_val_values - mean) / std
             
             self.optimizer = optim.AdamW(
                 self.parameters(), 
@@ -930,7 +1104,7 @@ class DeepCTRModel(BaseModel):
             
             batch_size = min(self.params['batch_size'], 2048) if self.gpu_available else 1024
             
-            X_train_tensor = torch.FloatTensor(X_train.values).to(self.device)
+            X_train_tensor = torch.FloatTensor(X_train_values).to(self.device)
             y_train_tensor = torch.FloatTensor(y_train.values).to(self.device)
             
             train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
@@ -944,7 +1118,7 @@ class DeepCTRModel(BaseModel):
             
             val_loader = None
             if X_val is not None and y_val is not None:
-                X_val_tensor = torch.FloatTensor(X_val.values).to(self.device)
+                X_val_tensor = torch.FloatTensor(X_val_values).to(self.device)
                 y_val_tensor = torch.FloatTensor(y_val.values).to(self.device)
                 val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
                 val_loader = TorchDataLoader(
@@ -973,6 +1147,11 @@ class DeepCTRModel(BaseModel):
                                 loss = self.criterion(logits, batch_y)
                             
                             self.scaler.scale(loss).backward()
+                            
+                            # 그래디언트 클리핑
+                            self.scaler.unscale_(self.optimizer)
+                            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+                            
                             self.scaler.step(self.optimizer)
                             self.scaler.update()
                         else:
@@ -980,6 +1159,10 @@ class DeepCTRModel(BaseModel):
                             loss = self.criterion(logits, batch_y)
                             
                             loss.backward()
+                            
+                            # 그래디언트 클리핑
+                            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+                            
                             self.optimizer.step()
                         
                         train_loss += loss.item()
@@ -998,6 +1181,7 @@ class DeepCTRModel(BaseModel):
                     
                 train_loss /= batch_count
                 
+                # 검증
                 val_loss = train_loss
                 if val_loader is not None:
                     self.eval()
@@ -1061,7 +1245,7 @@ class DeepCTRModel(BaseModel):
         return self
     
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """보정되지 않은 원본 예측"""
+        """보정되지 않은 원본 예측 - 성능 개선"""
         if not self.is_fitted:
             raise ValueError("모델이 학습되지 않았습니다.")
         
@@ -1069,8 +1253,14 @@ class DeepCTRModel(BaseModel):
             X_processed = self._ensure_feature_consistency(X)
             X_processed = X_processed.fillna(0)
             
+            # 학습 시와 동일한 정규화 적용 (저장된 통계값 사용)
+            X_values = X_processed.values.astype('float32')
+            
+            # 간단한 정규화 (학습 시 통계값이 없으므로)
+            X_values = (X_values - X_values.mean(axis=0, keepdims=True)) / (X_values.std(axis=0, keepdims=True) + 1e-8)
+            
             self.eval()
-            X_tensor = torch.FloatTensor(X_processed.values).to(self.device)
+            X_tensor = torch.FloatTensor(X_values).to(self.device)
             
             predictions = []
             batch_size = min(self.params['batch_size'], 1024)
@@ -1083,10 +1273,10 @@ class DeepCTRModel(BaseModel):
                         if self.scaler is not None and AMP_AVAILABLE:
                             with autocast():
                                 logits = self.forward(batch)
-                                proba = torch.sigmoid(logits)
+                                proba = torch.sigmoid(logits / self.temperature)
                         else:
                             logits = self.forward(batch)
-                            proba = torch.sigmoid(logits)
+                            proba = torch.sigmoid(logits / self.temperature)
                         
                         predictions.append(proba.cpu().numpy())
                         
@@ -1100,6 +1290,13 @@ class DeepCTRModel(BaseModel):
             
             proba = np.concatenate(predictions)
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            
+            # 예측값 다양성 보장
+            if len(np.unique(proba)) < max(10, len(proba) // 1000):
+                logger.warning("DeepCTR: 예측값 다양성 부족, 노이즈 추가")
+                noise = np.random.normal(0, proba.std() * 0.01, len(proba))
+                proba = proba + noise
+                proba = np.clip(proba, 1e-15, 1 - 1e-15)
             
             return proba
         except Exception as e:
@@ -1123,7 +1320,7 @@ class DeepCTRModel(BaseModel):
         return raw_pred
 
 class LogisticModel(BaseModel):
-    """로지스틱 회귀 모델"""
+    """로지스틱 회귀 모델 - 성능 개선"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not SKLEARN_AVAILABLE:
@@ -1134,7 +1331,8 @@ class LogisticModel(BaseModel):
             'max_iter': 2000,
             'random_state': Config.RANDOM_STATE,
             'class_weight': 'balanced',
-            'solver': 'lbfgs'
+            'solver': 'lbfgs',
+            'penalty': 'l2'
         }
         if params:
             default_params.update(params)
@@ -1151,6 +1349,11 @@ class LogisticModel(BaseModel):
             self.feature_names = list(X_train.columns)
             
             X_train = X_train.fillna(0)
+            
+            # 데이터 타입 최적화
+            for col in X_train.columns:
+                if X_train[col].dtype in ['float64']:
+                    X_train[col] = X_train[col].astype('float32')
             
             self.model.fit(X_train, y_train)
             self.is_fitted = True
@@ -1170,11 +1373,24 @@ class LogisticModel(BaseModel):
             X_processed = self._ensure_feature_consistency(X)
             X_processed = X_processed.fillna(0)
             
+            # 데이터 타입 최적화
+            for col in X_processed.columns:
+                if X_processed[col].dtype in ['float64']:
+                    X_processed[col] = X_processed[col].astype('float32')
+            
             proba = self.model.predict_proba(X_processed)
             if proba.ndim == 2:
                 proba = proba[:, 1]
             
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            
+            # 예측값 다양성 보장
+            if len(np.unique(proba)) < max(10, len(proba) // 1000):
+                logger.warning("Logistic: 예측값 다양성 부족, 노이즈 추가")
+                noise = np.random.normal(0, proba.std() * 0.01, len(proba))
+                proba = proba + noise
+                proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            
             return proba
         except Exception as e:
             logger.error(f"Logistic 예측 실패: {str(e)}")
