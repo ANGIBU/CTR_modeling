@@ -184,7 +184,6 @@ class LightGBMModel(BaseModel):
         if not LIGHTGBM_AVAILABLE:
             raise ImportError("LightGBM이 설치되지 않았습니다.")
             
-        # CTR 특화 기본 파라미터
         default_params = {
             'objective': 'binary',
             'metric': 'binary_logloss',
@@ -272,7 +271,6 @@ class LightGBMModel(BaseModel):
             if early_stopping:
                 callbacks.append(lgb.early_stopping(early_stopping, verbose=False))
             
-            # CTR 특화 학습
             self.model = lgb.train(
                 self.params,
                 train_data,
@@ -333,7 +331,6 @@ class XGBoostModel(BaseModel):
         if not XGBOOST_AVAILABLE:
             raise ImportError("XGBoost가 설치되지 않았습니다.")
         
-        # CTR 특화 기본 파라미터
         default_params = {
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
@@ -358,7 +355,6 @@ class XGBoostModel(BaseModel):
             'gamma': 0.1
         }
         
-        # GPU 사용 가능성 재확인
         gpu_available = False
         if TORCH_AVAILABLE:
             try:
@@ -495,7 +491,6 @@ class CatBoostModel(BaseModel):
         if not CATBOOST_AVAILABLE:
             raise ImportError("CatBoost가 설치되지 않았습니다.")
         
-        # CTR 특화 기본 파라미터 (충돌 방지)
         default_params = {
             'loss_function': 'Logloss',
             'eval_metric': 'Logloss',
@@ -512,7 +507,7 @@ class CatBoostModel(BaseModel):
             'bootstrap_type': 'Bayesian',
             'bagging_temperature': 1.0,
             'od_type': 'IncToDec',
-            'od_wait': 200,  # early_stopping_rounds 대신 od_wait 사용
+            'od_wait': 200,
             'leaf_estimation_iterations': 10,
             'leaf_estimation_method': 'Newton',
             'grow_policy': 'Lossguide',
@@ -520,7 +515,6 @@ class CatBoostModel(BaseModel):
             'min_data_in_leaf': 100
         }
         
-        # GPU 사용 가능성 재확인
         gpu_available = False
         if TORCH_AVAILABLE:
             try:
@@ -555,12 +549,16 @@ class CatBoostModel(BaseModel):
                 logger.info("GPU 초기화 실패, CPU로 재시도")
                 self.params['task_type'] = 'CPU'
                 self.params.pop('devices', None)
-                self.model = CatBoostClassifier(**self.params)
+                try:
+                    self.model = CatBoostClassifier(**self.params)
+                except Exception as e2:
+                    logger.error(f"CPU 초기화도 실패: {e2}")
+                    raise
             else:
                 raise
     
     def _validate_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """CatBoost 파라미터 검증 (충돌 방지)"""
+        """CatBoost 파라미터 검증 (충돌 완전 방지)"""
         safe_params = params.copy()
         
         if 'loss_function' not in safe_params:
@@ -568,16 +566,25 @@ class CatBoostModel(BaseModel):
         if 'verbose' not in safe_params:
             safe_params['verbose'] = False
         
-        # early_stopping_rounds와 od_wait 충돌 방지
-        if 'early_stopping_rounds' in safe_params and 'od_wait' in safe_params:
-            logger.warning("CatBoost: early_stopping_rounds와 od_wait 동시 설정 방지. od_wait 사용")
-            safe_params.pop('early_stopping_rounds', None)
+        if 'early_stopping_rounds' in safe_params:
+            early_stop_val = safe_params.pop('early_stopping_rounds')
+            if 'od_wait' not in safe_params:
+                safe_params['od_wait'] = early_stop_val
+            if 'od_type' not in safe_params:
+                safe_params['od_type'] = 'IncToDec'
+            logger.info("CatBoost: early_stopping_rounds를 od_wait로 변환")
         
-        # early_stopping_rounds만 있는 경우 od_wait로 변경
-        if 'early_stopping_rounds' in safe_params and 'od_wait' not in safe_params:
-            early_stop_value = safe_params.pop('early_stopping_rounds')
-            safe_params['od_wait'] = early_stop_value
-            safe_params['od_type'] = 'IncToDec'
+        if 'early_stopping_rounds' in safe_params and 'od_wait' in safe_params:
+            safe_params.pop('early_stopping_rounds')
+            logger.info("CatBoost: early_stopping_rounds와 od_wait 충돌 방지 - early_stopping_rounds 제거")
+        
+        if 'eval_set' in safe_params:
+            safe_params.pop('eval_set')
+            logger.info("CatBoost: eval_set 파라미터 제거 (fit 메서드에서 처리)")
+        
+        if 'use_best_model' in safe_params:
+            safe_params.pop('use_best_model')
+            logger.info("CatBoost: use_best_model 파라미터 제거 (fit 메서드에서 처리)")
         
         safe_params['depth'] = min(safe_params.get('depth', 6), 10)
         safe_params['thread_count'] = min(safe_params.get('thread_count', 4), 6)
@@ -597,13 +604,16 @@ class CatBoostModel(BaseModel):
                 X_val = X_val.fillna(0)
             
             eval_set = None
+            use_best_model = False
+            
             if X_val is not None and y_val is not None:
                 eval_set = (X_val, y_val)
+                use_best_model = True
             
             self.model.fit(
                 X_train, y_train,
                 eval_set=eval_set,
-                use_best_model=True if eval_set is not None else False,
+                use_best_model=use_best_model,
                 plot=False,
                 verbose=False
             )
@@ -614,16 +624,32 @@ class CatBoostModel(BaseModel):
         except Exception as e:
             logger.error(f"CatBoost 학습 실패: {str(e)}")
             
-            if ('gpu' in str(e).lower() or 'cuda' in str(e).lower()) and self.params.get('task_type') == 'GPU':
+            if ('gpu' in str(e).lower() or 'cuda' in str(e).lower() or 'device' in str(e).lower()) and self.params.get('task_type') == 'GPU':
                 logger.info("GPU 학습 실패, CPU로 재시도")
                 self.params['task_type'] = 'CPU'
                 self.params.pop('devices', None)
-                self.model = CatBoostClassifier(**self.params)
-                return self.fit(X_train, y_train, X_val, y_val)
+                try:
+                    self.model = CatBoostClassifier(**self.params)
+                    return self.fit(X_train, y_train, X_val, y_val)
+                except Exception as e2:
+                    logger.error(f"CPU 재시도도 실패: {e2}")
+            
+            if 'early_stopping' in str(e).lower() or 'od_' in str(e).lower():
+                logger.info("조기 종료 관련 오류 - 단순화된 설정으로 재시도")
+                simplified_params = {k: v for k, v in self.params.items() 
+                                   if k not in ['od_wait', 'od_type', 'early_stopping_rounds']}
+                try:
+                    self.model = CatBoostClassifier(**simplified_params)
+                    self.model.fit(X_train, y_train, verbose=False)
+                    self.is_fitted = True
+                    logger.info("단순화된 CatBoost 학습 완료")
+                    return self
+                except Exception as e3:
+                    logger.error(f"단순화된 학습도 실패: {e3}")
             
             try:
-                logger.info("단순화된 CatBoost 학습 시도")
-                simplified_params = {
+                logger.info("최소 파라미터로 CatBoost 학습 시도")
+                minimal_params = {
                     'loss_function': 'Logloss',
                     'task_type': 'CPU',
                     'depth': 6,
@@ -632,12 +658,12 @@ class CatBoostModel(BaseModel):
                     'verbose': False,
                     'random_seed': self.params.get('random_seed', 42)
                 }
-                self.model = CatBoostClassifier(**simplified_params)
+                self.model = CatBoostClassifier(**minimal_params)
                 self.model.fit(X_train, y_train, verbose=False)
                 self.is_fitted = True
-                logger.info("단순화된 CatBoost 학습 완료")
-            except Exception as e2:
-                logger.error(f"단순화된 CatBoost 학습도 실패: {str(e2)}")
+                logger.info("최소 파라미터 CatBoost 학습 완료")
+            except Exception as e4:
+                logger.error(f"최소 파라미터 학습도 실패: {str(e4)}")
                 raise
         
         gc.collect()
@@ -685,7 +711,6 @@ class DeepCTRModel(BaseModel):
             
         BaseModel.__init__(self, "DeepCTR", params)
         
-        # CTR 특화 기본 파라미터
         default_params = {
             'hidden_dims': [512, 256, 128, 64],
             'dropout_rate': 0.3,
@@ -781,15 +806,12 @@ class DeepCTRModel(BaseModel):
             layers = []
             prev_dim = self.input_dim
             
-            # 입력층 정규화
             if use_batch_norm:
                 layers.append(nn.BatchNorm1d(prev_dim))
             
-            # 은닉층
             for i, hidden_dim in enumerate(hidden_dims):
                 linear = nn.Linear(prev_dim, hidden_dim)
                 
-                # Xavier 초기화
                 nn.init.xavier_uniform_(linear.weight)
                 nn.init.zeros_(linear.bias)
                 
@@ -808,7 +830,6 @@ class DeepCTRModel(BaseModel):
                 layers.append(nn.Dropout(dropout_rate))
                 prev_dim = hidden_dim
             
-            # 출력층
             output_layer = nn.Linear(prev_dim, 1)
             nn.init.xavier_uniform_(output_layer.weight)
             nn.init.zeros_(output_layer.bias)
@@ -893,14 +914,12 @@ class DeepCTRModel(BaseModel):
             if X_val is not None:
                 X_val = X_val.fillna(0)
             
-            # 옵티마이저 초기화
             self.optimizer = optim.AdamW(
                 self.parameters(), 
                 lr=self.params['learning_rate'],
                 weight_decay=self.params.get('weight_decay', 1e-5)
             )
             
-            # 스케줄러 설정
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(
                 self.optimizer, 
                 mode='min', 
@@ -909,7 +928,6 @@ class DeepCTRModel(BaseModel):
                 min_lr=1e-6
             )
             
-            # 배치 크기 조정
             batch_size = min(self.params['batch_size'], 2048) if self.gpu_available else 1024
             
             X_train_tensor = torch.FloatTensor(X_train.values).to(self.device)
@@ -936,7 +954,6 @@ class DeepCTRModel(BaseModel):
                     pin_memory=False
                 )
             
-            # 학습 루프
             best_val_loss = float('inf')
             patience_counter = 0
             max_epochs = min(self.params['epochs'], 50)

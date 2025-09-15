@@ -207,14 +207,12 @@ class CTRModelTrainer:
                 fixed_params.setdefault('metric', 'binary_logloss')
                 fixed_params.setdefault('verbose', -1)
                 
-                # CTR 특화 파라미터 조정
                 fixed_params['num_leaves'] = min(fixed_params.get('num_leaves', 255), 511)
                 fixed_params['max_bin'] = min(fixed_params.get('max_bin', 255), 255)
                 fixed_params['num_threads'] = min(fixed_params.get('num_threads', 6), 6)
                 fixed_params['force_row_wise'] = True
                 fixed_params['scale_pos_weight'] = fixed_params.get('scale_pos_weight', 49.0)
                 
-                # CTR 특화 정규화
                 fixed_params['lambda_l1'] = max(fixed_params.get('lambda_l1', 2.0), 1.0)
                 fixed_params['lambda_l2'] = max(fixed_params.get('lambda_l2', 2.0), 1.0)
                 fixed_params['min_child_samples'] = max(fixed_params.get('min_child_samples', 200), 100)
@@ -230,18 +228,15 @@ class CTRModelTrainer:
                     fixed_params['tree_method'] = 'hist'
                     fixed_params.pop('gpu_id', None)
                 
-                # CTR 특화 파라미터 조정
                 fixed_params['max_depth'] = min(fixed_params.get('max_depth', 8), 12)
                 fixed_params['max_bin'] = min(fixed_params.get('max_bin', 255), 255)
                 fixed_params['nthread'] = min(fixed_params.get('nthread', 6), 6)
                 fixed_params['scale_pos_weight'] = fixed_params.get('scale_pos_weight', 49.0)
                 
-                # CTR 특화 정규화
                 fixed_params['reg_alpha'] = max(fixed_params.get('reg_alpha', 2.0), 1.0)
                 fixed_params['reg_lambda'] = max(fixed_params.get('reg_lambda', 2.0), 1.0)
                 fixed_params['min_child_weight'] = max(fixed_params.get('min_child_weight', 15), 10)
                 
-                # CTR 특화 구조 파라미터
                 fixed_params['grow_policy'] = 'lossguide'
                 fixed_params['max_leaves'] = min(fixed_params.get('max_leaves', 255), 511)
                 
@@ -256,7 +251,6 @@ class CTRModelTrainer:
                     fixed_params['task_type'] = 'CPU'
                     fixed_params.pop('devices', None)
                 
-                # CatBoost 특화: early_stopping_rounds와 od_wait 충돌 해결
                 if 'early_stopping_rounds' in fixed_params:
                     early_stop_val = fixed_params.pop('early_stopping_rounds')
                     if 'od_wait' not in fixed_params:
@@ -264,28 +258,23 @@ class CTRModelTrainer:
                         fixed_params['od_type'] = 'IncToDec'
                     logger.info("CatBoost: early_stopping_rounds를 od_wait로 변경")
                 
-                # CTR 특화 파라미터 조정
                 fixed_params['depth'] = min(fixed_params.get('depth', 8), 10)
                 fixed_params['thread_count'] = min(fixed_params.get('thread_count', 6), 6)
                 fixed_params['auto_class_weights'] = 'Balanced'
                 
-                # CTR 특화 정규화
                 fixed_params['l2_leaf_reg'] = max(fixed_params.get('l2_leaf_reg', 10), 5)
                 fixed_params['min_data_in_leaf'] = max(fixed_params.get('min_data_in_leaf', 100), 50)
                 
-                # CTR 특화 구조 파라미터
                 fixed_params['grow_policy'] = 'Lossguide'
                 fixed_params['max_leaves'] = min(fixed_params.get('max_leaves', 255), 511)
                 
             elif model_type.lower() == 'deepctr':
-                # CTR 특화 신경망 파라미터
                 fixed_params['hidden_dims'] = fixed_params.get('hidden_dims', [512, 256, 128, 64])
                 fixed_params['batch_size'] = min(fixed_params.get('batch_size', 1024), 2048)
                 fixed_params['epochs'] = min(fixed_params.get('epochs', 50), 80)
                 fixed_params['dropout_rate'] = min(max(fixed_params.get('dropout_rate', 0.3), 0.1), 0.5)
                 fixed_params['learning_rate'] = min(max(fixed_params.get('learning_rate', 0.001), 0.0001), 0.01)
                 
-                # CTR 특화 정규화
                 fixed_params['weight_decay'] = max(fixed_params.get('weight_decay', 1e-5), 1e-6)
                 fixed_params['use_batch_norm'] = fixed_params.get('use_batch_norm', True)
                 
@@ -412,7 +401,6 @@ class CTRModelTrainer:
                     wll_score = metrics_calculator.weighted_log_loss(y_val_fold, y_pred_proba)
                     combined_score = metrics_calculator.combined_score(y_val_fold, y_pred_proba)
                     
-                    # CTR 편향 점수 추가
                     actual_ctr = y_val_fold.mean()
                     predicted_ctr = y_pred_proba.mean()
                     ctr_bias = abs(predicted_ctr - actual_ctr)
@@ -631,11 +619,9 @@ class CTRModelTrainer:
                 
                 cv_result = self.cross_validate_ctr_model(model_type, X, y, cv_folds, params)
                 
-                # CTR 특화 점수 계산 (Combined Score + CTR 편향 고려)
                 combined_score = cv_result['combined_mean']
                 ctr_bias_score = cv_result.get('ctr_bias_mean', 0.0)
                 
-                # 가중 점수 (Combined Score 70% + CTR 편향 30%)
                 final_score = 0.7 * combined_score + 0.3 * ctr_bias_score
                 
                 MemoryTracker.force_cleanup()
@@ -1008,7 +994,6 @@ class CTRModelTrainer:
         
         return summary
 
-# 기존 클래스명 유지
 ModelTrainer = CTRModelTrainer
 
 class TrainingPipeline:
@@ -1050,7 +1035,6 @@ class TrainingPipeline:
                 else:
                     n_trials = 10
             
-            # 1. CTR 특화 하이퍼파라미터 튜닝
             if tune_hyperparameters and OPTUNA_AVAILABLE:
                 logger.info("CTR 하이퍼파라미터 튜닝 단계")
                 for model_type in model_types:
@@ -1073,7 +1057,6 @@ class TrainingPipeline:
             else:
                 logger.info("CTR 하이퍼파라미터 튜닝 생략")
             
-            # 2. CTR 교차검증 평가
             logger.info("CTR 교차검증 평가 단계")
             for model_type in model_types:
                 try:
@@ -1093,7 +1076,6 @@ class TrainingPipeline:
                     logger.error(f"{model_type} CTR 교차검증 실패: {str(e)}")
                     MemoryTracker.force_cleanup()
             
-            # 3. CTR 최종 모델 학습
             logger.info("CTR 최종 모델 학습 단계")
             logger.info(f"학습 전 메모리 상태: {self.memory_tracker.get_available_memory():.2f}GB")
             
@@ -1101,13 +1083,11 @@ class TrainingPipeline:
             
             logger.info(f"학습 후 메모리 상태: {self.memory_tracker.get_available_memory():.2f}GB")
             
-            # 4. CTR 모델 저장
             try:
                 self.trainer.save_models()
             except Exception as e:
                 logger.warning(f"CTR 모델 저장 실패: {str(e)}")
             
-            # 5. CTR 결과 요약
             pipeline_time = time.time() - pipeline_start_time
             summary = self.trainer.get_training_summary()
             summary['total_pipeline_time'] = pipeline_time

@@ -10,7 +10,6 @@ from sklearn.metrics import (
     classification_report, brier_score_loss
 )
 
-# matplotlib import 처리
 try:
     import matplotlib.pyplot as plt
     import seaborn as sns
@@ -19,7 +18,6 @@ except ImportError:
     MATPLOTLIB_AVAILABLE = False
     logging.warning("matplotlib이 설치되지 않았습니다. 시각화 기능이 비활성화됩니다.")
 
-# scipy import 처리
 try:
     from scipy import stats
     from scipy.optimize import minimize_scalar
@@ -63,17 +61,13 @@ class CTRMetrics:
     def weighted_log_loss(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
         """실제 CTR 분포를 반영한 Weighted Log Loss"""
         try:
-            # 클래스 가중치 설정
             pos_weight = self.pos_weight
             neg_weight = self.neg_weight
             
-            # 각 샘플별 가중치 적용
             sample_weights = np.where(y_true == 1, pos_weight, neg_weight)
             
-            # 확률 클리핑으로 수치 안정성 확보
             y_pred_proba_clipped = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
             
-            # 가중 로그 손실 직접 계산
             log_loss_values = -(y_true * np.log(y_pred_proba_clipped) + 
                               (1 - y_true) * np.log(1 - y_pred_proba_clipped))
             
@@ -91,21 +85,16 @@ class CTRMetrics:
             ap_score = self.average_precision(y_true, y_pred_proba)
             wll_score = self.weighted_log_loss(y_true, y_pred_proba)
             
-            # WLL을 0-1 스케일로 변환
             wll_normalized = 1 / (1 + wll_score) if wll_score != float('inf') else 0.0
             
-            # 기본 Combined Score
             basic_combined = self.ap_weight * ap_score + self.wll_weight * wll_normalized
             
-            # CTR 편향 패널티 계산
             predicted_ctr = y_pred_proba.mean()
             actual_ctr = y_true.mean()
             ctr_bias = abs(predicted_ctr - actual_ctr)
             
-            # CTR 편향에 따른 패널티 (가우시안 형태)
             ctr_penalty = np.exp(-(ctr_bias / self.ctr_tolerance) ** 2)
             
-            # 최종 점수 (CTR 편향 고려)
             final_score = basic_combined * (1.0 + 0.1 * ctr_penalty)
             
             return final_score
@@ -117,27 +106,21 @@ class CTRMetrics:
     def ctr_optimized_score(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
         """CTR 예측에 최적화된 종합 점수"""
         try:
-            # 기본 성능 지표
             ap_score = self.average_precision(y_true, y_pred_proba)
             wll_score = self.weighted_log_loss(y_true, y_pred_proba)
             wll_normalized = 1 / (1 + wll_score) if wll_score != float('inf') else 0.0
             
-            # CTR 관련 지표
             predicted_ctr = y_pred_proba.mean()
             actual_ctr = y_true.mean()
             ctr_bias = abs(predicted_ctr - actual_ctr)
             ctr_ratio = predicted_ctr / actual_ctr if actual_ctr > 0 else 1.0
             
-            # Calibration 품질
             calibration_score = self._calculate_calibration_quality(y_true, y_pred_proba)
             
-            # 분포 매칭 점수
             distribution_score = self._calculate_distribution_matching(y_true, y_pred_proba)
             
-            # 클릭률 정확도 점수 (CTR 편향 기반)
             ctr_accuracy = np.exp(-ctr_bias * 100) if ctr_bias < 0.1 else 0.0
             
-            # 가중 합산
             weights = {
                 'ap': 0.35,
                 'wll': 0.25,
@@ -163,7 +146,6 @@ class CTRMetrics:
     def _calculate_calibration_quality(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
         """모델 보정 품질 계산"""
         try:
-            # ECE (Expected Calibration Error) 계산
             n_bins = 10
             bin_boundaries = np.linspace(0, 1, n_bins + 1)
             bin_lowers = bin_boundaries[:-1]
@@ -182,7 +164,6 @@ class CTRMetrics:
                     
                     ece += np.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
             
-            # ECE를 0-1 점수로 변환 (낮은 ECE = 높은 점수)
             calibration_score = max(0.0, 1.0 - ece * 5)
             
             return calibration_score
@@ -194,20 +175,16 @@ class CTRMetrics:
     def _calculate_distribution_matching(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
         """예측 분포와 실제 분포 매칭 점수"""
         try:
-            # 분위수 기반 분포 비교
             actual_percentiles = np.percentile(y_true, [10, 25, 50, 75, 90])
             pred_percentiles = np.percentile(y_pred_proba, [10, 25, 50, 75, 90])
             
-            # KL divergence 또는 Wasserstein distance 대신 단순 차이 사용
             percentile_diff = np.mean(np.abs(actual_percentiles - pred_percentiles))
             distribution_score = np.exp(-percentile_diff * 10)
             
-            # 추가: 분산 비교
             actual_std = np.std(y_true)
             pred_std = np.std(y_pred_proba)
             std_ratio = min(actual_std, pred_std) / max(actual_std, pred_std) if max(actual_std, pred_std) > 0 else 1.0
             
-            # 최종 분포 매칭 점수
             final_score = 0.7 * distribution_score + 0.3 * std_ratio
             
             return final_score
@@ -222,19 +199,16 @@ class CTRMetrics:
                                threshold: float = 0.5) -> Dict[str, float]:
         """종합적인 평가 지표 계산"""
         
-        # 이진 예측
         y_pred = (y_pred_proba >= threshold).astype(int)
         
         metrics = {}
         
         try:
-            # 대회 평가 지표
             metrics['ap'] = self.average_precision(y_true, y_pred_proba)
             metrics['wll'] = self.weighted_log_loss(y_true, y_pred_proba)
             metrics['combined_score'] = self.combined_score(y_true, y_pred_proba)
             metrics['ctr_optimized_score'] = self.ctr_optimized_score(y_true, y_pred_proba)
             
-            # 기본 분류 지표
             try:
                 metrics['auc'] = roc_auc_score(y_true, y_pred_proba)
                 metrics['log_loss'] = log_loss(y_true, y_pred_proba)
@@ -244,7 +218,6 @@ class CTRMetrics:
                 metrics['log_loss'] = 1.0
                 metrics['brier_score'] = 0.25
             
-            # 혼동 행렬 기반 지표
             try:
                 tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
                 
@@ -254,13 +227,11 @@ class CTRMetrics:
                 metrics['specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0.0
                 metrics['sensitivity'] = metrics['recall']
                 
-                # F1 Score
                 if metrics['precision'] + metrics['recall'] > 0:
                     metrics['f1'] = 2 * (metrics['precision'] * metrics['recall']) / (metrics['precision'] + metrics['recall'])
                 else:
                     metrics['f1'] = 0.0
                 
-                # Matthews Correlation Coefficient
                 denominator = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
                 if denominator != 0:
                     metrics['mcc'] = (tp * tn - fp * fn) / denominator
@@ -274,23 +245,19 @@ class CTRMetrics:
                     'specificity': 0.0, 'sensitivity': 0.0, 'f1': 0.0, 'mcc': 0.0
                 })
             
-            # CTR 관련 지표
             metrics['ctr_actual'] = y_true.mean()
             metrics['ctr_predicted'] = y_pred_proba.mean()
             metrics['ctr_bias'] = metrics['ctr_predicted'] - metrics['ctr_actual']
             metrics['ctr_ratio'] = metrics['ctr_predicted'] / max(metrics['ctr_actual'], 1e-10)
             metrics['ctr_absolute_error'] = abs(metrics['ctr_bias'])
             
-            # CTR 범위별 성능
             self._add_ctr_range_metrics(metrics, y_true, y_pred_proba)
             
-            # 분포 관련 지표
             metrics['prediction_std'] = y_pred_proba.std()
             metrics['prediction_var'] = y_pred_proba.var()
             metrics['prediction_entropy'] = self._calculate_entropy(y_pred_proba)
             metrics['prediction_gini'] = self._calculate_gini_coefficient(y_pred_proba)
             
-            # 클래스별 예측 품질
             pos_mask = (y_true == 1)
             neg_mask = (y_true == 0)
             
@@ -312,11 +279,9 @@ class CTRMetrics:
                 metrics['neg_std_pred'] = 0.0
                 metrics['neg_median_pred'] = 0.0
             
-            # 분리도 지표
             if pos_mask.any() and neg_mask.any():
                 metrics['separation'] = metrics['pos_mean_pred'] - metrics['neg_mean_pred']
                 
-                # KS (Kolmogorov-Smirnov) 통계량
                 if SCIPY_AVAILABLE:
                     try:
                         ks_stat, ks_pvalue = stats.ks_2samp(y_pred_proba[pos_mask], y_pred_proba[neg_mask])
@@ -333,14 +298,11 @@ class CTRMetrics:
                 metrics['ks_statistic'] = 0.0
                 metrics['ks_pvalue'] = 1.0
             
-            # 보정 지표
             calibration_metrics = self.calculate_calibration_metrics(y_true, y_pred_proba)
             metrics.update(calibration_metrics)
             
-            # 분위수별 성능
             self._add_quantile_metrics(metrics, y_true, y_pred_proba)
             
-            # 임계값 최적화
             optimal_threshold, optimal_f1 = self.find_optimal_threshold(y_true, y_pred_proba, 'f1')
             metrics['optimal_threshold'] = optimal_threshold
             metrics['optimal_f1'] = optimal_f1
@@ -353,7 +315,6 @@ class CTRMetrics:
     def _add_ctr_range_metrics(self, metrics: Dict[str, float], y_true: np.ndarray, y_pred_proba: np.ndarray):
         """CTR 범위별 성능 지표 추가"""
         try:
-            # CTR 구간 정의
             ranges = {
                 'very_low': (0.0, 0.01),
                 'low': (0.01, 0.02),
@@ -409,10 +370,8 @@ class CTRMetrics:
     def _calculate_entropy(self, probabilities: np.ndarray) -> float:
         """예측 확률의 엔트로피 계산"""
         try:
-            # 확률 클립핑
             p = np.clip(probabilities, 1e-15, 1 - 1e-15)
             
-            # 엔트로피 계산
             entropy = -np.mean(p * np.log2(p) + (1 - p) * np.log2(1 - p))
             
             return entropy
@@ -422,11 +381,9 @@ class CTRMetrics:
     def _calculate_gini_coefficient(self, values: np.ndarray) -> float:
         """지니 계수 계산"""
         try:
-            # 값 정렬
             sorted_values = np.sort(values)
             n = len(sorted_values)
             
-            # 지니 계수 계산
             cumsum = np.cumsum(sorted_values)
             gini = (n + 1 - 2 * np.sum(cumsum) / cumsum[-1]) / n
             
@@ -489,7 +446,6 @@ class CTRMetrics:
     def calculate_calibration_metrics(self, y_true: np.ndarray, y_pred_proba: np.ndarray, n_bins: int = 10) -> Dict[str, float]:
         """모델 보정 지표 계산"""
         try:
-            # 빈 경계 설정
             bin_boundaries = np.linspace(0, 1, n_bins + 1)
             bin_lowers = bin_boundaries[:-1]
             bin_uppers = bin_boundaries[1:]
@@ -499,7 +455,6 @@ class CTRMetrics:
             bin_counts = []
             
             for bin_lower, bin_upper in zip(bin_lowers, bin_uppers):
-                # 빈에 속하는 샘플 찾기
                 in_bin = (y_pred_proba > bin_lower) & (y_pred_proba <= bin_upper)
                 prop_in_bin = in_bin.mean()
                 
@@ -515,24 +470,20 @@ class CTRMetrics:
                     bin_confidences.append(0)
                     bin_counts.append(0)
             
-            # ECE (Expected Calibration Error) 계산
             bin_accuracies = np.array(bin_accuracies)
             bin_confidences = np.array(bin_confidences)
             bin_counts = np.array(bin_counts)
             
             ece = np.sum(bin_counts * np.abs(bin_accuracies - bin_confidences)) / len(y_true)
             
-            # MCE (Maximum Calibration Error) 계산
             mce = np.max(np.abs(bin_accuracies - bin_confidences))
             
-            # ACE (Average Calibration Error) 계산
             non_empty_bins = bin_counts > 0
             if non_empty_bins.any():
                 ace = np.mean(np.abs(bin_accuracies[non_empty_bins] - bin_confidences[non_empty_bins]))
             else:
                 ace = 0.0
             
-            # Reliability diagram의 기울기
             try:
                 if len(bin_confidences[non_empty_bins]) > 1:
                     slope, intercept = np.polyfit(bin_confidences[non_empty_bins], bin_accuracies[non_empty_bins], 1)
@@ -560,17 +511,14 @@ class CTRMetrics:
                                  cost_per_click: float = 1.0, revenue_per_conversion: float = 20.0) -> Dict[str, float]:
         """비즈니스 관련 지표 계산"""
         try:
-            # 다양한 임계값에서의 비즈니스 지표
             thresholds = np.arange(0.01, 0.5, 0.01)
             business_metrics = {}
             
             for threshold in thresholds:
                 predictions = (y_pred_proba >= threshold).astype(int)
                 
-                # 혼동 행렬
                 tn, fp, fn, tp = confusion_matrix(y_true, predictions).ravel()
                 
-                # 비즈니스 지표
                 total_clicks = tp + fp
                 total_conversions = tp
                 
@@ -591,7 +539,6 @@ class CTRMetrics:
                         'roi': roi
                     }
             
-            # 최적 임계값 (수익 기준)
             if business_metrics:
                 best_threshold = max(business_metrics.keys(), 
                                    key=lambda x: business_metrics[x]['profit'])
@@ -620,11 +567,9 @@ class ModelComparator:
         
         for model_name, y_pred_proba in models_predictions.items():
             try:
-                # 기본 성능 지표
                 metrics = self.metrics_calculator.comprehensive_evaluation(y_true, y_pred_proba)
                 metrics['model_name'] = model_name
                 
-                # 안정성 지표 추가
                 stability_metrics = self._calculate_stability_metrics(y_true, y_pred_proba)
                 metrics.update(stability_metrics)
                 
@@ -633,14 +578,11 @@ class ModelComparator:
             except Exception as e:
                 logger.error(f"{model_name} 모델 평가 실패: {str(e)}")
         
-        # DataFrame으로 변환
         comparison_df = pd.DataFrame(results)
         
         if not comparison_df.empty:
-            # 모델명을 인덱스로 설정
             comparison_df.set_index('model_name', inplace=True)
             
-            # CTR 최적화 점수로 정렬
             if 'ctr_optimized_score' in comparison_df.columns:
                 comparison_df.sort_values('ctr_optimized_score', ascending=False, inplace=True)
             else:
@@ -653,11 +595,9 @@ class ModelComparator:
     def _calculate_stability_metrics(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> Dict[str, float]:
         """모델 안정성 지표 계산"""
         try:
-            # 배열 타입 변환 및 길이 확인
             y_true_array = np.asarray(y_true).flatten()
             y_pred_array = np.asarray(y_pred_proba).flatten()
             
-            # 배열 길이 통일
             min_len = min(len(y_true_array), len(y_pred_array))
             if min_len == 0:
                 logger.warning("빈 배열로 인해 안정성 지표 계산 불가")
@@ -666,20 +606,17 @@ class ModelComparator:
             y_true_array = y_true_array[:min_len]
             y_pred_array = y_pred_array[:min_len]
             
-            # 부트스트래핑 기반 안정성 계산
-            n_bootstrap = 30  # 메모리 및 성능 최적화
+            n_bootstrap = 30
             scores = []
             
-            sample_size = min(min_len, 10000)  # 샘플 크기 제한
+            sample_size = min(min_len, 10000)
             
             for i in range(n_bootstrap):
                 try:
-                    # 부트스트래핑 샘플링
-                    indices = np.random.choice(min_len, size=sample_size, replace=True)
+                    indices = np.random.choice(range(min_len), size=sample_size, replace=True)
                     boot_y_true = y_true_array[indices]
                     boot_y_pred = y_pred_array[indices]
                     
-                    # 유효성 검사
                     if len(np.unique(boot_y_true)) < 2:
                         continue
                     
@@ -691,8 +628,7 @@ class ModelComparator:
                     logger.debug(f"부트스트래핑 {i+1} 실패: {e}")
                     continue
             
-            # 결과 계산
-            if len(scores) >= 3:  # 최소한의 유효한 점수 필요
+            if len(scores) >= 3:
                 scores = np.array(scores)
                 
                 stability_metrics = {
@@ -734,7 +670,6 @@ class ModelComparator:
         
         ranking_df = self.comparison_results.copy()
         
-        # 순위 지정
         if ranking_metric in ranking_df.columns:
             ranking_df['rank'] = ranking_df[ranking_metric].rank(ascending=False)
         else:
@@ -742,7 +677,6 @@ class ModelComparator:
         
         ranking_df.sort_values('rank', inplace=True)
         
-        # 주요 지표만 선택
         key_columns = ['rank', ranking_metric, 'combined_score', 'ap', 'wll', 'auc', 'f1', 
                       'ctr_bias', 'ctr_ratio', 'stability_mean', 'stability_std']
         available_columns = [col for col in key_columns if col in ranking_df.columns]
@@ -772,7 +706,6 @@ class ModelComparator:
             if n_models < 2:
                 return {'diversity_score': 0.0, 'correlation_matrix': {}}
             
-            # 상관관계 행렬 계산
             correlation_matrix = {}
             correlations = []
             
@@ -786,7 +719,6 @@ class ModelComparator:
                             pred1 = np.asarray(models_predictions[name1]).flatten()
                             pred2 = np.asarray(models_predictions[name2]).flatten()
                             
-                            # 배열 길이 통일
                             min_len = min(len(pred1), len(pred2))
                             if min_len > 0:
                                 pred1 = pred1[:min_len]
@@ -801,14 +733,12 @@ class ModelComparator:
                     
                     correlation_matrix[name1][name2] = float(corr)
                     
-                    if i < j:  # 중복 제거
+                    if i < j:
                         correlations.append(abs(corr))
             
-            # 다양성 점수 (낮은 상관관계 = 높은 다양성)
             avg_correlation = np.mean(correlations) if correlations else 0.0
             diversity_score = 1.0 - avg_correlation
             
-            # 추가 다양성 지표
             diversity_metrics = {
                 'diversity_score': float(diversity_score),
                 'average_correlation': float(avg_correlation),
@@ -834,11 +764,9 @@ class ModelComparator:
         
         for model_name, y_pred_proba in models_predictions.items():
             try:
-                # 배열 타입 변환 및 길이 확인
                 y_true_array = np.asarray(y_true).flatten()
                 y_pred_array = np.asarray(y_pred_proba).flatten()
                 
-                # 배열 길이 통일
                 min_len = min(len(y_true_array), len(y_pred_array))
                 if min_len == 0:
                     logger.warning(f"{model_name}: 빈 배열로 인해 안정성 분석 불가")
@@ -851,20 +779,17 @@ class ModelComparator:
                 scores = []
                 ctr_biases = []
                 
-                sample_size = min(min_len, 10000)  # 메모리 절약
+                sample_size = min(min_len, 10000)
                 
                 for i in range(n_bootstrap):
                     try:
-                        # 부트스트래핑 샘플링
-                        indices = np.random.choice(min_len, size=sample_size, replace=True)
+                        indices = np.random.choice(range(min_len), size=sample_size, replace=True)
                         y_true_bootstrap = y_true_array[indices]
                         y_pred_bootstrap = y_pred_array[indices]
                         
-                        # 유효성 검사
                         if len(np.unique(y_true_bootstrap)) < 2:
                             continue
                         
-                        # 점수 및 CTR 편향 계산
                         score = self.metrics_calculator.ctr_optimized_score(y_true_bootstrap, y_pred_bootstrap)
                         ctr_bias = abs(y_pred_bootstrap.mean() - y_true_bootstrap.mean())
                         
@@ -925,7 +850,6 @@ class EvaluationVisualizer:
         self.matplotlib_available = MATPLOTLIB_AVAILABLE
         
         if self.matplotlib_available:
-            # matplotlib 스타일 안전하게 설정
             try:
                 plt.style.available
                 available_styles = plt.style.available
@@ -955,22 +879,16 @@ class EvaluationVisualizer:
             fig, axes = plt.subplots(2, 3, figsize=(20, 12))
             axes = axes.flatten()
             
-            # 1. ROC 곡선
             self._plot_roc_curves_subplot(axes[0], models_predictions, y_true)
             
-            # 2. Precision-Recall 곡선
             self._plot_pr_curves_subplot(axes[1], models_predictions, y_true)
             
-            # 3. CTR 편향 비교
             self._plot_ctr_bias_subplot(axes[2], models_predictions, y_true)
             
-            # 4. 예측 분포
             self._plot_prediction_distributions_subplot(axes[3], models_predictions, y_true)
             
-            # 5. 보정 다이어그램
             self._plot_calibration_subplot(axes[4], models_predictions, y_true)
             
-            # 6. 성능 레이더 차트
             self._plot_performance_radar_subplot(axes[5], models_predictions, y_true)
             
             plt.tight_layout()
@@ -1040,7 +958,6 @@ class EvaluationVisualizer:
             ax.tick_params(axis='x', rotation=45)
             ax.grid(True, alpha=0.3)
             
-            # 수치 표시
             for bar, bias in zip(bars, ctr_biases):
                 height = bar.get_height()
                 ax.text(bar.get_x() + bar.get_width()/2., height + (0.0001 if height >= 0 else -0.0001),
@@ -1054,7 +971,6 @@ class EvaluationVisualizer:
             for model_name, y_pred_proba in models_predictions.items():
                 ax.hist(y_pred_proba, bins=50, alpha=0.5, label=model_name, density=True)
             
-            # 실제 CTR 표시
             actual_ctr = y_true.mean()
             ax.axvline(actual_ctr, color='red', linestyle='--', 
                       label=f'Actual CTR: {actual_ctr:.4f}')
@@ -1094,24 +1010,21 @@ class EvaluationVisualizer:
         try:
             metrics_calc = CTRMetrics()
             
-            # 성능 지표 선택
             metric_names = ['AP', 'AUC', 'F1', 'CTR Accuracy', 'Calibration']
             
             for model_name, y_pred_proba in models_predictions.items():
                 metrics = metrics_calc.comprehensive_evaluation(y_true, y_pred_proba)
                 
-                # 지표 정규화 (0-1 스케일)
                 values = [
                     metrics.get('ap', 0.0),
                     metrics.get('auc', 0.0),
                     metrics.get('f1', 0.0),
-                    1.0 - min(metrics.get('ctr_absolute_error', 1.0), 1.0),  # CTR 정확도
-                    1.0 - min(metrics.get('ece', 1.0), 1.0)  # 보정 품질
+                    1.0 - min(metrics.get('ctr_absolute_error', 1.0), 1.0),
+                    1.0 - min(metrics.get('ece', 1.0), 1.0)
                 ]
                 
-                # 레이더 차트 각도
                 angles = np.linspace(0, 2 * np.pi, len(metric_names), endpoint=False)
-                values += values[:1]  # 닫힌 도형
+                values += values[:1]
                 angles = np.concatenate((angles, [angles[0]]))
                 
                 ax.plot(angles, values, 'o-', linewidth=2, label=model_name)
@@ -1141,27 +1054,21 @@ class EvaluationReporter:
         
         logger.info("종합 평가 보고서 생성 시작")
         
-        # 모델 비교
         comparator = ModelComparator()
         comparison_df = comparator.compare_models(models_predictions, y_true)
         
-        # 최고 성능 모델
         best_model, best_score = comparator.get_best_model('ctr_optimized_score')
         
-        # 안정성 분석
         stability_results = comparator.analyze_model_stability(models_predictions, y_true, n_bootstrap=30)
         
-        # 다양성 분석
         diversity_results = comparator.analyze_model_diversity(models_predictions)
         
-        # 비즈니스 지표 (대표 모델)
         business_metrics = {}
         if best_model and best_model in models_predictions:
             business_metrics = self.metrics_calculator.calculate_business_metrics(
                 y_true, models_predictions[best_model]
             )
         
-        # 보고서 데이터 구성
         report = {
             'summary': {
                 'total_models': len(models_predictions),
@@ -1179,18 +1086,15 @@ class EvaluationReporter:
             'business_metrics': business_metrics
         }
         
-        # 상세 분석 추가
         if not comparison_df.empty:
             report['performance_analysis'] = self._analyze_performance_patterns(comparison_df)
             report['recommendations'] = self._generate_recommendations(comparison_df, stability_results)
         
-        # 시각화 생성 (출력 디렉터리가 지정된 경우)
         if output_dir and MATPLOTLIB_AVAILABLE:
             import os
             os.makedirs(output_dir, exist_ok=True)
             
             try:
-                # 종합 평가 시각화
                 self.visualizer.plot_comprehensive_evaluation(
                     models_predictions, y_true,
                     save_path=f"{output_dir}/comprehensive_evaluation.png"
@@ -1212,7 +1116,6 @@ class EvaluationReporter:
         try:
             analysis = {}
             
-            # 성능 지표 간 상관관계
             correlation_cols = ['ctr_optimized_score', 'combined_score', 'ap', 'auc', 'f1']
             available_cols = [col for col in correlation_cols if col in comparison_df.columns]
             
@@ -1220,7 +1123,6 @@ class EvaluationReporter:
                 correlation_matrix = comparison_df[available_cols].corr()
                 analysis['metric_correlations'] = correlation_matrix.to_dict()
             
-            # CTR 편향 패턴
             if 'ctr_bias' in comparison_df.columns:
                 ctr_biases = comparison_df['ctr_bias']
                 analysis['ctr_bias_patterns'] = {
@@ -1232,7 +1134,6 @@ class EvaluationReporter:
                     'underestimating_models': (ctr_biases < -0.001).sum()
                 }
             
-            # 안정성 패턴
             stability_cols = [col for col in comparison_df.columns if 'stability' in col]
             if stability_cols:
                 analysis['stability_patterns'] = {
@@ -1255,7 +1156,6 @@ class EvaluationReporter:
         recommendations = []
         
         try:
-            # CTR 편향 기반 권장사항
             if 'ctr_bias' in comparison_df.columns:
                 high_bias_models = comparison_df[comparison_df['ctr_bias'].abs() > 0.002]
                 if not high_bias_models.empty:
@@ -1264,7 +1164,6 @@ class EvaluationReporter:
                         "Calibration 기법 적용을 권장합니다."
                     )
             
-            # 안정성 기반 권장사항
             unstable_models = []
             for model_name, stability in stability_results.items():
                 if stability.get('cv_score', float('inf')) > 0.1:
@@ -1276,7 +1175,6 @@ class EvaluationReporter:
                     "앙상블 기법 적용을 권장합니다."
                 )
             
-            # 성능 기반 권장사항
             if 'ctr_optimized_score' in comparison_df.columns:
                 low_performance_models = comparison_df[comparison_df['ctr_optimized_score'] < 0.3]
                 if not low_performance_models.empty:
@@ -1285,7 +1183,6 @@ class EvaluationReporter:
                         "하이퍼파라미터 재튜닝을 권장합니다."
                     )
             
-            # 일반적인 권장사항
             if len(comparison_df) > 1:
                 recommendations.append("다중 모델 앙상블을 통해 전체적인 성능 향상을 기대할 수 있습니다.")
             
