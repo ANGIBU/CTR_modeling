@@ -113,6 +113,53 @@ def setup_logging():
         logger = logging.getLogger(__name__)
         return logger
 
+def ensure_directories():
+    """디렉터리 존재 확인 및 생성 - 강화된 버전"""
+    logger = logging.getLogger(__name__)
+    logger.info("디렉터리 확인 및 생성 시작")
+    
+    try:
+        # Config에서 디렉터리 생성
+        Config.setup_directories()
+        logger.info("Config.setup_directories() 완료")
+        
+        # 경로 유효성 재검증
+        Config.verify_paths()
+        
+        # 중요한 디렉터리들 개별 확인
+        critical_dirs = [Config.DATA_DIR, Config.MODEL_DIR, Config.LOG_DIR, Config.OUTPUT_DIR]
+        
+        for dir_path in critical_dirs:
+            if not dir_path.exists():
+                logger.warning(f"디렉터리가 존재하지 않음: {dir_path}")
+                try:
+                    dir_path.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"수동으로 생성된 디렉터리: {dir_path}")
+                except Exception as e:
+                    logger.error(f"수동 디렉터리 생성 실패 {dir_path}: {e}")
+                    raise
+            else:
+                logger.info(f"확인된 디렉터리: {dir_path}")
+        
+        # 데이터 디렉터리 내부에 파일 경로 확인
+        data_files = [Config.TRAIN_PATH, Config.TEST_PATH, Config.SUBMISSION_TEMPLATE_PATH]
+        for file_path in data_files:
+            parent_dir = file_path.parent
+            if not parent_dir.exists():
+                logger.warning(f"부모 디렉터리 생성 필요: {parent_dir}")
+                try:
+                    parent_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"부모 디렉터리 생성: {parent_dir}")
+                except Exception as e:
+                    logger.error(f"부모 디렉터리 생성 실패 {parent_dir}: {e}")
+                    raise
+        
+        logger.info("모든 필수 디렉터리 확인 완료")
+        
+    except Exception as e:
+        logger.error(f"디렉터리 설정 실패: {e}")
+        raise
+
 def memory_monitor_decorator(func):
     """메모리 모니터링 데코레이터"""
     def wrapper(*args, **kwargs):
@@ -148,6 +195,9 @@ def load_and_preprocess_large_data(config: Config, quick_mode: bool = False) -> 
     """대용량 데이터 로딩 및 전처리"""
     logger = logging.getLogger(__name__)
     logger.info("대용량 데이터 로딩 및 전처리 시작")
+    
+    # 디렉터리 확인 및 생성
+    ensure_directories()
     
     train_path = Path(config.TRAIN_PATH)
     test_path = Path(config.TEST_PATH)
@@ -248,12 +298,23 @@ def load_and_preprocess_large_data(config: Config, quick_mode: bool = False) -> 
         raise
 
 def create_sample_data(config: Config):
-    """샘플 데이터 생성"""
+    """샘플 데이터 생성 - 강화된 버전"""
     logger = logging.getLogger(__name__)
     logger.info("샘플 데이터 생성 시작")
     
     try:
-        config.setup_directories()
+        # 디렉터리 생성 강화
+        ensure_directories()
+        
+        # 데이터 디렉터리 재확인
+        if not config.DATA_DIR.exists():
+            logger.error(f"데이터 디렉터리가 여전히 존재하지 않음: {config.DATA_DIR}")
+            try:
+                config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+                logger.info(f"강제로 데이터 디렉터리 생성: {config.DATA_DIR}")
+            except Exception as e:
+                logger.error(f"데이터 디렉터리 강제 생성 실패: {e}")
+                raise
         
         # 학습 데이터 생성
         np.random.seed(42)
@@ -280,7 +341,26 @@ def create_sample_data(config: Config):
             train_data[f'feat_b_{i}'] = np.random.uniform(0, 10, n_train)
         
         train_df = pd.DataFrame(train_data)
-        train_df.to_parquet(config.TRAIN_PATH, index=False)
+        
+        # 파일 저장 경로 확인
+        train_path = Path(config.TRAIN_PATH)
+        logger.info(f"학습 데이터 저장 경로: {train_path}")
+        logger.info(f"부모 디렉터리 존재 여부: {train_path.parent.exists()}")
+        
+        # 안전한 파일 저장
+        try:
+            train_df.to_parquet(train_path, index=False)
+            logger.info(f"학습 데이터 저장 완료: {train_path}")
+        except Exception as e:
+            logger.error(f"학습 데이터 저장 실패: {e}")
+            # 절대 경로로 재시도
+            try:
+                abs_path = train_path.resolve()
+                train_df.to_parquet(abs_path, index=False)
+                logger.info(f"절대 경로로 학습 데이터 저장 완료: {abs_path}")
+            except Exception as e2:
+                logger.error(f"절대 경로 저장도 실패: {e2}")
+                raise
         
         # 테스트 데이터 생성
         n_test = 150000
@@ -301,16 +381,58 @@ def create_sample_data(config: Config):
                     test_data[col] = np.random.uniform(0, 10, n_test)
         
         test_df = pd.DataFrame(test_data)
-        test_df.to_parquet(config.TEST_PATH, index=False)
+        
+        # 테스트 데이터 저장
+        test_path = Path(config.TEST_PATH)
+        logger.info(f"테스트 데이터 저장 경로: {test_path}")
+        
+        try:
+            test_df.to_parquet(test_path, index=False)
+            logger.info(f"테스트 데이터 저장 완료: {test_path}")
+        except Exception as e:
+            logger.error(f"테스트 데이터 저장 실패: {e}")
+            # 절대 경로로 재시도
+            try:
+                abs_path = test_path.resolve()
+                test_df.to_parquet(abs_path, index=False)
+                logger.info(f"절대 경로로 테스트 데이터 저장 완료: {abs_path}")
+            except Exception as e2:
+                logger.error(f"절대 경로 저장도 실패: {e2}")
+                raise
         
         # 제출 템플릿 생성
         submission_df = pd.DataFrame({
             'id': range(n_test),
             'clicked': 0.0201
         })
-        submission_df.to_csv(config.SUBMISSION_TEMPLATE_PATH, index=False)
+        
+        submission_path = Path(config.SUBMISSION_TEMPLATE_PATH)
+        logger.info(f"제출 템플릿 저장 경로: {submission_path}")
+        
+        try:
+            submission_df.to_csv(submission_path, index=False)
+            logger.info(f"제출 템플릿 저장 완료: {submission_path}")
+        except Exception as e:
+            logger.error(f"제출 템플릿 저장 실패: {e}")
+            # 절대 경로로 재시도
+            try:
+                abs_path = submission_path.resolve()
+                submission_df.to_csv(abs_path, index=False)
+                logger.info(f"절대 경로로 제출 템플릿 저장 완료: {abs_path}")
+            except Exception as e2:
+                logger.error(f"절대 경로 저장도 실패: {e2}")
+                raise
         
         logger.info(f"샘플 데이터 생성 완료 - 학습: {n_train:,}, 테스트: {n_test:,}")
+        
+        # 생성된 파일들 확인
+        logger.info("=== 생성된 파일 확인 ===")
+        for file_path in [train_path, test_path, submission_path]:
+            if file_path.exists():
+                file_size = file_path.stat().st_size / (1024 * 1024)  # MB
+                logger.info(f"✓ {file_path} ({file_size:.2f} MB)")
+            else:
+                logger.error(f"✗ {file_path} (생성되지 않음)")
         
     except Exception as e:
         logger.error(f"샘플 데이터 생성 실패: {e}")
@@ -353,8 +475,9 @@ def advanced_feature_engineering(train_df: pd.DataFrame,
         y_train = train_df[target_col].copy()
         
         try:
+            # 디렉터리 확인 후 저장
+            ensure_directories()
             feature_engineer_path = config.MODEL_DIR / "feature_engineer.pkl"
-            config.setup_directories()
             with open(feature_engineer_path, 'wb') as f:
                 pickle.dump(feature_engineer, f)
             logger.info(f"피처 엔지니어 저장: {feature_engineer_path}")
@@ -707,10 +830,11 @@ def comprehensive_evaluation(trainer: ModelTrainer,
                 output_dir=None
             )
             
+            # 디렉터리 확인 후 저장
+            ensure_directories()
             report_path = config.OUTPUT_DIR / "evaluation_report.json"
-            config.setup_directories()
-            with open(report_path, 'w') as f:
-                json.dump(report, f, indent=2, default=str)
+            with open(report_path, 'w', encoding='utf-8') as f:
+                json.dump(report, f, indent=2, default=str, ensure_ascii=False)
             
             logger.info(f"종합 평가 보고서 저장: {report_path}")
         except Exception as e:
@@ -1114,13 +1238,22 @@ def main():
     
     args = parser.parse_args()
     
+    # 초기 디렉터리 설정
+    try:
+        print("초기 디렉터리 설정 중...")
+        ensure_directories()
+        print("초기 디렉터리 설정 완료")
+    except Exception as e:
+        print(f"초기 디렉터리 설정 실패: {e}")
+        print("프로그램을 계속 진행합니다...")
+    
     logger = setup_logging()
     
     config = Config
     try:
         config.setup_directories()
     except Exception as e:
-        logger.warning(f"디렉터리 설정 실패: {e}")
+        logger.warning(f"Config 디렉터리 설정 실패: {e}")
     
     if args.gpu and TORCH_AVAILABLE and torch.cuda.is_available():
         try:

@@ -22,10 +22,11 @@ class Config:
     LOG_DIR = BASE_DIR / "logs"
     OUTPUT_DIR = BASE_DIR / "output"
     
-    # 데이터 파일 경로
-    TRAIN_PATH = "/data/train.parquet"
-    TEST_PATH = "/data/test.parquet" 
-    SUBMISSION_PATH = "/data/sample_submission.csv"
+    # 데이터 파일 경로 - 상대경로로 수정
+    TRAIN_PATH = DATA_DIR / "train.parquet"
+    TEST_PATH = DATA_DIR / "test.parquet"
+    SUBMISSION_PATH = DATA_DIR / "sample_submission.csv"
+    SUBMISSION_TEMPLATE_PATH = DATA_DIR / "sample_submission.csv"  # main.py에서 참조하는 경로 추가
     
     # GPU 및 하드웨어 설정 (RTX 4060 Ti 16GB 최적화)
     if TORCH_AVAILABLE:
@@ -449,12 +450,73 @@ class Config:
     
     @classmethod
     def setup_directories(cls):
-        """필요한 디렉터리 생성"""
-        for dir_path in [cls.DATA_DIR, cls.MODEL_DIR, cls.LOG_DIR, cls.OUTPUT_DIR]:
+        """필요한 디렉터리 생성 - 강화된 버전"""
+        directories = [cls.DATA_DIR, cls.MODEL_DIR, cls.LOG_DIR, cls.OUTPUT_DIR]
+        
+        created_dirs = []
+        failed_dirs = []
+        
+        for dir_path in directories:
             try:
+                # Path 객체를 사용하여 디렉터리 생성
+                dir_path = Path(dir_path)
                 dir_path.mkdir(parents=True, exist_ok=True)
+                
+                # 디렉터리가 실제로 생성되었는지 확인
+                if dir_path.exists() and dir_path.is_dir():
+                    created_dirs.append(str(dir_path))
+                else:
+                    failed_dirs.append(str(dir_path))
+                    
+            except PermissionError as e:
+                print(f"권한 오류로 디렉터리 생성 실패 {dir_path}: {e}")
+                failed_dirs.append(str(dir_path))
+            except OSError as e:
+                print(f"OS 오류로 디렉터리 생성 실패 {dir_path}: {e}")
+                failed_dirs.append(str(dir_path))
             except Exception as e:
-                print(f"디렉터리 생성 실패 {dir_path}: {e}")
+                print(f"예상치 못한 오류로 디렉터리 생성 실패 {dir_path}: {e}")
+                failed_dirs.append(str(dir_path))
+        
+        # 생성 결과 보고
+        if created_dirs:
+            print(f"성공적으로 생성된 디렉터리: {created_dirs}")
+        
+        if failed_dirs:
+            print(f"생성 실패한 디렉터리: {failed_dirs}")
+            
+        # 데이터 디렉터리가 없으면 프로젝트가 작동하지 않으므로 강제 생성
+        if not cls.DATA_DIR.exists():
+            try:
+                os.makedirs(cls.DATA_DIR, exist_ok=True)
+                print(f"os.makedirs로 데이터 디렉터리 생성: {cls.DATA_DIR}")
+            except Exception as e:
+                print(f"os.makedirs도 실패: {e}")
+                raise RuntimeError(f"데이터 디렉터리 생성에 실패했습니다: {cls.DATA_DIR}")
+    
+    @classmethod
+    def verify_paths(cls):
+        """경로 유효성 검증"""
+        print("=== 경로 유효성 검증 ===")
+        
+        paths_to_check = {
+            'BASE_DIR': cls.BASE_DIR,
+            'DATA_DIR': cls.DATA_DIR,
+            'MODEL_DIR': cls.MODEL_DIR,
+            'LOG_DIR': cls.LOG_DIR,
+            'OUTPUT_DIR': cls.OUTPUT_DIR,
+            'TRAIN_PATH': cls.TRAIN_PATH,
+            'TEST_PATH': cls.TEST_PATH,
+            'SUBMISSION_PATH': cls.SUBMISSION_PATH,
+            'SUBMISSION_TEMPLATE_PATH': cls.SUBMISSION_TEMPLATE_PATH
+        }
+        
+        for name, path in paths_to_check.items():
+            abs_path = Path(path).resolve()
+            exists = abs_path.exists()
+            print(f"{name}: {abs_path} (존재: {exists})")
+        
+        print("=== 검증 완료 ===")
     
     @classmethod
     def setup_logging(cls):
@@ -477,9 +539,11 @@ class Config:
         
         if cls.LOGGING_CONFIG['file_handler']:
             try:
-                file_handler = logging.FileHandler(cls.LOG_DIR / 'ctr_model.log')
+                log_file_path = cls.LOG_DIR / 'ctr_model.log'
+                file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
                 file_handler.setFormatter(formatter)
                 logger.addHandler(file_handler)
+                print(f"로그 파일 생성: {log_file_path}")
             except Exception as e:
                 print(f"파일 핸들러 설정 실패: {e}")
         
@@ -734,3 +798,10 @@ try:
     
 except Exception as e:
     print(f"초기 환경 설정 실패: {e}")
+
+# 시작 시 디렉터리 생성
+try:
+    Config.setup_directories()
+    Config.verify_paths()
+except Exception as e:
+    print(f"디렉터리 초기화 실패: {e}")
