@@ -129,26 +129,30 @@ class AdvancedMemoryMonitor:
         info = self.get_detailed_memory_info()
         pressure = self.check_memory_pressure()
         
-        print(f"메모리 상태 {context}: "
-              f"사용가능 {info['available_gb']:.1f}GB, "
-              f"사용률 {info['usage_percent']:.1f}%, "
-              f"프로세스 {info['process_rss_gb']:.1f}GB")
+        logger.info(f"메모리 상태 {context}: "
+                   f"사용가능 {info['available_gb']:.1f}GB, "
+                   f"사용률 {info['usage_percent']:.1f}%, "
+                   f"프로세스 {info['process_rss_gb']:.1f}GB, "
+                   f"피크 {info['peak_memory_gb']:.1f}GB")
         
         if pressure['memory_pressure']:
-            print(f"메모리 압박: {pressure['recommendation']}")
+            logger.warning(f"메모리 압박 상황: {pressure['recommendation']}")
     
     def force_memory_cleanup(self, aggressive: bool = False):
         """강제 메모리 정리"""
         try:
             initial_info = self.get_detailed_memory_info()
             
+            # 기본 가비지 컬렉션
             gc.collect()
             
             if aggressive:
+                # 더 적극적인 메모리 정리
                 for _ in range(3):
                     gc.collect()
                     time.sleep(0.1)
                 
+                # Windows 전용 메모리 정리
                 try:
                     import ctypes
                     if hasattr(ctypes, 'windll'):
@@ -160,10 +164,10 @@ class AdvancedMemoryMonitor:
             memory_freed = initial_info['process_rss_gb'] - final_info['process_rss_gb']
             
             if memory_freed > 0.1:
-                print(f"메모리 정리 완료: {memory_freed:.2f}GB 해제")
+                logger.info(f"메모리 정리 완료: {memory_freed:.2f}GB 해제")
             
         except Exception as e:
-            print(f"메모리 정리 실패: {e}")
+            logger.warning(f"메모리 정리 실패: {e}")
 
 class DataFileValidator:
     """대용량 데이터 파일 검증 클래스"""
@@ -1101,4 +1105,4 @@ if __name__ == "__main__":
         print(f"로딩 통계: {loader.get_loading_stats()}")
         
     except Exception as e:
-        logger.error(f"테스트 실행 실패: {e}")
+        logger.error(f"테스트 실행 실패: {e}")6

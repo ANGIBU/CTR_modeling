@@ -561,45 +561,34 @@ class Config:
     
     @classmethod
     def setup_logging(cls):
-        """로깅 설정 초기화"""
+        """로깅 설정 초기화 - 대용량 데이터 처리 로깅 강화"""
         cls.setup_directories()
         
-        # 루트 로거 설정
-        root_logger = logging.getLogger()
-        root_logger.setLevel(cls.LOGGING_CONFIG['level'])
+        logger = logging.getLogger()
+        logger.setLevel(cls.LOGGING_CONFIG['level'])
         
-        # 기존 핸들러 모두 제거
-        for handler in root_logger.handlers[:]:
-            root_logger.removeHandler(handler)
+        # 기존 핸들러 제거
+        for handler in logger.handlers[:]:
+            logger.removeHandler(handler)
         
-        # 로그 포맷 설정
-        log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        formatter = logging.Formatter(log_format, datefmt='%Y-%m-%d %H:%M:%S')
+        formatter = logging.Formatter(cls.LOGGING_CONFIG['format'])
         
-        # 콘솔 핸들러 설정
         if cls.LOGGING_CONFIG['console_handler']:
             console_handler = logging.StreamHandler()
-            console_handler.setLevel(logging.INFO)
             console_handler.setFormatter(formatter)
-            root_logger.addHandler(console_handler)
+            logger.addHandler(console_handler)
         
-        # 파일 핸들러 설정
         if cls.LOGGING_CONFIG['file_handler']:
             try:
                 log_file_path = cls.LOG_DIR / 'ctr_model.log'
-                file_handler = logging.FileHandler(log_file_path, encoding='utf-8', mode='w')
-                file_handler.setLevel(logging.DEBUG)
+                file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
                 file_handler.setFormatter(formatter)
-                root_logger.addHandler(file_handler)
-                print(f"로그 파일 생성 완료: {log_file_path}")
+                logger.addHandler(file_handler)
+                print(f"로그 파일 생성: {log_file_path}")
             except Exception as e:
                 print(f"파일 핸들러 설정 실패: {e}")
         
-        # 프로젝트 전용 로거 생성
-        project_logger = logging.getLogger('ctr_modeling')
-        project_logger.setLevel(logging.INFO)
-        
-        return project_logger
+        return logger
     
     @classmethod
     def get_memory_config(cls):
