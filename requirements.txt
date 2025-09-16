@@ -1,45 +1,107 @@
 # requirements.txt
-pandas>=2.0.3
+
+# 데이터 처리 및 분석
+pandas>=2.1.4
 numpy>=1.24.3
-pyarrow>=12.0.1
-scikit-learn>=1.3.0
-lightgbm>=4.0.0
-xgboost>=1.7.6
+pyarrow>=14.0.2
+scipy>=1.11.4
+
+# 머신러닝 프레임워크
+scikit-learn>=1.3.2
+lightgbm>=4.1.0
+xgboost>=2.0.3
 catboost>=1.2.2
-torch>=2.0.1
-torchvision>=0.15.2
-optuna>=3.3.0
-matplotlib>=3.7.2
-seaborn>=0.12.2
-plotly>=5.15.0
-psutil>=5.9.5
-tqdm>=4.65.0
+
+# 딥러닝 (PyTorch)
+torch>=2.1.2
+torchvision>=0.16.2
+torchaudio>=2.1.2
+
+# 하이퍼파라미터 최적화
+optuna>=3.5.0
+
+# 시각화
+matplotlib>=3.8.2
+seaborn>=0.13.0
+plotly>=5.17.0
+
+# 시스템 모니터링
+psutil>=5.9.6
+
+# 유틸리티
+tqdm>=4.66.1
 joblib>=1.3.2
-rich>=13.4.2
+rich>=13.7.0
+
+# 메모리 프로파일링
 pympler>=0.9
 memory-profiler>=0.61.0
-numba>=0.57.1
-category-encoders>=2.6.1
+
+# 성능 최적화
+numba>=0.58.1
+
+# 피처 엔지니어링
+category-encoders>=2.6.3
 feature-engine>=1.6.2
-scipy>=1.11.1
-statsmodels>=0.14.0
+
+# 통계 및 수학
+statsmodels>=0.14.1
+
+# 압축 및 직렬화
 lz4>=4.3.2
-orjson>=3.9.4
+orjson>=3.9.10
 pickle5>=0.0.12
+
+# 날짜 처리
 python-dateutil>=2.8.2
+
+# 설정 관리
 pyyaml>=6.0.1
 python-dotenv>=1.0.0
-typing-extensions>=4.7.1
-pydantic>=2.0.3
-importlib-metadata>=6.8.0
-colorlog>=6.7.0
+
+# 타입 힌트
+typing-extensions>=4.9.0
+pydantic>=2.5.2
+
+# 메타데이터
+importlib-metadata>=6.11.0
+
+# 로깅
+colorlog>=6.8.0
+
+# 캐싱
 diskcache>=5.6.3
-flask>=2.3.0
-fastapi>=0.100.0
-uvicorn>=0.23.0
+
+# 웹 프레임워크 (추론 API용)
+flask>=3.0.0
+fastapi>=0.105.0
+uvicorn>=0.25.0
+
+# HTTP 클라이언트
 requests>=2.31.0
-shap>=0.42.0
-black>=23.7.0
-flake8>=6.0.0
-pytest>=7.4.0
+
+# 모델 해석
+shap>=0.44.0
+
+# 개발 도구
+black>=23.12.1
+flake8>=6.1.0
+pytest>=7.4.4
+
+# 주피터
 jupyter>=1.0.0
+
+# CTR 모델링 전용 라이브러리
+imbalanced-learn>=0.11.0
+bayesian-optimization>=1.4.3
+
+# 실시간 추론 최적화
+cachetools>=5.3.2
+redis>=5.0.1
+
+# 메모리 맵핑 및 병렬 처리  
+mmap>=0.1.0
+multiprocess>=0.70.15
+
+# 텐서 연산 최적화
+intel-extension-for-pytorch>=2.1.10

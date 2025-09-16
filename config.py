@@ -287,12 +287,13 @@ class Config:
         'data_processing_logging': True
     }
     
-    # 실시간 추론 설정 (대용량 데이터 최적화)
+    # 실시간 추론 설정 (100ms 이하 목표)
     INFERENCE_CONFIG = {
-        'batch_size': 50000,  # 대용량 배치 처리
-        'timeout': 900,
-        'cache_size': 200000,
-        'model_version': 'v4.0',
+        'batch_size': 10000,  # 실시간 처리 최적화
+        'single_prediction_batch_size': 1,  # 단일 예측용
+        'timeout': 100,  # 100ms 목표
+        'cache_size': 50000,  # 캐시 크기 조정
+        'model_version': 'v1.0',
         'use_gpu': GPU_AVAILABLE,
         'parallel_inference': True,
         'inference_optimization': True,
@@ -302,7 +303,25 @@ class Config:
         'onnx_optimization': False,
         'async_inference': True,
         'memory_pool': True,
-        'connection_pool_size': 200
+        'connection_pool_size': 50,
+        'warm_up_requests': 10,  # 워밍업 요청 수
+        'feature_caching': True,  # 피처 캐싱 활성화
+        'prediction_caching': True,  # 예측 결과 캐싱
+        'real_time_optimization': True,  # 실시간 최적화
+        'latency_target_ms': 100,  # 지연시간 목표
+        'throughput_target_qps': 1000,  # 처리량 목표
+        'model_preloading': True,  # 모델 사전 로딩
+        'feature_preprocessing_cache': True,  # 피처 전처리 캐싱
+        'thread_pool_size': NUM_WORKERS * 2,  # 쓰레드 풀 크기
+        'response_compression': False,  # 응답 압축 비활성화 (속도 우선)
+        'monitoring_enabled': True,  # 모니터링 활성화
+        'performance_logging': False,  # 성능 로깅 비활성화 (속도 우선)
+        'rule_compliance_check': True,  # 규칙 준수 확인
+        'independent_execution': True,  # 독립 실행 보장
+        'no_external_api': True,  # 외부 API 의존성 제거
+        'local_only': True,  # 로컬 전용 실행
+        'utf8_encoding': True,  # UTF-8 인코딩 강제
+        'relative_path_only': True  # 상대 경로만 사용
     }
     
     # 하이퍼파라미터 튜닝 설정 (대용량 데이터 최적화)
@@ -705,6 +724,37 @@ class Config:
                 }
             }
 
+    @classmethod
+    def setup_gpu_environment(cls):
+        """GPU 환경 설정"""
+        if not cls.GPU_AVAILABLE:
+            return False
+            
+        try:
+            if TORCH_AVAILABLE:
+                import torch
+                
+                # CUDA 설정
+                torch.backends.cudnn.benchmark = cls.GPU_CONFIG['cudnn_benchmark']
+                torch.backends.cudnn.deterministic = cls.GPU_CONFIG['cudnn_deterministic']
+                
+                # 메모리 설정
+                if hasattr(torch.cuda, 'set_memory_fraction'):
+                    torch.cuda.set_memory_fraction(cls.GPU_CONFIG['gpu_memory_fraction'])
+                
+                # Mixed Precision 설정
+                if cls.GPU_CONFIG['mixed_precision']:
+                    torch.backends.cuda.matmul.allow_tf32 = True
+                    torch.backends.cudnn.allow_tf32 = True
+                
+                print(f"GPU 환경 설정 완료: {torch.cuda.get_device_name(0)}")
+                return True
+                
+        except Exception as e:
+            print(f"GPU 환경 설정 실패: {e}")
+            
+        return False
+
 # 환경변수 설정 - 대용량 데이터 처리 최적화
 try:
     os.environ['PYTHONHASHSEED'] = str(Config.RANDOM_STATE)
@@ -728,6 +778,11 @@ try:
     # 메모리 관리 환경 변수
     os.environ['MALLOC_TRIM_THRESHOLD_'] = '100000'
     os.environ['MALLOC_MMAP_THRESHOLD_'] = '131072'
+    
+    # 규칙 준수 환경 변수
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+    os.environ['LC_ALL'] = 'C.UTF-8'
+    os.environ['LANG'] = 'C.UTF-8'
     
 except Exception as e:
     print(f"환경 변수 설정 실패: {e}")
