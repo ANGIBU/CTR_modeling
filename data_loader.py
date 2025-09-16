@@ -1105,4 +1105,4 @@ if __name__ == "__main__":
         print(f"로딩 통계: {loader.get_loading_stats()}")
         
     except Exception as e:
-        logger.error(f"테스트 실행 실패: {e}")6
+        logger.error(f"테스트 실행 실패: {e}")
