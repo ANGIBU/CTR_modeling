@@ -10,35 +10,36 @@ from pathlib import Path
 import time
 import gc
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import psutil
+import warnings
+warnings.filterwarnings('ignore')
 
+# GPU 최적화 import
 TORCH_AVAILABLE = False
 try:
     import torch
     if torch.cuda.is_available():
         try:
-            test_tensor = torch.zeros(500, 500).cuda()
+            # RTX 4060 Ti 16GB 최적화 테스트
+            test_tensor = torch.zeros(2000, 2000).cuda()
             test_result = test_tensor.sum().item()
             del test_tensor
             torch.cuda.empty_cache()
             TORCH_AVAILABLE = True
+            
+            # RTX 4060 Ti 메모리 최적화 설정
+            torch.cuda.set_per_process_memory_fraction(0.85)  # 16GB의 85% 사용
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.deterministic = False
+            
         except Exception as e:
-            logging.warning(f"GPU 테스트 실패: {e}. CPU 모드만 사용")
+            logging.warning(f"GPU 최적화 테스트 실패: {e}")
             TORCH_AVAILABLE = True
     else:
         TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-    logging.warning("PyTorch가 설치되지 않았습니다. GPU 기능이 비활성화됩니다.")
-
-try:
-    import psutil
-    PSUTIL_AVAILABLE = True
-except ImportError:
-    PSUTIL_AVAILABLE = False
-    logging.warning("psutil이 설치되지 않았습니다. 메모리 모니터링 기능이 제한됩니다.")
-
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import make_scorer
+    logging.warning("PyTorch가 설치되지 않았습니다.")
 
 try:
     import optuna
@@ -47,7 +48,10 @@ try:
     OPTUNA_AVAILABLE = True
 except ImportError:
     OPTUNA_AVAILABLE = False
-    logging.warning("Optuna가 설치되지 않았습니다. 하이퍼파라미터 튜닝 기능이 비활성화됩니다.")
+    logging.warning("Optuna가 설치되지 않았습니다.")
+
+from sklearn.model_selection import TimeSeriesSplit, StratifiedKFold
+from sklearn.metrics import make_scorer
 
 from config import Config
 from models import ModelFactory, BaseModel, CTRCalibrator
@@ -55,1308 +59,1000 @@ from evaluation import CTRMetrics
 
 logger = logging.getLogger(__name__)
 
-class LargeDataMemoryTracker:
-    """대용량 데이터 메모리 추적 클래스 - 개선"""
+class AdvancedMemoryManager:
+    """대용량 데이터 특화 고급 메모리 관리자"""
     
-    @staticmethod
-    def get_memory_usage() -> float:
-        """현재 메모리 사용량 (GB)"""
-        if PSUTIL_AVAILABLE:
+    def __init__(self):
+        self.process = psutil.Process()
+        self.memory_threshold = 32.0  # 32GB 임계값
+        self.gpu_available = TORCH_AVAILABLE and torch.cuda.is_available()
+        self.cleanup_count = 0
+        
+    def get_memory_status(self) -> Dict[str, float]:
+        """상세 메모리 상태 반환"""
+        vm = psutil.virtual_memory()
+        process_memory = self.process.memory_info().rss / (1024**3)
+        
+        status = {
+            'process_gb': process_memory,
+            'available_gb': vm.available / (1024**3),
+            'total_gb': vm.total / (1024**3),
+            'usage_percent': vm.percent,
+            'swap_used_gb': psutil.swap_memory().used / (1024**3)
+        }
+        
+        if self.gpu_available:
             try:
-                process = psutil.Process()
-                return process.memory_info().rss / (1024**3)
-            except:
-                return 0.0
-        return 0.0
+                gpu_memory = torch.cuda.memory_allocated(0) / (1024**3)
+                gpu_reserved = torch.cuda.memory_reserved(0) / (1024**3)
+                gpu_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                
+                status.update({
+                    'gpu_used_gb': gpu_memory,
+                    'gpu_reserved_gb': gpu_reserved,
+                    'gpu_total_gb': gpu_total,
+                    'gpu_free_gb': gpu_total - gpu_reserved
+                })
+            except Exception:
+                pass
+        
+        return status
     
-    @staticmethod
-    def get_available_memory() -> float:
-        """사용 가능한 메모리 (GB)"""
-        if PSUTIL_AVAILABLE:
+    def aggressive_cleanup(self):
+        """공격적 메모리 정리"""
+        self.cleanup_count += 1
+        
+        # Python 가비지 컬렉션
+        for _ in range(3):
+            collected = gc.collect()
+            if collected == 0:
+                break
+        
+        # GPU 메모리 정리
+        if self.gpu_available:
             try:
-                return psutil.virtual_memory().available / (1024**3)
-            except:
-                return 30.0
-        return 30.0
-    
-    @staticmethod
-    def force_cleanup():
-        """강제 메모리 정리 - 대용량 데이터 특화"""
-        try:
-            for _ in range(3):
-                gc.collect()
-            
-            if TORCH_AVAILABLE and torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
-                
-            try:
-                import ctypes
-                if hasattr(ctypes, 'windll'):
-                    ctypes.windll.kernel32.SetProcessWorkingSetSize(-1, -1, -1)
-            except:
+                torch.cuda.ipc_collect()
+            except Exception:
                 pass
-                
-        except Exception as e:
-            logger.warning(f"메모리 정리 실패: {e}")
+        
+        # 시스템 메모리 최적화
+        try:
+            import ctypes
+            if hasattr(ctypes, 'windll'):
+                ctypes.windll.kernel32.SetProcessWorkingSetSize(-1, -1, -1)
+        except Exception:
+            pass
+        
+        logger.debug(f"메모리 정리 완료 #{self.cleanup_count}")
+    
+    def check_memory_pressure(self) -> bool:
+        """메모리 압박 상태 확인"""
+        status = self.get_memory_status()
+        
+        # CPU 메모리 압박
+        cpu_pressure = (status['available_gb'] < 8 or 
+                       status['usage_percent'] > 85 or 
+                       status['process_gb'] > self.memory_threshold)
+        
+        # GPU 메모리 압박
+        gpu_pressure = False
+        if self.gpu_available and 'gpu_free_gb' in status:
+            gpu_pressure = status['gpu_free_gb'] < 2
+        
+        return cpu_pressure or gpu_pressure
 
-class CTRModelTrainer:
-    """CTR 특화 대용량 데이터 모델 학습 관리 클래스 - 1070만행 최적화"""
+class HighPerformanceCTRTrainer:
+    """고성능 CTR 모델 학습기 - 1070만행 특화"""
     
     def __init__(self, config: Config = Config):
         self.config = config
-        self.device = getattr(config, 'DEVICE', 'cpu')
+        self.device = 'cuda' if TORCH_AVAILABLE and torch.cuda.is_available() else 'cpu'
+        self.memory_manager = AdvancedMemoryManager()
+        
+        # 학습 결과 저장
         self.trained_models = {}
         self.cv_results = {}
         self.best_params = {}
         self.calibrators = {}
-        self.memory_tracker = LargeDataMemoryTracker()
+        self.performance_history = []
         
-        self.gpu_available = False
-        if TORCH_AVAILABLE and torch.cuda.is_available():
+        # RTX 4060 Ti 최적화 설정
+        self.gpu_optimized = False
+        if self.device == 'cuda':
             try:
-                test_tensor = torch.zeros(2000, 2000).cuda()
-                test_result = test_tensor.sum().item()
-                del test_tensor
-                torch.cuda.empty_cache()
-                
-                # RTX 4060 Ti 16GB 최적화 - 70% 사용
-                torch.cuda.set_per_process_memory_fraction(0.7)
-                
-                self.gpu_available = True
+                gpu_props = torch.cuda.get_device_properties(0)
                 gpu_name = torch.cuda.get_device_name(0)
-                gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                logger.info(f"GPU 학습 환경: {gpu_name}")
-                logger.info(f"GPU 메모리: {gpu_memory:.1f}GB (70% 사용)")
+                gpu_memory = gpu_props.total_memory / (1024**3)
+                
+                logger.info(f"GPU: {gpu_name} ({gpu_memory:.1f}GB)")
+                
+                # RTX 4060 Ti 특화 최적화
+                if 'RTX 4060 Ti' in gpu_name or gpu_memory > 14:
+                    self.gpu_optimized = True
+                    torch.cuda.set_per_process_memory_fraction(0.9)
+                    logger.info("RTX 4060 Ti 최적화 활성화")
+                
             except Exception as e:
-                logger.warning(f"GPU 초기화 실패: {e}. CPU 모드 사용")
-                self.gpu_available = False
-        else:
-            logger.info("CPU 학습 환경")
+                logger.warning(f"GPU 최적화 실패: {e}")
     
-    def train_single_model(self, 
-                          model_type: str,
-                          X_train: pd.DataFrame,
-                          y_train: pd.Series,
-                          X_val: Optional[pd.DataFrame] = None,
-                          y_val: Optional[pd.Series] = None,
-                          params: Optional[Dict[str, Any]] = None,
-                          apply_calibration: bool = True) -> BaseModel:
-        """CTR 특화 단일 모델 학습 - 1070만행 최적화"""
+    def get_optimized_batch_size(self, model_type: str, data_size: int) -> int:
+        """모델별 최적 배치 크기 계산"""
+        memory_status = self.memory_manager.get_memory_status()
+        available_memory = memory_status['available_gb']
         
-        logger.info(f"{model_type} CTR 모델 학습 시작")
-        start_time = time.time()
-        memory_before = self.memory_tracker.get_memory_usage()
+        # 기본 배치 크기
+        base_batch_sizes = {
+            'lightgbm': min(100000, max(10000, data_size // 100)),
+            'xgboost': min(80000, max(8000, data_size // 120)),
+            'catboost': min(60000, max(6000, data_size // 150)),
+            'deepctr': 4096 if self.gpu_optimized else 2048
+        }
         
-        try:
-            available_memory = self.memory_tracker.get_available_memory()
-            
-            # 대용량 데이터 메모리 관리
-            if available_memory < 15:
-                logger.warning(f"메모리 부족: {available_memory:.2f}GB. 데이터 크기 조정")
-                # 1070만행 -> 500만행으로 축소
-                if len(X_train) > 5000000:
-                    sample_indices = np.random.choice(len(X_train), 5000000, replace=False)
-                    X_train = X_train.iloc[sample_indices].copy()
-                    y_train = y_train.iloc[sample_indices].copy()
-                    if X_val is not None and len(X_val) > 1000000:
-                        val_indices = np.random.choice(len(X_val), 1000000, replace=False)
-                        X_val = X_val.iloc[val_indices].copy()
-                        y_val = y_val.iloc[val_indices].copy()
-            
-            if params:
-                params = self._validate_and_fix_large_data_params(model_type, params)
-            else:
-                params = self._get_large_data_optimized_params(model_type)
-            
-            model_kwargs = {'params': params}
-            if model_type.lower() == 'deepctr':
-                model_kwargs['input_dim'] = X_train.shape[1]
-            
-            model = ModelFactory.create_model(model_type, **model_kwargs)
-            
-            model.fit(X_train, y_train, X_val, y_val)
-            
-            if apply_calibration and X_val is not None and y_val is not None:
-                current_memory = self.memory_tracker.get_available_memory()
-                if current_memory > 5:
-                    self._apply_ctr_calibration(model, X_val, y_val)
-                else:
-                    logger.warning("메모리 부족으로 Calibration 생략")
-            
-            training_time = time.time() - start_time
-            memory_after = self.memory_tracker.get_memory_usage()
-            
-            logger.info(f"{model_type} CTR 모델 학습 완료 (소요시간: {training_time:.2f}초)")
-            logger.info(f"메모리 사용량: {memory_before:.2f}GB → {memory_after:.2f}GB")
-            
-            self.trained_models[model_type] = {
-                'model': model,
-                'params': params or {},
-                'training_time': training_time,
-                'calibrated': apply_calibration,
-                'memory_used': memory_after - memory_before,
-                'cv_result': None,
-                'data_size_used': len(X_train)
-            }
-            
-            self._cleanup_memory_after_training(model_type)
-            
-            return model
-            
-        except Exception as e:
-            logger.error(f"{model_type} CTR 모델 학습 실패: {str(e)}")
-            self._cleanup_memory_after_training(model_type)
-            raise
-    
-    def _validate_and_fix_large_data_params(self, model_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """1070만행 대용량 데이터 파라미터 최적화"""
-        fixed_params = params.copy()
+        batch_size = base_batch_sizes.get(model_type, 10000)
         
-        try:
-            if model_type.lower() == 'lightgbm':
-                # LightGBM 1070만행 최적화
-                if 'is_unbalance' in fixed_params and 'scale_pos_weight' in fixed_params:
-                    fixed_params.pop('is_unbalance', None)
-                
-                fixed_params.setdefault('objective', 'binary')
-                fixed_params.setdefault('metric', 'binary_logloss')
-                fixed_params.setdefault('verbose', -1)
-                
-                # 대용량 데이터 특화 파라미터
-                fixed_params['num_leaves'] = min(fixed_params.get('num_leaves', 511), 1023)
-                fixed_params['max_bin'] = min(fixed_params.get('max_bin', 255), 255)
-                fixed_params['num_threads'] = min(fixed_params.get('num_threads', 12), 12)  # Ryzen 5 5600X
-                fixed_params['force_row_wise'] = True
-                fixed_params['scale_pos_weight'] = 49.75  # 실제 CTR 0.0201 반영
-                
-                # 1070만행 특화 정규화 강화
-                fixed_params['lambda_l1'] = max(fixed_params.get('lambda_l1', 3.0), 2.0)
-                fixed_params['lambda_l2'] = max(fixed_params.get('lambda_l2', 3.0), 2.0)
-                fixed_params['min_child_samples'] = max(fixed_params.get('min_child_samples', 500), 300)
-                fixed_params['max_depth'] = min(fixed_params.get('max_depth', 15), 18)
-                
-                # 대용량 특화 설정
-                fixed_params['feature_pre_filter'] = False
-                fixed_params['boost_from_average'] = True
-                fixed_params['is_provide_training_metric'] = False
-                
-            elif model_type.lower() == 'xgboost':
-                fixed_params.setdefault('objective', 'binary:logistic')
-                fixed_params.setdefault('eval_metric', 'logloss')
-                
-                if self.gpu_available:
-                    fixed_params['tree_method'] = 'gpu_hist'
-                    fixed_params['gpu_id'] = 0
-                    fixed_params['max_bin'] = 128  # GPU 메모리 고려
-                else:
-                    fixed_params['tree_method'] = 'hist'
-                    fixed_params.pop('gpu_id', None)
-                    fixed_params['max_bin'] = 255
-                
-                # 1070만행 최적화
-                fixed_params['max_depth'] = min(fixed_params.get('max_depth', 12), 15)
-                fixed_params['nthread'] = min(fixed_params.get('nthread', 12), 12)
-                fixed_params['scale_pos_weight'] = 49.75
-                
-                # 대용량 특화 정규화
-                fixed_params['reg_alpha'] = max(fixed_params.get('reg_alpha', 3.0), 2.0)
-                fixed_params['reg_lambda'] = max(fixed_params.get('reg_lambda', 3.0), 2.0)
-                fixed_params['min_child_weight'] = max(fixed_params.get('min_child_weight', 20), 15)
-                
-                fixed_params['grow_policy'] = 'lossguide'
-                fixed_params['max_leaves'] = min(fixed_params.get('max_leaves', 511), 1023)
-                
-            elif model_type.lower() == 'catboost':
-                fixed_params.setdefault('loss_function', 'Logloss')
-                fixed_params.setdefault('verbose', False)
-                
-                if self.gpu_available:
-                    fixed_params['task_type'] = 'GPU'
-                    fixed_params['devices'] = '0'
-                    fixed_params['gpu_ram_part'] = 0.6  # RTX 4060 Ti 최적화
-                else:
-                    fixed_params['task_type'] = 'CPU'
-                    fixed_params.pop('devices', None)
-                    fixed_params.pop('gpu_ram_part', None)
-                
-                # CatBoost 파라미터 충돌 완전 방지
-                conflicting_params = ['early_stopping_rounds', 'use_best_model', 'eval_set']
-                for param in conflicting_params:
-                    if param in fixed_params:
-                        if param == 'early_stopping_rounds':
-                            early_stop_val = fixed_params.pop(param)
-                            if 'od_wait' not in fixed_params:
-                                fixed_params['od_wait'] = early_stop_val
-                                fixed_params['od_type'] = 'IncToDec'
-                        else:
-                            fixed_params.pop(param)
-                
-                # 1070만행 최적화
-                fixed_params['depth'] = min(fixed_params.get('depth', 10), 12)
-                fixed_params['thread_count'] = min(fixed_params.get('thread_count', 12), 12)
-                fixed_params['auto_class_weights'] = 'Balanced'
-                
-                # 대용량 특화 설정
-                fixed_params['l2_leaf_reg'] = max(fixed_params.get('l2_leaf_reg', 15), 10)
-                fixed_params['min_data_in_leaf'] = max(fixed_params.get('min_data_in_leaf', 200), 100)
-                fixed_params['grow_policy'] = 'Lossguide'
-                fixed_params['max_leaves'] = min(fixed_params.get('max_leaves', 511), 1023)
-                
-            elif model_type.lower() == 'deepctr':
-                # RTX 4060 Ti 16GB 최적화
-                fixed_params['hidden_dims'] = fixed_params.get('hidden_dims', [1024, 512, 256, 128, 64])
-                fixed_params['batch_size'] = min(fixed_params.get('batch_size', 2048), 4096)
-                fixed_params['epochs'] = min(fixed_params.get('epochs', 100), 150)
-                fixed_params['dropout_rate'] = min(max(fixed_params.get('dropout_rate', 0.4), 0.2), 0.6)
-                fixed_params['learning_rate'] = min(max(fixed_params.get('learning_rate', 0.0008), 0.0001), 0.01)
-                
-                fixed_params['weight_decay'] = max(fixed_params.get('weight_decay', 1e-4), 1e-5)
-                fixed_params['use_batch_norm'] = fixed_params.get('use_batch_norm', True)
-                fixed_params['use_residual'] = fixed_params.get('use_residual', True)
-                fixed_params['gradient_clip_norm'] = 1.0
-                
-        except Exception as e:
-            logger.warning(f"대용량 파라미터 검증 실패: {e}")
-        
-        return fixed_params
-    
-    def _apply_ctr_calibration(self, model: BaseModel, X_val: pd.DataFrame, y_val: pd.Series):
-        """CTR 특화 Calibration 적용 - 대용량 데이터 최적화"""
-        try:
-            logger.info(f"{model.name} CTR Calibration 적용 시작")
-            
-            if self.memory_tracker.get_available_memory() < 3:
-                logger.warning("메모리 부족으로 Calibration 생략")
-                return
-            
-            # 대용량 데이터 샘플링
-            if len(X_val) > 100000:
-                sample_indices = np.random.choice(len(X_val), 100000, replace=False)
-                X_val_sample = X_val.iloc[sample_indices]
-                y_val_sample = y_val.iloc[sample_indices]
-            else:
-                X_val_sample = X_val
-                y_val_sample = y_val
-            
-            raw_predictions = model.predict_proba_raw(X_val_sample)
-            
-            calibrator = CTRCalibrator(target_ctr=0.0201)  # 실제 CTR 사용
-            
-            if self.config.CALIBRATION_CONFIG.get('platt_scaling', True):
-                calibrator.fit_platt_scaling(y_val_sample.values, raw_predictions)
-            
-            if self.config.CALIBRATION_CONFIG.get('isotonic_regression', True):
-                calibrator.fit_isotonic_regression(y_val_sample.values, raw_predictions)
-            
-            if self.config.CALIBRATION_CONFIG.get('temperature_scaling', True):
-                calibrator.fit_temperature_scaling(y_val_sample.values, raw_predictions)
-            
-            calibrator.fit_bias_correction(y_val_sample.values, raw_predictions)
-            
-            model.apply_calibration(X_val_sample, y_val_sample, method='platt', cv_folds=3)
-            
-            self.calibrators[model.name] = calibrator
-            
-            calibrated_predictions = model.predict_proba(X_val_sample)
-            
-            original_ctr = raw_predictions.mean()
-            calibrated_ctr = calibrated_predictions.mean()
-            actual_ctr = y_val_sample.mean()
-            
-            logger.info(f"CTR Calibration 결과 - 원본: {original_ctr:.4f}, 보정: {calibrated_ctr:.4f}, 실제: {actual_ctr:.4f}")
-            
-            del raw_predictions, calibrated_predictions
-            LargeDataMemoryTracker.force_cleanup()
-            
-        except Exception as e:
-            logger.error(f"CTR Calibration 적용 실패 ({model.name}): {str(e)}")
-    
-    def cross_validate_ctr_model(self,
-                                model_type: str,
-                                X: pd.DataFrame,
-                                y: pd.Series,
-                                cv_folds: int = None,
-                                params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """CTR 특화 시간적 순서 고려 교차검증 - 1070만행 최적화"""
-        
-        if cv_folds is None:
-            cv_folds = min(5, self.config.N_SPLITS)  # 대용량 데이터는 5폴드
-        
-        logger.info(f"{model_type} CTR 모델 {cv_folds}폴드 교차검증 시작")
-        
-        available_memory = self.memory_tracker.get_available_memory()
-        original_size = len(X)
-        
-        # 메모리 기반 데이터 조정
+        # 메모리 기반 조정
         if available_memory < 20:
-            if len(X) > 2000000:
-                sample_size = 1500000
-                sample_indices = np.random.choice(len(X), sample_size, replace=False)
-                X = X.iloc[sample_indices].copy()
-                y = y.iloc[sample_indices].copy()
-                logger.warning(f"메모리 절약을 위해 데이터 축소: {original_size:,} → {sample_size:,}")
+            batch_size = int(batch_size * 0.6)
+        elif available_memory > 35:
+            batch_size = int(batch_size * 1.4)
         
-        try:
-            if params:
-                params = self._validate_and_fix_large_data_params(model_type, params)
+        # GPU 메모리 기반 조정 (DeepCTR)
+        if model_type == 'deepctr' and self.gpu_optimized:
+            gpu_memory = memory_status.get('gpu_free_gb', 8)
+            if gpu_memory > 12:
+                batch_size = 8192
+            elif gpu_memory > 8:
+                batch_size = 6144
+            elif gpu_memory > 4:
+                batch_size = 4096
             else:
-                params = self._get_large_data_optimized_params(model_type)
-            
-            # TimeSeriesSplit로 시간 순서 고려
-            tscv = TimeSeriesSplit(n_splits=cv_folds, gap=1000)  # gap 추가로 데이터 누출 방지
-            
-            cv_scores = {
-                'ap_scores': [],
-                'wll_scores': [],
-                'combined_scores': [],
-                'ctr_bias_scores': [],
-                'training_times': [],
-                'memory_usage': [],
-                'validation_sizes': []
+                batch_size = 2048
+        
+        return max(1000, batch_size)
+    
+    def get_high_performance_params(self, model_type: str, data_size: int) -> Dict[str, Any]:
+        """고성능 파라미터 설정 - Combined Score 0.30+ 목표"""
+        
+        if model_type.lower() == 'lightgbm':
+            # 1070만행 특화 LightGBM 파라미터
+            return {
+                'objective': 'binary',
+                'metric': 'binary_logloss',
+                'boosting_type': 'gbdt',
+                'num_leaves': 511,  # 최대값으로 설정
+                'learning_rate': 0.02,  # 낮은 학습률로 안정성 확보
+                'feature_fraction': 0.85,
+                'bagging_fraction': 0.8,
+                'bagging_freq': 3,
+                'min_child_samples': 300,  # 대용량 데이터용 증가
+                'min_child_weight': 8,
+                'lambda_l1': 1.5,
+                'lambda_l2': 1.5,
+                'max_depth': 15,
+                'max_bin': 255,
+                'path_smooth': 2.0,
+                'verbose': -1,
+                'random_state': self.config.RANDOM_STATE,
+                'n_estimators': 5000,  # 대용량 데이터용 증가
+                'early_stopping_rounds': 100,
+                'scale_pos_weight': 49.0,
+                'force_row_wise': True,
+                'num_threads': 12,  # Ryzen 5600X 최적화
+                'device_type': 'cpu',
+                'min_data_in_leaf': 150,
+                'feature_fraction_bynode': 0.85,
+                'extra_trees': True,
+                'grow_policy': 'lossguide',
+                'max_cat_threshold': 64,
+                'cat_l2': 1.0,
+                'cat_smooth': 10.0
+            }
+        
+        elif model_type.lower() == 'xgboost':
+            # 1070만행 특화 XGBoost 파라미터
+            params = {
+                'objective': 'binary:logistic',
+                'eval_metric': 'logloss',
+                'tree_method': 'hist',
+                'max_depth': 10,
+                'learning_rate': 0.02,
+                'subsample': 0.85,
+                'colsample_bytree': 0.85,
+                'colsample_bylevel': 0.85,
+                'colsample_bynode': 0.85,
+                'min_child_weight': 12,
+                'reg_alpha': 1.5,
+                'reg_lambda': 1.5,
+                'scale_pos_weight': 49.0,
+                'random_state': self.config.RANDOM_STATE,
+                'n_estimators': 5000,
+                'early_stopping_rounds': 100,
+                'max_bin': 255,
+                'nthread': 12,
+                'grow_policy': 'lossguide',
+                'max_leaves': 511,
+                'gamma': 0.05,
+                'validate_parameters': True,
+                'predictor': 'cpu_predictor'
             }
             
-            metrics_calculator = CTRMetrics()
+            # GPU 최적화
+            if self.gpu_optimized:
+                params.update({
+                    'tree_method': 'gpu_hist',
+                    'gpu_id': 0,
+                    'predictor': 'gpu_predictor'
+                })
             
-            for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
-                logger.info(f"CTR 폴드 {fold + 1}/{cv_folds} 시작")
-                
-                try:
-                    memory_before = self.memory_tracker.get_memory_usage()
-                    
-                    X_train_fold = X.iloc[train_idx]
-                    X_val_fold = X.iloc[val_idx]
-                    y_train_fold = y.iloc[train_idx]
-                    y_val_fold = y.iloc[val_idx]
-                    
-                    start_time = time.time()
-                    model = self.train_single_model(
-                        model_type, X_train_fold, y_train_fold,
-                        X_val_fold, y_val_fold, params,
-                        apply_calibration=False
-                    )
-                    training_time = time.time() - start_time
-                    
-                    y_pred_proba = model.predict_proba(X_val_fold)
-                    
-                    # 예측값 다양성 검증
-                    unique_predictions = len(np.unique(y_pred_proba))
-                    if unique_predictions < 1000:  # 대용량 데이터 기준
-                        logger.warning(f"폴드 {fold + 1}: 예측값 다양성 부족 (고유값: {unique_predictions})")
-                    
-                    ap_score = metrics_calculator.average_precision(y_val_fold, y_pred_proba)
-                    wll_score = metrics_calculator.weighted_log_loss(y_val_fold, y_pred_proba)
-                    combined_score = metrics_calculator.combined_score(y_val_fold, y_pred_proba)
-                    
-                    actual_ctr = y_val_fold.mean()
-                    predicted_ctr = y_pred_proba.mean()
-                    ctr_bias = abs(predicted_ctr - actual_ctr)
-                    ctr_bias_score = 1.0 / (1.0 + ctr_bias * 100)
-                    
-                    memory_after = self.memory_tracker.get_memory_usage()
-                    
-                    cv_scores['ap_scores'].append(ap_score)
-                    cv_scores['wll_scores'].append(wll_score)
-                    cv_scores['combined_scores'].append(combined_score)
-                    cv_scores['ctr_bias_scores'].append(ctr_bias_score)
-                    cv_scores['training_times'].append(training_time)
-                    cv_scores['memory_usage'].append(memory_after - memory_before)
-                    cv_scores['validation_sizes'].append(len(X_val_fold))
-                    
-                    logger.info(f"CTR 폴드 {fold + 1} 완료 - AP: {ap_score:.4f}, WLL: {wll_score:.4f}, Combined: {combined_score:.4f}, CTR편향: {ctr_bias:.4f}")
-                    
-                    del X_train_fold, X_val_fold, y_train_fold, y_val_fold, model, y_pred_proba
-                    LargeDataMemoryTracker.force_cleanup()
-                    
-                except Exception as e:
-                    logger.error(f"CTR 폴드 {fold + 1} 실행 실패: {str(e)}")
-                    cv_scores['ap_scores'].append(0.0)
-                    cv_scores['wll_scores'].append(float('inf'))
-                    cv_scores['combined_scores'].append(0.0)
-                    cv_scores['ctr_bias_scores'].append(0.0)
-                    cv_scores['training_times'].append(0.0)
-                    cv_scores['memory_usage'].append(0.0)
-                    cv_scores['validation_sizes'].append(0)
-                    LargeDataMemoryTracker.force_cleanup()
+            return params
+        
+        elif model_type.lower() == 'catboost':
+            # 1070만행 특화 CatBoost 파라미터
+            params = {
+                'loss_function': 'Logloss',
+                'eval_metric': 'Logloss',
+                'task_type': 'CPU',
+                'depth': 10,
+                'learning_rate': 0.02,
+                'l2_leaf_reg': 8,
+                'iterations': 5000,
+                'random_seed': self.config.RANDOM_STATE,
+                'od_wait': 100,
+                'od_type': 'IncToDec',
+                'verbose': False,
+                'auto_class_weights': 'Balanced',
+                'max_ctr_complexity': 4,
+                'thread_count': 12,
+                'bootstrap_type': 'Bayesian',
+                'bagging_temperature': 1.2,
+                'leaf_estimation_iterations': 12,
+                'leaf_estimation_method': 'Newton',
+                'grow_policy': 'Lossguide',
+                'max_leaves': 511,
+                'min_data_in_leaf': 80,
+                'model_size_reg': 0.1,
+                'feature_border_type': 'GreedyLogSum',
+                'ctr_leaf_count_limit': 64
+            }
             
-            valid_scores = [s for s in cv_scores['combined_scores'] if s > 0]
-            valid_ctr_scores = [s for s in cv_scores['ctr_bias_scores'] if s > 0]
+            # GPU 최적화
+            if self.gpu_optimized:
+                params.update({
+                    'task_type': 'GPU',
+                    'devices': '0',
+                    'gpu_ram_part': 0.8
+                })
             
-            if not valid_scores:
-                logger.warning(f"{model_type} CTR 모든 폴드가 실패했습니다")
-                cv_results = {
-                    'model_type': model_type,
-                    'combined_mean': 0.0,
-                    'combined_std': 0.0,
-                    'ctr_bias_mean': 0.0,
-                    'scores_detail': cv_scores,
-                    'params': params or {}
-                }
-            else:
-                cv_results = {
-                    'model_type': model_type,
-                    'combined_mean': np.mean(valid_scores),
-                    'combined_std': np.std(valid_scores) if len(valid_scores) > 1 else 0.0,
-                    'ctr_bias_mean': np.mean(valid_ctr_scores) if valid_ctr_scores else 0.0,
-                    'ctr_bias_std': np.std(valid_ctr_scores) if len(valid_ctr_scores) > 1 else 0.0,
-                    'scores_detail': cv_scores,
-                    'params': params or {},
-                    'successful_folds': len(valid_scores),
-                    'avg_training_time': np.mean([t for t in cv_scores['training_times'] if t > 0]),
-                    'avg_memory_usage': np.mean([m for m in cv_scores['memory_usage'] if m > 0]),
-                    'total_validation_size': sum(cv_scores['validation_sizes'])
-                }
-            
-            self.cv_results[model_type] = cv_results
-            
-            # trained_models에 cv_result 업데이트
-            if model_type in self.trained_models:
-                self.trained_models[model_type]['cv_result'] = cv_results
-            
-            logger.info(f"{model_type} CTR 교차검증 완료")
-            logger.info(f"평균 Combined Score: {cv_results['combined_mean']:.4f} (±{cv_results['combined_std']:.4f})")
-            logger.info(f"평균 CTR 편향 점수: {cv_results['ctr_bias_mean']:.4f}")
-            logger.info(f"성공한 폴드: {cv_results['successful_folds']}/{cv_folds}")
-            
-            return cv_results
-            
-        except Exception as e:
-            logger.error(f"{model_type} CTR 교차검증 실패: {str(e)}")
-            LargeDataMemoryTracker.force_cleanup()
-            raise
+            return params
+        
+        elif model_type.lower() == 'deepctr':
+            # RTX 4060 Ti 특화 DeepCTR 파라미터
+            return {
+                'hidden_dims': [1024, 768, 512, 256, 128, 64],  # 더 깊은 네트워크
+                'dropout_rate': 0.3,
+                'learning_rate': 0.0008,
+                'weight_decay': 5e-6,
+                'batch_size': self.get_optimized_batch_size('deepctr', data_size),
+                'epochs': 80,
+                'patience': 20,
+                'use_batch_norm': True,
+                'activation': 'swish',
+                'use_residual': True,
+                'use_attention': True,
+                'focal_loss_alpha': 0.25,
+                'focal_loss_gamma': 2.0,
+                'label_smoothing': 0.02,
+                'gradient_accumulation_steps': 2,
+                'warmup_steps': 1000,
+                'use_mixed_precision': self.gpu_optimized,
+                'use_gradient_checkpointing': True
+            }
+        
+        else:
+            return {}
     
-    def hyperparameter_tuning_ctr_optuna(self,
-                                        model_type: str,
-                                        X: pd.DataFrame,
-                                        y: pd.Series,
-                                        n_trials: int = None,
-                                        cv_folds: int = 3) -> Dict[str, Any]:
-        """CTR 특화 하이퍼파라미터 튜닝 - 1070만행 최적화"""
+    def advanced_hyperparameter_tuning(self, 
+                                      model_type: str,
+                                      X: pd.DataFrame,
+                                      y: pd.Series,
+                                      n_trials: int = None,
+                                      cv_folds: int = 3) -> Dict[str, Any]:
+        """고급 하이퍼파라미터 튜닝 - Combined Score 0.30+ 목표"""
         
         if not OPTUNA_AVAILABLE:
-            logger.warning("Optuna가 설치되지 않았습니다. CTR 기본 파라미터 사용")
-            best_params = self._get_large_data_optimized_params(model_type)
-            self.best_params[model_type] = best_params
-            return {
-                'model_type': model_type,
-                'best_params': best_params,
-                'best_score': 0.0,
-                'n_trials': 0,
-                'study': None
-            }
+            logger.warning("Optuna가 없어 기본 고성능 파라미터 사용")
+            return self.get_high_performance_params(model_type, len(X))
         
-        available_memory = self.memory_tracker.get_available_memory()
+        memory_status = self.memory_manager.get_memory_status()
+        
+        # 메모리 기반 trials 수 조정
         if n_trials is None:
-            if available_memory > 25:
-                n_trials = min(50, self.config.TUNING_CONFIG['n_trials'])
-            elif available_memory > 20:
-                n_trials = min(35, self.config.TUNING_CONFIG['n_trials'])
+            if memory_status['available_gb'] > 30:
+                n_trials = 50 if model_type != 'deepctr' else 30
+            elif memory_status['available_gb'] > 20:
+                n_trials = 35 if model_type != 'deepctr' else 20
             else:
-                n_trials = min(25, self.config.TUNING_CONFIG['n_trials'])
+                n_trials = 25 if model_type != 'deepctr' else 15
         
-        logger.info(f"{model_type} CTR 하이퍼파라미터 튜닝 시작 (trials: {n_trials})")
-        
-        original_size = len(X)
-        if available_memory < 15 and len(X) > 1000000:
-            sample_size = 800000
+        # 대용량 데이터용 샘플링
+        if len(X) > 5000000:
+            sample_size = min(2000000, len(X))
             sample_indices = np.random.choice(len(X), sample_size, replace=False)
-            X = X.iloc[sample_indices].copy()
-            y = y.iloc[sample_indices].copy()
-            logger.warning(f"메모리 절약을 위해 튜닝 데이터 축소: {original_size:,} → {sample_size:,}")
+            X_sample = X.iloc[sample_indices].copy()
+            y_sample = y.iloc[sample_indices].copy()
+            logger.info(f"튜닝용 데이터 샘플링: {len(X):,} → {sample_size:,}")
+        else:
+            X_sample = X
+            y_sample = y
         
-        def large_data_ctr_objective(trial):
+        logger.info(f"{model_type} 고급 하이퍼파라미터 튜닝 시작 (trials: {n_trials})")
+        
+        def high_performance_objective(trial):
+            """고성능 목표 objective 함수"""
             try:
-                if self.memory_tracker.get_available_memory() < 5:
-                    logger.warning("메모리 부족으로 trial 중단")
-                    return 0.0
+                if self.memory_manager.check_memory_pressure():
+                    self.memory_manager.aggressive_cleanup()
                 
                 if model_type.lower() == 'lightgbm':
                     params = {
                         'objective': 'binary',
                         'metric': 'binary_logloss',
                         'boosting_type': 'gbdt',
-                        'num_leaves': trial.suggest_int('num_leaves', 255, 1023),
-                        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.15, log=True),
-                        'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 0.9),
-                        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.5, 0.8),
-                        'bagging_freq': trial.suggest_int('bagging_freq', 1, 7),
-                        'min_child_samples': trial.suggest_int('min_child_samples', 300, 1000),
-                        'min_child_weight': trial.suggest_float('min_child_weight', 5, 50),
-                        'lambda_l1': trial.suggest_float('lambda_l1', 2.0, 10.0),
-                        'lambda_l2': trial.suggest_float('lambda_l2', 2.0, 10.0),
+                        'num_leaves': trial.suggest_int('num_leaves', 255, 511),
+                        'learning_rate': trial.suggest_float('learning_rate', 0.015, 0.035, log=True),
+                        'feature_fraction': trial.suggest_float('feature_fraction', 0.75, 0.9),
+                        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.7, 0.85),
+                        'bagging_freq': trial.suggest_int('bagging_freq', 2, 5),
+                        'min_child_samples': trial.suggest_int('min_child_samples', 200, 500),
+                        'min_child_weight': trial.suggest_float('min_child_weight', 5, 15),
+                        'lambda_l1': trial.suggest_float('lambda_l1', 1.0, 3.0),
+                        'lambda_l2': trial.suggest_float('lambda_l2', 1.0, 3.0),
                         'max_depth': trial.suggest_int('max_depth', 12, 18),
-                        'path_smooth': trial.suggest_float('path_smooth', 0.5, 3.0),
+                        'path_smooth': trial.suggest_float('path_smooth', 1.0, 3.0),
+                        'scale_pos_weight': trial.suggest_float('scale_pos_weight', 45, 55),
                         'verbose': -1,
                         'random_state': self.config.RANDOM_STATE,
-                        'n_estimators': 2000,
-                        'early_stopping_rounds': 150,
-                        'scale_pos_weight': trial.suggest_float('scale_pos_weight', 45, 55),
+                        'n_estimators': 3000,
+                        'early_stopping_rounds': 80,
                         'force_row_wise': True,
-                        'max_bin': 255,
                         'num_threads': 12,
-                        'boost_from_average': True,
-                        'feature_pre_filter': False
+                        'max_bin': 255,
+                        'grow_policy': 'lossguide',
+                        'extra_trees': True
                     }
                 
                 elif model_type.lower() == 'xgboost':
-                    params = {
+                    base_params = {
                         'objective': 'binary:logistic',
                         'eval_metric': 'logloss',
-                        'tree_method': 'gpu_hist' if self.gpu_available else 'hist',
-                        'gpu_id': 0 if self.gpu_available else None,
-                        'max_depth': trial.suggest_int('max_depth', 8, 15),
-                        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.15, log=True),
-                        'subsample': trial.suggest_float('subsample', 0.6, 0.9),
-                        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.9),
-                        'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.6, 0.9),
-                        'min_child_weight': trial.suggest_float('min_child_weight', 15, 50),
-                        'reg_alpha': trial.suggest_float('reg_alpha', 2.0, 10.0),
-                        'reg_lambda': trial.suggest_float('reg_lambda', 2.0, 10.0),
-                        'gamma': trial.suggest_float('gamma', 0.0, 2.0),
-                        'max_leaves': trial.suggest_int('max_leaves', 255, 1023),
+                        'tree_method': 'gpu_hist' if self.gpu_optimized else 'hist',
+                        'max_depth': trial.suggest_int('max_depth', 8, 12),
+                        'learning_rate': trial.suggest_float('learning_rate', 0.015, 0.035, log=True),
+                        'subsample': trial.suggest_float('subsample', 0.75, 0.9),
+                        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.75, 0.9),
+                        'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.75, 0.9),
+                        'min_child_weight': trial.suggest_float('min_child_weight', 8, 16),
+                        'reg_alpha': trial.suggest_float('reg_alpha', 1.0, 3.0),
+                        'reg_lambda': trial.suggest_float('reg_lambda', 1.0, 3.0),
+                        'gamma': trial.suggest_float('gamma', 0.0, 0.2),
                         'scale_pos_weight': trial.suggest_float('scale_pos_weight', 45, 55),
                         'random_state': self.config.RANDOM_STATE,
-                        'n_estimators': 2000,
-                        'early_stopping_rounds': 150,
-                        'max_bin': 128 if self.gpu_available else 255,
+                        'n_estimators': 3000,
+                        'early_stopping_rounds': 80,
                         'nthread': 12,
-                        'grow_policy': 'lossguide'
+                        'grow_policy': 'lossguide',
+                        'max_leaves': 511
                     }
+                    
+                    if self.gpu_optimized:
+                        base_params['gpu_id'] = 0
+                    
+                    params = base_params
                 
                 elif model_type.lower() == 'catboost':
-                    params = {
+                    base_params = {
                         'loss_function': 'Logloss',
                         'eval_metric': 'Logloss',
-                        'task_type': 'GPU' if self.gpu_available else 'CPU',
-                        'devices': '0' if self.gpu_available else None,
+                        'task_type': 'GPU' if self.gpu_optimized else 'CPU',
                         'depth': trial.suggest_int('depth', 8, 12),
-                        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.15, log=True),
-                        'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 10, 30),
-                        'bagging_temperature': trial.suggest_float('bagging_temperature', 0.5, 3.0),
-                        'leaf_estimation_iterations': trial.suggest_int('leaf_estimation_iterations', 5, 20),
-                        'max_leaves': trial.suggest_int('max_leaves', 255, 1023),
-                        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 100, 500),
-                        'iterations': 2000,
+                        'learning_rate': trial.suggest_float('learning_rate', 0.015, 0.035, log=True),
+                        'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 5, 15),
+                        'bagging_temperature': trial.suggest_float('bagging_temperature', 0.8, 1.5),
+                        'leaf_estimation_iterations': trial.suggest_int('leaf_estimation_iterations', 8, 15),
+                        'max_leaves': trial.suggest_int('max_leaves', 255, 511),
+                        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 50, 120),
+                        'iterations': 3000,
                         'random_seed': self.config.RANDOM_STATE,
-                        'od_wait': 150,
+                        'od_wait': 80,
                         'od_type': 'IncToDec',
                         'verbose': False,
                         'auto_class_weights': 'Balanced',
                         'thread_count': 12,
                         'grow_policy': 'Lossguide'
                     }
-                    if self.gpu_available:
-                        params['gpu_ram_part'] = 0.6
+                    
+                    if self.gpu_optimized:
+                        base_params['devices'] = '0'
+                        base_params['gpu_ram_part'] = 0.8
+                    
+                    params = base_params
                 
                 elif model_type.lower() == 'deepctr':
-                    if not self.gpu_available:
+                    if not self.gpu_optimized:
                         return 0.0
-                        
-                    hidden_dims_options = [
-                        [512, 256, 128],
-                        [1024, 512, 256],
+                    
+                    hidden_options = [
+                        [512, 256, 128, 64],
                         [1024, 512, 256, 128],
-                        [1024, 512, 256, 128, 64],
+                        [1024, 768, 512, 256, 128],
+                        [1024, 768, 512, 256, 128, 64],
                         [2048, 1024, 512, 256, 128]
                     ]
                     params = {
-                        'hidden_dims': trial.suggest_categorical('hidden_dims', hidden_dims_options),
-                        'dropout_rate': trial.suggest_float('dropout_rate', 0.2, 0.6),
-                        'learning_rate': trial.suggest_float('learning_rate', 0.0001, 0.005, log=True),
-                        'weight_decay': trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True),
-                        'batch_size': trial.suggest_categorical('batch_size', [1024, 2048, 4096]),
-                        'epochs': 100,
+                        'hidden_dims': trial.suggest_categorical('hidden_dims', hidden_options),
+                        'dropout_rate': trial.suggest_float('dropout_rate', 0.2, 0.4),
+                        'learning_rate': trial.suggest_float('learning_rate', 0.0005, 0.002, log=True),
+                        'weight_decay': trial.suggest_float('weight_decay', 1e-6, 1e-4, log=True),
+                        'batch_size': trial.suggest_categorical('batch_size', [2048, 4096, 6144, 8192]),
+                        'epochs': 60,
                         'patience': 15,
-                        'use_batch_norm': trial.suggest_categorical('use_batch_norm', [True, False]),
-                        'activation': trial.suggest_categorical('activation', ['relu', 'gelu', 'swish']),
-                        'use_focal_loss': trial.suggest_categorical('use_focal_loss', [True, False]),
+                        'use_batch_norm': True,
+                        'activation': trial.suggest_categorical('activation', ['relu', 'swish', 'gelu']),
                         'use_residual': trial.suggest_categorical('use_residual', [True, False]),
-                        'gradient_clip_norm': 1.0
+                        'use_attention': trial.suggest_categorical('use_attention', [True, False]),
+                        'label_smoothing': trial.suggest_float('label_smoothing', 0.0, 0.05),
+                        'use_mixed_precision': self.gpu_optimized
                     }
                 
                 else:
-                    params = {}
+                    return 0.0
                 
-                cv_result = self.cross_validate_ctr_model(model_type, X, y, cv_folds, params)
+                # 교차검증 실행
+                cv_result = self.advanced_cross_validation(
+                    model_type, X_sample, y_sample, cv_folds, params
+                )
                 
-                combined_score = cv_result['combined_mean']
-                ctr_bias_score = cv_result.get('ctr_bias_mean', 0.0)
+                combined_score = cv_result.get('combined_mean', 0.0)
+                ctr_bias_penalty = cv_result.get('ctr_bias_penalty', 1.0)
+                stability_bonus = cv_result.get('stability_bonus', 1.0)
                 
-                # CTR 편향을 더 강하게 반영 (0.30+ 목표)
-                final_score = 0.65 * combined_score + 0.35 * ctr_bias_score
-                
-                LargeDataMemoryTracker.force_cleanup()
+                # 최종 점수 (Combined Score 0.30+ 목표)
+                final_score = combined_score * ctr_bias_penalty * stability_bonus
                 
                 return final_score if final_score > 0 else 0.0
             
             except Exception as e:
-                logger.error(f"CTR Trial 실행 실패: {str(e)}")
-                LargeDataMemoryTracker.force_cleanup()
+                logger.error(f"Hyperparameter trial 실패: {e}")
                 return 0.0
         
         try:
-            # Hyperband Pruner 사용으로 효율성 향상
+            # Optuna 스터디 생성 (고성능 최적화)
             study = optuna.create_study(
                 direction='maximize',
                 sampler=TPESampler(
                     seed=self.config.RANDOM_STATE,
-                    n_startup_trials=max(10, n_trials // 5),
-                    n_ei_candidates=24
+                    n_startup_trials=15,
+                    n_ei_candidates=48,
+                    multivariate=True,
+                    warn_independent_sampling=False
                 ),
                 pruner=HyperbandPruner(
-                    min_resource=1,
+                    min_resource=3,
                     max_resource=cv_folds,
-                    reduction_factor=3
+                    reduction_factor=2
                 )
             )
             
             study.optimize(
-                large_data_ctr_objective, 
+                high_performance_objective,
                 n_trials=n_trials,
-                timeout=2400,  # 40분
+                timeout=3600,  # 1시간 제한
                 n_jobs=1,
                 show_progress_bar=False,
                 gc_after_trial=True
             )
             
-        except KeyboardInterrupt:
-            logger.info("CTR 하이퍼파라미터 튜닝이 중단되었습니다.")
+            if study.best_value and study.best_value > 0:
+                logger.info(f"{model_type} 튜닝 완료 - 최고 점수: {study.best_value:.4f}")
+                self.best_params[model_type] = study.best_params
+                return study.best_params
+            else:
+                logger.warning(f"{model_type} 튜닝에서 유효한 결과를 얻지 못했습니다.")
+                
         except Exception as e:
-            logger.error(f"CTR 하이퍼파라미터 튜닝 중 오류 발생: {str(e)}")
+            logger.error(f"{model_type} 하이퍼파라미터 튜닝 실패: {e}")
         finally:
-            LargeDataMemoryTracker.force_cleanup()
+            self.memory_manager.aggressive_cleanup()
         
-        if not hasattr(study, 'best_value') or study.best_value is None or study.best_value <= 0:
-            logger.warning(f"{model_type} CTR 하이퍼파라미터 튜닝에서 유효한 결과를 얻지 못했습니다.")
-            best_params = self._get_large_data_optimized_params(model_type)
-        else:
-            best_params = study.best_params
-            
-        tuning_results = {
-            'model_type': model_type,
-            'best_params': best_params,
-            'best_score': getattr(study, 'best_value', 0.0) if hasattr(study, 'best_value') else 0.0,
-            'n_trials': len(getattr(study, 'trials', [])),
-            'study': study if hasattr(study, 'best_value') else None
+        # 기본 고성능 파라미터 반환
+        return self.get_high_performance_params(model_type, len(X))
+    
+    def advanced_cross_validation(self, 
+                                 model_type: str,
+                                 X: pd.DataFrame,
+                                 y: pd.Series,
+                                 cv_folds: int = 5,
+                                 params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """고급 교차검증 - TimeSeriesSplit + 안정성 평가"""
+        
+        logger.info(f"{model_type} 고급 교차검증 시작 (folds: {cv_folds})")
+        
+        # 파라미터 검증
+        if params is None:
+            params = self.get_high_performance_params(model_type, len(X))
+        
+        # 메모리 기반 데이터 크기 조정
+        if self.memory_manager.check_memory_pressure() and len(X) > 2000000:
+            sample_size = min(1500000, len(X))
+            sample_indices = np.random.choice(len(X), sample_size, replace=False)
+            X = X.iloc[sample_indices].copy()
+            y = y.iloc[sample_indices].copy()
+            logger.info(f"메모리 절약을 위한 샘플링: {sample_size:,}행")
+        
+        # TimeSeriesSplit for temporal consistency
+        tscv = TimeSeriesSplit(n_splits=cv_folds, test_size=None)
+        
+        cv_scores = {
+            'ap_scores': [],
+            'wll_scores': [],
+            'combined_scores': [],
+            'ctr_biases': [],
+            'training_times': [],
+            'prediction_diversities': []
         }
         
-        self.best_params[model_type] = best_params
+        metrics_calculator = CTRMetrics()
+        actual_ctr = y.mean()
         
-        logger.info(f"{model_type} CTR 하이퍼파라미터 튜닝 완료")
-        logger.info(f"최적 점수: {tuning_results['best_score']:.4f}")
-        logger.info(f"수행된 trials: {tuning_results['n_trials']}/{n_trials}")
-        
-        return tuning_results
-    
-    def train_all_ctr_models(self,
-                            X_train: pd.DataFrame,
-                            y_train: pd.Series,
-                            X_val: Optional[pd.DataFrame] = None,
-                            y_val: Optional[pd.Series] = None,
-                            model_types: Optional[List[str]] = None) -> Dict[str, BaseModel]:
-        """모든 CTR 모델 학습 - 1070만행 최적화"""
-        
-        if model_types is None:
-            available_models = ModelFactory.get_available_models()
-            model_types = [m for m in ['lightgbm', 'xgboost', 'catboost'] if m in available_models]
+        for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
+            logger.info(f"폴드 {fold + 1}/{cv_folds} 시작")
+            fold_start_time = time.time()
             
-            available_memory = self.memory_tracker.get_available_memory()
-            if self.gpu_available and 'deepctr' in available_models and available_memory > 15:
-                model_types.append('deepctr')
+            try:
+                # 폴드 데이터 준비
+                X_train_fold = X.iloc[train_idx]
+                X_val_fold = X.iloc[val_idx]
+                y_train_fold = y.iloc[train_idx]
+                y_val_fold = y.iloc[val_idx]
+                
+                # 모델 생성 및 학습
+                model_kwargs = {'params': params}
+                if model_type == 'deepctr':
+                    model_kwargs['input_dim'] = X_train_fold.shape[1]
+                
+                model = ModelFactory.create_model(model_type, **model_kwargs)
+                model.fit(X_train_fold, y_train_fold, X_val_fold, y_val_fold)
+                
+                # 예측 및 평가
+                y_pred_proba = model.predict_proba(X_val_fold)
+                
+                # 다양성 검증
+                prediction_diversity = len(np.unique(np.round(y_pred_proba, 6))) / len(y_pred_proba)
+                
+                # 메트릭 계산
+                ap_score = metrics_calculator.average_precision(y_val_fold, y_pred_proba)
+                wll_score = metrics_calculator.weighted_log_loss(y_val_fold, y_pred_proba)
+                combined_score = metrics_calculator.combined_score(y_val_fold, y_pred_proba)
+                
+                # CTR 편향 계산
+                predicted_ctr = y_pred_proba.mean()
+                fold_actual_ctr = y_val_fold.mean()
+                ctr_bias = abs(predicted_ctr - fold_actual_ctr)
+                
+                fold_time = time.time() - fold_start_time
+                
+                # 결과 저장
+                cv_scores['ap_scores'].append(ap_score)
+                cv_scores['wll_scores'].append(wll_score)
+                cv_scores['combined_scores'].append(combined_score)
+                cv_scores['ctr_biases'].append(ctr_bias)
+                cv_scores['training_times'].append(fold_time)
+                cv_scores['prediction_diversities'].append(prediction_diversity)
+                
+                logger.info(f"폴드 {fold + 1} 완료 - Combined: {combined_score:.4f}, CTR편향: {ctr_bias:.4f}")
+                
+                # 메모리 정리
+                del X_train_fold, X_val_fold, y_train_fold, y_val_fold, model
+                self.memory_manager.aggressive_cleanup()
+                
+            except Exception as e:
+                logger.error(f"폴드 {fold + 1} 실패: {e}")
+                cv_scores['ap_scores'].append(0.0)
+                cv_scores['wll_scores'].append(float('inf'))
+                cv_scores['combined_scores'].append(0.0)
+                cv_scores['ctr_biases'].append(1.0)
+                cv_scores['training_times'].append(0.0)
+                cv_scores['prediction_diversities'].append(0.0)
         
-        logger.info(f"모든 CTR 모델 학습 시작: {model_types}")
-        logger.info(f"사용 가능 메모리: {self.memory_tracker.get_available_memory():.2f}GB")
-        logger.info(f"학습 데이터 크기: {len(X_train):,}행")
+        # 결과 분석
+        valid_scores = [s for s in cv_scores['combined_scores'] if s > 0]
+        valid_biases = [b for b in cv_scores['ctr_biases'] if b < 1.0]
+        
+        if not valid_scores:
+            logger.warning(f"{model_type} 모든 폴드가 실패했습니다.")
+            return {'combined_mean': 0.0, 'ctr_bias_penalty': 0.0, 'stability_bonus': 0.0}
+        
+        # 통계 계산
+        combined_mean = np.mean(valid_scores)
+        combined_std = np.std(valid_scores) if len(valid_scores) > 1 else 0.0
+        ctr_bias_mean = np.mean(valid_biases) if valid_biases else 0.1
+        
+        # CTR 편향 패널티 (목표: 0.001 이하)
+        ctr_bias_penalty = np.exp(-ctr_bias_mean * 1000) if ctr_bias_mean < 0.01 else 0.5
+        
+        # 안정성 보너스
+        cv_coefficient = combined_std / combined_mean if combined_mean > 0 else 1.0
+        stability_bonus = np.exp(-cv_coefficient * 2) if cv_coefficient < 0.2 else 0.8
+        
+        # 다양성 보너스
+        avg_diversity = np.mean([d for d in cv_scores['prediction_diversities'] if d > 0])
+        diversity_bonus = min(1.2, 1.0 + avg_diversity * 0.5)
+        
+        cv_results = {
+            'model_type': model_type,
+            'combined_mean': combined_mean,
+            'combined_std': combined_std,
+            'ctr_bias_mean': ctr_bias_mean,
+            'ctr_bias_penalty': ctr_bias_penalty,
+            'stability_bonus': stability_bonus,
+            'diversity_bonus': diversity_bonus,
+            'final_score': combined_mean * ctr_bias_penalty * stability_bonus * diversity_bonus,
+            'successful_folds': len(valid_scores),
+            'avg_training_time': np.mean([t for t in cv_scores['training_times'] if t > 0]),
+            'scores_detail': cv_scores,
+            'params': params
+        }
+        
+        self.cv_results[model_type] = cv_results
+        
+        logger.info(f"{model_type} 교차검증 완료")
+        logger.info(f"Combined Score: {combined_mean:.4f} (±{combined_std:.4f})")
+        logger.info(f"CTR 편향: {ctr_bias_mean:.4f} (패널티: {ctr_bias_penalty:.3f})")
+        logger.info(f"안정성: {stability_bonus:.3f}, 다양성: {diversity_bonus:.3f}")
+        logger.info(f"최종 점수: {cv_results['final_score']:.4f}")
+        
+        return cv_results
+    
+    def train_high_performance_model(self,
+                                   model_type: str,
+                                   X_train: pd.DataFrame,
+                                   y_train: pd.Series,
+                                   X_val: Optional[pd.DataFrame] = None,
+                                   y_val: Optional[pd.Series] = None,
+                                   params: Optional[Dict[str, Any]] = None) -> BaseModel:
+        """고성능 모델 학습"""
+        
+        logger.info(f"{model_type} 고성능 모델 학습 시작")
+        start_time = time.time()
+        memory_before = self.memory_manager.get_memory_status()
+        
+        try:
+            # 파라미터 준비
+            if params is None:
+                params = self.best_params.get(model_type) or self.get_high_performance_params(model_type, len(X_train))
+            
+            # 메모리 기반 데이터 조정
+            if self.memory_manager.check_memory_pressure():
+                if len(X_train) > 3000000:
+                    sample_size = 2500000
+                    sample_indices = np.random.choice(len(X_train), sample_size, replace=False)
+                    X_train = X_train.iloc[sample_indices].copy()
+                    y_train = y_train.iloc[sample_indices].copy()
+                    logger.info(f"메모리 절약을 위한 학습 데이터 샘플링: {sample_size:,}")
+                
+                if X_val is not None and len(X_val) > 500000:
+                    val_indices = np.random.choice(len(X_val), 400000, replace=False)
+                    X_val = X_val.iloc[val_indices].copy()
+                    y_val = y_val.iloc[val_indices].copy()
+            
+            # 모델 생성
+            model_kwargs = {'params': params}
+            if model_type == 'deepctr':
+                model_kwargs['input_dim'] = X_train.shape[1]
+            
+            model = ModelFactory.create_model(model_type, **model_kwargs)
+            
+            # 학습 실행
+            model.fit(X_train, y_train, X_val, y_val)
+            
+            # 고성능 Calibration 적용
+            if X_val is not None and y_val is not None:
+                try:
+                    self.apply_advanced_calibration(model, X_val, y_val)
+                except Exception as e:
+                    logger.warning(f"고급 Calibration 실패: {e}")
+            
+            training_time = time.time() - start_time
+            memory_after = self.memory_manager.get_memory_status()
+            
+            # 모델 정보 저장
+            self.trained_models[model_type] = {
+                'model': model,
+                'params': params,
+                'training_time': training_time,
+                'memory_used': memory_after['process_gb'] - memory_before['process_gb'],
+                'calibrated': True,
+                'performance_target': 'Combined Score 0.30+'
+            }
+            
+            logger.info(f"{model_type} 고성능 학습 완료 (시간: {training_time:.2f}초)")
+            logger.info(f"메모리 사용: {memory_after['process_gb'] - memory_before['process_gb']:+.2f}GB")
+            
+            return model
+            
+        except Exception as e:
+            logger.error(f"{model_type} 고성능 학습 실패: {e}")
+            self.memory_manager.aggressive_cleanup()
+            raise
+    
+    def apply_advanced_calibration(self, model: BaseModel, X_val: pd.DataFrame, y_val: pd.Series):
+        """고급 Calibration - CTR 편향 0.001 이하 목표"""
+        
+        logger.info(f"{model.name} 고급 Calibration 시작")
+        
+        try:
+            # 메모리 효율을 위한 샘플링
+            if len(X_val) > 100000:
+                sample_indices = np.random.choice(len(X_val), 80000, replace=False)
+                X_val_sample = X_val.iloc[sample_indices]
+                y_val_sample = y_val.iloc[sample_indices]
+            else:
+                X_val_sample = X_val
+                y_val_sample = y_val
+            
+            # 원본 예측
+            raw_predictions = model.predict_proba_raw(X_val_sample)
+            
+            # 고급 CTR Calibrator
+            calibrator = CTRCalibrator(target_ctr=self.config.CALIBRATION_CONFIG['target_ctr'])
+            
+            # 다중 Calibration 방법 적용
+            calibrator.fit_platt_scaling(y_val_sample.values, raw_predictions)
+            calibrator.fit_isotonic_regression(y_val_sample.values, raw_predictions)
+            calibrator.fit_temperature_scaling(y_val_sample.values, raw_predictions)
+            calibrator.fit_bias_correction(y_val_sample.values, raw_predictions)
+            
+            # 최고 성능 Calibration 선택
+            model.apply_calibration(X_val_sample, y_val_sample, method='platt', cv_folds=5)
+            
+            # Calibrator 저장
+            self.calibrators[model.name] = calibrator
+            
+            # 결과 검증
+            calibrated_predictions = model.predict_proba(X_val_sample)
+            original_ctr = raw_predictions.mean()
+            calibrated_ctr = calibrated_predictions.mean()
+            actual_ctr = y_val_sample.mean()
+            
+            ctr_improvement = abs(calibrated_ctr - actual_ctr) - abs(original_ctr - actual_ctr)
+            
+            logger.info(f"고급 Calibration 완료:")
+            logger.info(f"  원본 CTR: {original_ctr:.4f}")
+            logger.info(f"  보정 CTR: {calibrated_ctr:.4f}")
+            logger.info(f"  실제 CTR: {actual_ctr:.4f}")
+            logger.info(f"  편향 개선: {ctr_improvement:+.4f}")
+            
+        except Exception as e:
+            logger.error(f"고급 Calibration 실패: {e}")
+    
+    def train_all_high_performance_models(self,
+                                         X_train: pd.DataFrame,
+                                         y_train: pd.Series,
+                                         X_val: Optional[pd.DataFrame] = None,
+                                         y_val: Optional[pd.Series] = None,
+                                         enable_hyperparameter_tuning: bool = True) -> Dict[str, BaseModel]:
+        """모든 고성능 모델 학습 - Combined Score 0.30+ 목표"""
+        
+        logger.info("=== 고성능 모델 학습 파이프라인 시작 ===")
+        logger.info(f"목표: Combined Score 0.30+, CTR 편향 0.001 이하")
+        
+        memory_status = self.memory_manager.get_memory_status()
+        logger.info(f"시스템 상태: CPU {memory_status['available_gb']:.1f}GB")
+        if self.gpu_optimized:
+            logger.info(f"GPU: {memory_status.get('gpu_free_gb', 0):.1f}GB 사용가능")
+        
+        # 모델 우선순위 (성능 기반)
+        priority_models = ['lightgbm', 'xgboost', 'catboost']
+        if self.gpu_optimized and memory_status['available_gb'] > 15:
+            priority_models.append('deepctr')
+            logger.info("GPU 최적화 환경: DeepCTR 모델 추가")
         
         trained_models = {}
         
-        for model_type in model_types:
+        # 하이퍼파라미터 튜닝 단계
+        if enable_hyperparameter_tuning:
+            logger.info("=== 하이퍼파라미터 튜닝 단계 ===")
+            for model_type in priority_models:
+                try:
+                    if self.memory_manager.check_memory_pressure():
+                        logger.warning(f"메모리 압박으로 {model_type} 튜닝 생략")
+                        continue
+                    
+                    logger.info(f"{model_type} 튜닝 시작")
+                    
+                    tuned_params = self.advanced_hyperparameter_tuning(
+                        model_type, X_train, y_train,
+                        n_trials=30 if model_type != 'deepctr' else 20,
+                        cv_folds=5
+                    )
+                    
+                    if tuned_params:
+                        self.best_params[model_type] = tuned_params
+                        logger.info(f"{model_type} 튜닝 완료")
+                    
+                    self.memory_manager.aggressive_cleanup()
+                    
+                except Exception as e:
+                    logger.error(f"{model_type} 튜닝 실패: {e}")
+                    continue
+        
+        # 모델 학습 단계
+        logger.info("=== 고성능 모델 학습 단계 ===")
+        for model_type in priority_models:
             try:
-                available_memory = self.memory_tracker.get_available_memory()
-                if available_memory < 5:
-                    logger.warning(f"메모리 부족으로 {model_type} CTR 모델 학습 생략")
+                if self.memory_manager.check_memory_pressure():
+                    logger.warning(f"메모리 압박으로 {model_type} 학습 생략")
                     continue
                 
-                logger.info(f"{model_type} CTR 모델 학습 시작 (메모리: {available_memory:.2f}GB)")
+                logger.info(f"{model_type} 고성능 학습 시작")
                 
-                if model_type in self.best_params:
-                    params = self.best_params[model_type]
-                else:
-                    params = self._get_large_data_optimized_params(model_type)
-                
-                model = self.train_single_model(
-                    model_type, X_train, y_train, X_val, y_val, params
+                model = self.train_high_performance_model(
+                    model_type, X_train, y_train, X_val, y_val
                 )
                 
-                trained_models[model_type] = model
+                if model:
+                    trained_models[model_type] = model
+                    logger.info(f"{model_type} 학습 성공")
                 
-                logger.info(f"{model_type} CTR 모델 학습 완료")
-                
-                self._cleanup_memory_after_training(model_type)
-                
-                current_memory = self.memory_tracker.get_available_memory()
-                logger.info(f"{model_type} 학습 후 사용 가능 메모리: {current_memory:.2f}GB")
+                self.memory_manager.aggressive_cleanup()
                 
             except Exception as e:
-                logger.error(f"{model_type} CTR 모델 학습 실패: {str(e)}")
-                self._cleanup_memory_after_training(model_type)
+                logger.error(f"{model_type} 학습 실패: {e}")
                 continue
         
-        logger.info(f"모든 CTR 모델 학습 완료. 성공한 모델: {list(trained_models.keys())}")
+        # 성능 요약
+        logger.info("=== 고성능 학습 결과 요약 ===")
+        logger.info(f"성공한 모델: {list(trained_models.keys())}")
+        logger.info(f"총 모델 수: {len(trained_models)}")
+        
+        if self.cv_results:
+            best_cv = max(self.cv_results.items(), key=lambda x: x[1].get('final_score', 0))
+            logger.info(f"최고 CV 성능: {best_cv[0]} (점수: {best_cv[1]['final_score']:.4f})")
+        
+        final_memory = self.memory_manager.get_memory_status()
+        logger.info(f"최종 메모리: {final_memory['process_gb']:.1f}GB")
         
         return trained_models
     
-    def _get_large_data_optimized_params(self, model_type: str) -> Dict[str, Any]:
-        """1070만행 대용량 데이터에 최적화된 기본 파라미터"""
-        
-        if model_type.lower() == 'lightgbm':
-            params = {
-                'objective': 'binary',
-                'metric': 'binary_logloss',
-                'boosting_type': 'gbdt',
-                'num_leaves': 511,
-                'learning_rate': 0.05,
-                'feature_fraction': 0.75,
-                'bagging_fraction': 0.65,
-                'bagging_freq': 3,
-                'min_child_samples': 500,
-                'min_child_weight': 15,
-                'lambda_l1': 4.0,
-                'lambda_l2': 4.0,
-                'max_depth': 15,
-                'verbose': -1,
-                'random_state': self.config.RANDOM_STATE,
-                'n_estimators': 5000,
-                'early_stopping_rounds': 250,
-                'scale_pos_weight': 49.75,  # 실제 CTR 0.0201 반영
-                'force_row_wise': True,
-                'max_bin': 255,
-                'num_threads': 12,
-                'device_type': 'cpu',
-                'min_data_in_leaf': 200,
-                'feature_fraction_bynode': 0.75,
-                'extra_trees': True,
-                'path_smooth': 1.5,
-                'grow_policy': 'lossguide',
-                'boost_from_average': True,
-                'feature_pre_filter': False,
-                'is_provide_training_metric': False
-            }
-            return params
-        
-        elif model_type.lower() == 'xgboost':
-            params = {
-                'objective': 'binary:logistic',
-                'eval_metric': 'logloss',
-                'tree_method': 'gpu_hist' if self.gpu_available else 'hist',
-                'gpu_id': 0 if self.gpu_available else None,
-                'max_depth': 12,
-                'learning_rate': 0.05,
-                'subsample': 0.75,
-                'colsample_bytree': 0.75,
-                'colsample_bylevel': 0.75,
-                'colsample_bynode': 0.75,
-                'min_child_weight': 25,
-                'reg_alpha': 4.0,
-                'reg_lambda': 4.0,
-                'scale_pos_weight': 49.75,
-                'random_state': self.config.RANDOM_STATE,
-                'n_estimators': 5000,
-                'early_stopping_rounds': 250,
-                'max_bin': 128 if self.gpu_available else 255,
-                'nthread': 12,
-                'grow_policy': 'lossguide',
-                'max_leaves': 511,
-                'gamma': 0.2
-            }
-            if not self.gpu_available:
-                params.pop('gpu_id', None)
-            return params
-        
-        elif model_type.lower() == 'catboost':
-            params = {
-                'loss_function': 'Logloss',
-                'eval_metric': 'Logloss',
-                'task_type': 'GPU' if self.gpu_available else 'CPU',
-                'devices': '0' if self.gpu_available else None,
-                'depth': 10,
-                'learning_rate': 0.05,
-                'l2_leaf_reg': 20,
-                'iterations': 5000,
-                'random_seed': self.config.RANDOM_STATE,
-                'od_wait': 250,
-                'od_type': 'IncToDec',
-                'verbose': False,
-                'auto_class_weights': 'Balanced',
-                'max_ctr_complexity': 2,
-                'thread_count': 12,
-                'bootstrap_type': 'Bayesian',
-                'bagging_temperature': 1.5,
-                'leaf_estimation_iterations': 15,
-                'leaf_estimation_method': 'Newton',
-                'grow_policy': 'Lossguide',
-                'max_leaves': 511,
-                'min_data_in_leaf': 200
-            }
-            if self.gpu_available:
-                params['gpu_ram_part'] = 0.6
-            else:
-                params.pop('devices', None)
-            return params
-        
-        elif model_type.lower() == 'deepctr':
-            params = {
-                'hidden_dims': [1024, 512, 256, 128, 64],
-                'dropout_rate': 0.4,
-                'learning_rate': 0.0008,
-                'weight_decay': 1e-4,
-                'batch_size': 2048 if self.gpu_available else 1024,
-                'epochs': 100,
-                'patience': 20,
-                'use_batch_norm': True,
-                'activation': 'relu',
-                'use_residual': True,
-                'use_attention': False,
-                'focal_loss_alpha': 0.25,
-                'focal_loss_gamma': 2.0,
-                'gradient_clip_norm': 1.0
-            }
-            return params
-        
-        else:
-            return {}
+    def get_performance_summary(self) -> Dict[str, Any]:
+        """성능 요약 정보"""
+        return {
+            'trained_models': list(self.trained_models.keys()),
+            'model_count': len(self.trained_models),
+            'gpu_optimized': self.gpu_optimized,
+            'cv_results': self.cv_results,
+            'best_params': self.best_params,
+            'target_achieved': any(
+                cv.get('combined_mean', 0) >= 0.30 
+                for cv in self.cv_results.values()
+            ),
+            'ctr_bias_target_achieved': any(
+                cv.get('ctr_bias_mean', 1) <= 0.001
+                for cv in self.cv_results.values()
+            ),
+            'memory_optimized': True,
+            'performance_history': self.performance_history
+        }
     
-    def _cleanup_memory_after_training(self, model_type: str):
-        """모델별 메모리 정리 - 대용량 데이터 특화"""
-        try:
-            for _ in range(3):
-                gc.collect()
-            
-            if model_type.lower() in ['deepctr', 'xgboost', 'catboost'] and self.gpu_available:
-                if TORCH_AVAILABLE and torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-                    # GPU 메모리 강제 정리
-                    torch.cuda.ipc_collect()
-            
-            try:
-                import ctypes
-                if hasattr(ctypes, 'windll'):
-                    ctypes.windll.kernel32.SetProcessWorkingSetSize(-1, -1, -1)
-            except:
-                pass
-                
-        except Exception as e:
-            logger.warning(f"메모리 정리 실패: {e}")
-    
-    def save_models(self, output_dir: Path = None):
-        """모델 및 Calibrator 저장 - 대용량 데이터 정보 포함"""
+    def save_high_performance_models(self, output_dir: Path = None):
+        """고성능 모델 저장"""
         if output_dir is None:
             output_dir = self.config.MODEL_DIR
         
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        logger.info(f"CTR 모델 저장 시작: {output_dir}")
+        logger.info(f"고성능 모델 저장: {output_dir}")
         
         for model_name, model_info in self.trained_models.items():
             try:
-                model_path = output_dir / f"{model_name}_model.pkl"
-                
-                # 실제 모델 객체 저장
+                # 모델 저장
+                model_path = output_dir / f"{model_name}_high_performance.pkl"
                 with open(model_path, 'wb') as f:
                     pickle.dump(model_info['model'], f)
                 
-                # 대용량 데이터 메타데이터 구조
+                # 메타데이터 저장
                 metadata = {
                     'model_type': model_name,
+                    'performance_target': 'Combined Score 0.30+',
+                    'ctr_bias_target': 0.001,
                     'training_time': model_info.get('training_time', 0.0),
                     'params': model_info.get('params', {}),
-                    'calibrated': model_info.get('calibrated', False),
                     'memory_used': model_info.get('memory_used', 0.0),
-                    'cv_result': model_info.get('cv_result', None),
-                    'device': str(self.device),
-                    'ctr_optimized': True,
-                    'data_size_used': model_info.get('data_size_used', 0),
-                    'large_data_optimized': True,
-                    'target_ctr': 0.0201,
-                    'gpu_used': self.gpu_available
+                    'gpu_optimized': self.gpu_optimized,
+                    'calibrated': model_info.get('calibrated', False),
+                    'cv_result': self.cv_results.get(model_name, {}),
+                    'timestamp': time.time()
                 }
                 
                 metadata_path = output_dir / f"{model_name}_metadata.json"
                 with open(metadata_path, 'w') as f:
                     json.dump(metadata, f, indent=2, default=str)
                 
-                logger.info(f"{model_name} CTR 모델 저장 완료: {model_path}")
+                logger.info(f"{model_name} 고성능 모델 저장 완료")
                 
             except Exception as e:
-                logger.error(f"{model_name} CTR 모델 저장 실패: {str(e)}")
+                logger.error(f"{model_name} 저장 실패: {e}")
         
         # Calibrator 저장
         if self.calibrators:
-            calibrator_path = output_dir / "ctr_calibrators.pkl"
-            try:
-                with open(calibrator_path, 'wb') as f:
-                    pickle.dump(self.calibrators, f)
-                logger.info(f"CTR Calibrator 저장 완료: {calibrator_path}")
-            except Exception as e:
-                logger.error(f"CTR Calibrator 저장 실패: {str(e)}")
+            calibrator_path = output_dir / "high_performance_calibrators.pkl"
+            with open(calibrator_path, 'wb') as f:
+                pickle.dump(self.calibrators, f)
+            logger.info("고성능 Calibrator 저장 완료")
         
-        # CV 결과 저장
-        if self.cv_results:
-            cv_results_path = output_dir / "cv_results.json"
-            try:
-                with open(cv_results_path, 'w') as f:
-                    json.dump(self.cv_results, f, indent=2, default=str)
-                logger.info(f"CV 결과 저장 완료: {cv_results_path}")
-            except Exception as e:
-                logger.error(f"CV 결과 저장 실패: {str(e)}")
-        
-        # Best parameters 저장
-        if self.best_params:
-            best_params_path = output_dir / "best_params.json"
-            try:
-                with open(best_params_path, 'w') as f:
-                    json.dump(self.best_params, f, indent=2, default=str)
-                logger.info(f"최적 파라미터 저장 완료: {best_params_path}")
-            except Exception as e:
-                logger.error(f"최적 파라미터 저장 실패: {str(e)}")
-    
-    def load_models(self, input_dir: Path = None) -> Dict[str, BaseModel]:
-        """저장된 CTR 모델 로딩"""
-        if input_dir is None:
-            input_dir = self.config.MODEL_DIR
-        
-        input_dir = Path(input_dir)
-        logger.info(f"CTR 모델 로딩 시작: {input_dir}")
-        
-        loaded_models = {}
-        
-        model_files = list(input_dir.glob("*_model.pkl"))
-        
-        for model_file in model_files:
-            try:
-                model_name = model_file.stem.replace('_model', '')
-                
-                with open(model_file, 'rb') as f:
-                    model = pickle.load(f)
-                
-                loaded_models[model_name] = model
-                logger.info(f"{model_name} CTR 모델 로딩 완료")
-                
-                # 메타데이터 로딩
-                metadata_file = input_dir / f"{model_name}_metadata.json"
-                if metadata_file.exists():
-                    try:
-                        with open(metadata_file, 'r') as f:
-                            metadata = json.load(f)
-                        
-                        # 대용량 데이터 정보 포함 구조
-                        self.trained_models[model_name] = {
-                            'model': model,
-                            'params': metadata.get('params', {}),
-                            'training_time': metadata.get('training_time', 0.0),
-                            'calibrated': metadata.get('calibrated', False),
-                            'memory_used': metadata.get('memory_used', 0.0),
-                            'cv_result': metadata.get('cv_result', None),
-                            'data_size_used': metadata.get('data_size_used', 0),
-                            'large_data_optimized': metadata.get('large_data_optimized', False)
-                        }
-                        
-                    except Exception as e:
-                        logger.warning(f"{model_name} 메타데이터 로딩 실패: {e}")
-                        # 기본 구조로 설정
-                        self.trained_models[model_name] = {
-                            'model': model,
-                            'params': {},
-                            'training_time': 0.0,
-                            'calibrated': False,
-                            'memory_used': 0.0,
-                            'cv_result': None,
-                            'data_size_used': 0,
-                            'large_data_optimized': False
-                        }
-                
-            except Exception as e:
-                logger.error(f"{model_file} CTR 모델 로딩 실패: {str(e)}")
-        
-        # Calibrator 로딩
-        calibrator_path = input_dir / "ctr_calibrators.pkl"
-        if calibrator_path.exists():
-            try:
-                with open(calibrator_path, 'rb') as f:
-                    self.calibrators = pickle.load(f)
-                logger.info("CTR Calibrator 로딩 완료")
-            except Exception as e:
-                logger.error(f"CTR Calibrator 로딩 실패: {str(e)}")
-        
-        # CV 결과 로딩
-        cv_results_path = input_dir / "cv_results.json"
-        if cv_results_path.exists():
-            try:
-                with open(cv_results_path, 'r') as f:
-                    self.cv_results = json.load(f)
-                logger.info("CV 결과 로딩 완료")
-            except Exception as e:
-                logger.error(f"CV 결과 로딩 실패: {str(e)}")
-        
-        # Best parameters 로딩
-        best_params_path = input_dir / "best_params.json"
-        if best_params_path.exists():
-            try:
-                with open(best_params_path, 'r') as f:
-                    self.best_params = json.load(f)
-                logger.info("최적 파라미터 로딩 완료")
-            except Exception as e:
-                logger.error(f"최적 파라미터 로딩 실패: {str(e)}")
-        
-        return loaded_models
-    
-    def get_training_summary(self) -> Dict[str, Any]:
-        """CTR 학습 결과 요약 - 대용량 데이터 정보 포함"""
-        summary = {
-            'trained_models': list(self.trained_models.keys()),
-            'cv_results': self.cv_results,
-            'best_params': self.best_params,
-            'model_count': len(self.trained_models),
-            'device_used': str(self.device),
-            'gpu_available': self.gpu_available,
-            'calibration_applied': len(self.calibrators) > 0,
-            'ctr_optimized': True,
-            'large_data_optimized': True,
-            'target_ctr': 0.0201,
-            'total_memory_used': sum(
-                info.get('memory_used', 0.0) for info in self.trained_models.values()
-            ),
-            'avg_training_time': np.mean([
-                info.get('training_time', 0.0) for info in self.trained_models.values()
-            ]) if self.trained_models else 0.0,
-            'total_data_size_used': sum(
-                info.get('data_size_used', 0) for info in self.trained_models.values()
-            ),
-            'largest_data_size': max(
-                [info.get('data_size_used', 0) for info in self.trained_models.values()], 
-                default=0
-            )
-        }
-        
-        if self.cv_results:
-            valid_results = {k: v for k, v in self.cv_results.items() if v['combined_mean'] > 0}
-            if valid_results:
-                best_model = max(
-                    valid_results.items(),
-                    key=lambda x: x[1]['combined_mean']
-                )
-                summary['best_model'] = {
-                    'name': best_model[0],
-                    'score': best_model[1]['combined_mean'],
-                    'std': best_model[1]['combined_std'],
-                    'ctr_bias_score': best_model[1].get('ctr_bias_mean', 0.0),
-                    'successful_folds': best_model[1].get('successful_folds', 0),
-                    'performance_target_achieved': best_model[1]['combined_mean'] >= 0.30
-                }
-        
-        return summary
+        # 성능 요약 저장
+        summary = self.get_performance_summary()
+        summary_path = output_dir / "high_performance_summary.json"
+        with open(summary_path, 'w') as f:
+            json.dump(summary, f, indent=2, default=str)
+        logger.info("고성능 요약 정보 저장 완료")
 
-# 호환성을 위한 alias
-ModelTrainer = CTRModelTrainer
+# 메인 클래스 alias
+CTRModelTrainer = HighPerformanceCTRTrainer
+ModelTrainer = HighPerformanceCTRTrainer
 
-class TrainingPipeline:
-    """CTR 특화 전체 학습 파이프라인 - 1070만행 최적화"""
+class HighPerformanceTrainingPipeline:
+    """고성능 학습 파이프라인"""
     
     def __init__(self, config: Config = Config):
         self.config = config
-        self.trainer = CTRModelTrainer(config)
-        self.memory_tracker = LargeDataMemoryTracker()
+        self.trainer = HighPerformanceCTRTrainer(config)
         
-    def run_full_ctr_pipeline(self,
-                             X_train: pd.DataFrame,
-                             y_train: pd.Series,
-                             X_val: Optional[pd.DataFrame] = None,
-                             y_val: Optional[pd.Series] = None,
-                             tune_hyperparameters: bool = True,
-                             n_trials: int = None) -> Dict[str, Any]:
-        """CTR 특화 전체 학습 파이프라인 실행 - Combined Score 0.30+ 목표"""
+    def run_high_performance_pipeline(self,
+                                    X_train: pd.DataFrame,
+                                    y_train: pd.Series,
+                                    X_val: Optional[pd.DataFrame] = None,
+                                    y_val: Optional[pd.Series] = None,
+                                    enable_hyperparameter_tuning: bool = True) -> Dict[str, Any]:
+        """고성능 파이프라인 실행"""
         
-        logger.info("CTR 특화 전체 학습 파이프라인 시작 (Combined Score 0.30+ 목표)")
-        logger.info(f"초기 메모리 상태: {self.memory_tracker.get_available_memory():.2f}GB")
-        logger.info(f"학습 데이터 크기: {len(X_train):,}행")
+        logger.info("=== 고성능 CTR 학습 파이프라인 시작 ===")
+        logger.info("목표: Combined Score 0.30+, CTR 편향 0.001 이하")
         
-        pipeline_start_time = time.time()
+        start_time = time.time()
         
         try:
-            available_models = ModelFactory.get_available_models()
-            model_types = [m for m in ['lightgbm', 'xgboost', 'catboost'] if m in available_models]
-            
-            available_memory = self.memory_tracker.get_available_memory()
-            if self.trainer.gpu_available and 'deepctr' in available_models and available_memory > 20:
-                model_types.append('deepctr')
-                logger.info("GPU 환경: DeepCTR CTR 모델 추가")
-            
-            if n_trials is None:
-                if available_memory > 30:
-                    n_trials = 40
-                elif available_memory > 25:
-                    n_trials = 30
-                elif available_memory > 20:
-                    n_trials = 25
-                else:
-                    n_trials = 20
-            
-            # 하이퍼파라미터 튜닝 (Combined Score 0.30+ 목표)
-            if tune_hyperparameters and OPTUNA_AVAILABLE:
-                logger.info("CTR 하이퍼파라미터 튜닝 단계 (Combined Score 0.30+ 목표)")
-                for model_type in model_types:
-                    try:
-                        if self.memory_tracker.get_available_memory() < 8:
-                            logger.warning(f"메모리 부족으로 {model_type} CTR 튜닝 생략")
-                            continue
-                        
-                        current_trials = max(15, n_trials // 3) if model_type == 'deepctr' else n_trials
-                        
-                        tuning_result = self.trainer.hyperparameter_tuning_ctr_optuna(
-                            model_type, X_train, y_train, n_trials=current_trials, cv_folds=5
-                        )
-                        
-                        if tuning_result['best_score'] >= 0.25:
-                            logger.info(f"{model_type} 우수한 점수 달성: {tuning_result['best_score']:.4f}")
-                        
-                        LargeDataMemoryTracker.force_cleanup()
-                        
-                    except Exception as e:
-                        logger.error(f"{model_type} CTR 하이퍼파라미터 튜닝 실패: {str(e)}")
-                        LargeDataMemoryTracker.force_cleanup()
-            else:
-                logger.info("CTR 하이퍼파라미터 튜닝 생략")
-            
-            # 교차검증 (TimeSeriesSplit 사용)
-            logger.info("CTR 교차검증 평가 단계 (TimeSeriesSplit)")
-            for model_type in model_types:
-                try:
-                    if self.memory_tracker.get_available_memory() < 6:
-                        logger.warning(f"메모리 부족으로 {model_type} CTR 교차검증 생략")
-                        continue
-                    
-                    params = self.trainer.best_params.get(model_type, None)
-                    if params is None:
-                        params = self.trainer._get_large_data_optimized_params(model_type)
-                    
-                    cv_result = self.trainer.cross_validate_ctr_model(
-                        model_type, X_train, y_train, cv_folds=5, params=params
-                    )
-                    
-                    if cv_result and cv_result.get('combined_mean', 0) >= 0.30:
-                        logger.info(f"🎯 {model_type} Combined Score 0.30+ 달성: {cv_result['combined_mean']:.4f}")
-                    
-                    LargeDataMemoryTracker.force_cleanup()
-                    
-                except Exception as e:
-                    logger.error(f"{model_type} CTR 교차검증 실패: {str(e)}")
-                    LargeDataMemoryTracker.force_cleanup()
-            
-            # 최종 모델 학습
-            logger.info("CTR 최종 모델 학습 단계")
-            logger.info(f"학습 전 메모리 상태: {self.memory_tracker.get_available_memory():.2f}GB")
-            
-            trained_models = self.trainer.train_all_ctr_models(X_train, y_train, X_val, y_val, model_types)
-            
-            logger.info(f"학습 후 메모리 상태: {self.memory_tracker.get_available_memory():.2f}GB")
+            # 고성능 모델 학습
+            trained_models = self.trainer.train_all_high_performance_models(
+                X_train, y_train, X_val, y_val,
+                enable_hyperparameter_tuning=enable_hyperparameter_tuning
+            )
             
             # 모델 저장
-            try:
-                self.trainer.save_models()
-            except Exception as e:
-                logger.warning(f"CTR 모델 저장 실패: {str(e)}")
+            self.trainer.save_high_performance_models()
             
             # 결과 요약
-            pipeline_time = time.time() - pipeline_start_time
-            summary = self.trainer.get_training_summary()
-            summary['total_pipeline_time'] = pipeline_time
-            summary['memory_peak'] = self.memory_tracker.get_memory_usage()
-            summary['memory_available_end'] = self.memory_tracker.get_available_memory()
-            summary['ctr_pipeline'] = True
-            summary['performance_target'] = "Combined Score 0.30+"
+            total_time = time.time() - start_time
+            summary = self.trainer.get_performance_summary()
+            summary.update({
+                'total_pipeline_time': total_time,
+                'data_size_train': len(X_train),
+                'data_size_val': len(X_val) if X_val is not None else 0,
+                'pipeline_version': 'High Performance v2.0'
+            })
             
-            # 성능 목표 달성 여부 확인
-            target_achieved = False
-            if 'best_model' in summary and summary['best_model']:
-                target_achieved = summary['best_model']['performance_target_achieved']
-            
-            summary['target_achieved'] = target_achieved
-            
-            logger.info(f"CTR 전체 학습 파이프라인 완료 (소요시간: {pipeline_time:.2f}초)")
-            logger.info(f"최종 메모리 상태: {summary['memory_available_end']:.2f}GB")
-            
-            if target_achieved:
-                logger.info("🎯 Combined Score 0.30+ 목표 달성!")
-            else:
-                logger.warning("⚠️ Combined Score 0.30 목표 미달성")
+            logger.info(f"=== 고성능 파이프라인 완료 (시간: {total_time:.2f}초) ===")
+            logger.info(f"성공 모델: {len(trained_models)}개")
+            logger.info(f"목표 달성: Combined Score {summary['target_achieved']}, CTR 편향 {summary['ctr_bias_target_achieved']}")
             
             return summary
             
         except Exception as e:
-            logger.error(f"CTR 파이프라인 실행 실패: {str(e)}")
-            LargeDataMemoryTracker.force_cleanup()
+            logger.error(f"고성능 파이프라인 실패: {e}")
             raise
-        finally:
-            LargeDataMemoryTracker.force_cleanup()
 
-class GPUMemoryManager:
-    """GPU 메모리 관리 클래스 - RTX 4060 Ti 16GB 최적화"""
-    
-    @staticmethod
-    def clear_gpu_memory():
-        """GPU 메모리 정리"""
-        if TORCH_AVAILABLE and torch.cuda.is_available():
-            try:
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-                torch.cuda.ipc_collect()
-            except Exception as e:
-                logger.warning(f"GPU 메모리 정리 실패: {e}")
-    
-    @staticmethod
-    def get_gpu_memory_info() -> Dict[str, float]:
-        """GPU 메모리 정보 반환 - RTX 4060 Ti 16GB"""
-        if not TORCH_AVAILABLE or not torch.cuda.is_available():
-            return {'total_gb': 0, 'allocated_gb': 0, 'cached_gb': 0, 'free_gb': 0}
-        
-        try:
-            total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            allocated = torch.cuda.memory_allocated(0) / (1024**3)
-            cached = torch.cuda.memory_reserved(0) / (1024**3)
-            free = total - cached
-            
-            return {
-                'total_gb': total,
-                'allocated_gb': allocated,
-                'cached_gb': cached,
-                'free_gb': free,
-                'utilization_percent': (cached / total) * 100 if total > 0 else 0
-            }
-        except Exception as e:
-            logger.warning(f"GPU 메모리 정보 조회 실패: {e}")
-            return {'total_gb': 0, 'allocated_gb': 0, 'cached_gb': 0, 'free_gb': 0, 'utilization_percent': 0}
-    
-    @staticmethod
-    def monitor_gpu_usage(func):
-        """GPU 메모리 사용량 모니터링 데코레이터"""
-        def wrapper(*args, **kwargs):
-            if TORCH_AVAILABLE and torch.cuda.is_available():
-                try:
-                    before = GPUMemoryManager.get_gpu_memory_info()
-                    logger.info(f"GPU 메모리 (실행 전): {before['allocated_gb']:.2f}GB 사용 ({before['utilization_percent']:.1f}%)")
-                    
-                    result = func(*args, **kwargs)
-                    
-                    after = GPUMemoryManager.get_gpu_memory_info()
-                    logger.info(f"GPU 메모리 (실행 후): {after['allocated_gb']:.2f}GB 사용 ({after['utilization_percent']:.1f}%)")
-                    
-                    return result
-                except Exception as e:
-                    logger.warning(f"GPU 메모리 모니터링 실패: {e}")
-                    return func(*args, **kwargs)
-            else:
-                return func(*args, **kwargs)
-        
-        return wrapper
+# 호환성을 위한 alias
+TrainingPipeline = HighPerformanceTrainingPipeline
