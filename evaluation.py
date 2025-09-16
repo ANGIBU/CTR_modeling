@@ -11,6 +11,8 @@ from sklearn.metrics import (
 )
 import time
 import gc
+from pathlib import Path
+import json
 
 try:
     import matplotlib.pyplot as plt
@@ -706,12 +708,6 @@ class CTRAdvancedMetrics:
                     'ctr_alignment_score': 1.0, 'ctr_stability': 1.0, 'target_ctr_achievement': 1.0
                 })
             
-            # CTR 범위별 초상세 지표
-            try:
-                self._add_ultra_ctr_range_metrics(metrics, y_true, y_pred_proba)
-            except Exception as e:
-                logger.warning(f"CTR 범위별 초상세 지표 계산 실패: {e}")
-            
             # 예측 품질 통계 (강화)
             try:
                 metrics['prediction_std'] = float(y_pred_proba.std())
@@ -741,78 +737,34 @@ class CTRAdvancedMetrics:
                     metrics['pos_mean_pred'] = float(y_pred_proba[pos_mask].mean())
                     metrics['pos_std_pred'] = float(y_pred_proba[pos_mask].std())
                     metrics['pos_median_pred'] = float(np.median(y_pred_proba[pos_mask]))
-                    metrics['pos_q25_pred'] = float(np.percentile(y_pred_proba[pos_mask], 25))
-                    metrics['pos_q75_pred'] = float(np.percentile(y_pred_proba[pos_mask], 75))
-                    metrics['pos_min_pred'] = float(y_pred_proba[pos_mask].min())
-                    metrics['pos_max_pred'] = float(y_pred_proba[pos_mask].max())
                 else:
                     metrics.update({
-                        'pos_mean_pred': 0.0, 'pos_std_pred': 0.0, 'pos_median_pred': 0.0,
-                        'pos_q25_pred': 0.0, 'pos_q75_pred': 0.0, 'pos_min_pred': 0.0, 'pos_max_pred': 0.0
+                        'pos_mean_pred': 0.0, 'pos_std_pred': 0.0, 'pos_median_pred': 0.0
                     })
                     
                 if neg_mask.any():
                     metrics['neg_mean_pred'] = float(y_pred_proba[neg_mask].mean())
                     metrics['neg_std_pred'] = float(y_pred_proba[neg_mask].std())
                     metrics['neg_median_pred'] = float(np.median(y_pred_proba[neg_mask]))
-                    metrics['neg_q25_pred'] = float(np.percentile(y_pred_proba[neg_mask], 25))
-                    metrics['neg_q75_pred'] = float(np.percentile(y_pred_proba[neg_mask], 75))
-                    metrics['neg_min_pred'] = float(y_pred_proba[neg_mask].min())
-                    metrics['neg_max_pred'] = float(y_pred_proba[neg_mask].max())
                 else:
                     metrics.update({
-                        'neg_mean_pred': 0.0, 'neg_std_pred': 0.0, 'neg_median_pred': 0.0,
-                        'neg_q25_pred': 0.0, 'neg_q75_pred': 0.0, 'neg_min_pred': 0.0, 'neg_max_pred': 0.0
+                        'neg_mean_pred': 0.0, 'neg_std_pred': 0.0, 'neg_median_pred': 0.0
                     })
                 
                 if pos_mask.any() and neg_mask.any():
                     metrics['separation'] = metrics['pos_mean_pred'] - metrics['neg_mean_pred']
                     metrics['separation_ratio'] = metrics['pos_mean_pred'] / max(metrics['neg_mean_pred'], 1e-10)
-                    
-                    # KS 통계 (강화)
-                    if SCIPY_AVAILABLE:
-                        try:
-                            ks_stat, ks_pvalue = stats.ks_2samp(y_pred_proba[pos_mask], y_pred_proba[neg_mask])
-                            metrics['ks_statistic'] = float(ks_stat)
-                            metrics['ks_pvalue'] = float(ks_pvalue)
-                        except:
-                            metrics['ks_statistic'] = 0.0
-                            metrics['ks_pvalue'] = 1.0
-                    else:
-                        metrics['ks_statistic'] = 0.0
-                        metrics['ks_pvalue'] = 1.0
                 else:
                     metrics['separation'] = 0.0
                     metrics['separation_ratio'] = 1.0
-                    metrics['ks_statistic'] = 0.0
-                    metrics['ks_pvalue'] = 1.0
+                    
             except Exception as e:
                 logger.warning(f"클래스별 예측 통계 계산 실패: {e}")
                 metrics.update({
                     'pos_mean_pred': 0.0, 'pos_std_pred': 0.0, 'pos_median_pred': 0.0,
-                    'pos_q25_pred': 0.0, 'pos_q75_pred': 0.0, 'pos_min_pred': 0.0, 'pos_max_pred': 0.0,
                     'neg_mean_pred': 0.0, 'neg_std_pred': 0.0, 'neg_median_pred': 0.0,
-                    'neg_q25_pred': 0.0, 'neg_q75_pred': 0.0, 'neg_min_pred': 0.0, 'neg_max_pred': 0.0,
-                    'separation': 0.0, 'separation_ratio': 1.0, 'ks_statistic': 0.0, 'ks_pvalue': 1.0
+                    'separation': 0.0, 'separation_ratio': 1.0
                 })
-            
-            # 초고급 보정 지표
-            try:
-                ultra_calibration_metrics = self.calculate_ultra_calibration_metrics(y_true, y_pred_proba)
-                metrics.update(ultra_calibration_metrics)
-            except Exception as e:
-                logger.warning(f"초고급 보정 지표 계산 실패: {e}")
-                metrics.update({
-                    'ece_enhanced': 0.0, 'mce_enhanced': 0.0, 'ace_enhanced': 0.0, 
-                    'reliability_slope_enhanced': 1.0, 'reliability_intercept_enhanced': 0.0,
-                    'calibration_auc': 0.5, 'sharpness': 0.0, 'refinement': 0.0
-                })
-            
-            # 분위수별 상세 지표
-            try:
-                self._add_ultra_quantile_metrics(metrics, y_true, y_pred_proba)
-            except Exception as e:
-                logger.warning(f"분위수별 상세 지표 계산 실패: {e}")
             
             # 목표 달성 지표
             try:
@@ -869,100 +821,11 @@ class CTRAdvancedMetrics:
             'prediction_range': 0.0, 'prediction_iqr': 0.0, 'unique_predictions_ratio': 0.0, 'effective_sample_size': 1000,
             'pos_mean_pred': 0.0, 'pos_std_pred': 0.0, 'pos_median_pred': 0.0,
             'neg_mean_pred': 0.0, 'neg_std_pred': 0.0, 'neg_median_pred': 0.0,
-            'separation': 0.0, 'separation_ratio': 1.0, 'ks_statistic': 0.0, 'ks_pvalue': 1.0,
-            'ece_enhanced': 0.0, 'mce_enhanced': 0.0, 'ace_enhanced': 0.0, 
-            'reliability_slope_enhanced': 1.0, 'reliability_intercept_enhanced': 0.0,
-            'calibration_auc': 0.5, 'sharpness': 0.0, 'refinement': 0.0,
+            'separation': 0.0, 'separation_ratio': 1.0,
             'target_combined_score_achievement': 0.0, 'combined_score_gap': self.target_combined_score,
             'ultra_score_achievement': 0.0, 'performance_tier': 'poor',
             'evaluation_time': 0.0
         }
-    
-    def _add_ultra_ctr_range_metrics(self, metrics: Dict[str, float], y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """CTR 범위별 초상세 성능 지표 추가"""
-        try:
-            ranges = {
-                'micro': (0.0, 0.005),
-                'very_low': (0.005, 0.01),
-                'low': (0.01, 0.015),
-                'low_medium': (0.015, 0.02),
-                'medium': (0.02, 0.03),
-                'medium_high': (0.03, 0.05),
-                'high': (0.05, 0.08),
-                'very_high': (0.08, 0.15),
-                'extreme': (0.15, 1.0)
-            }
-            
-            for range_name, (low, high) in ranges.items():
-                mask = (y_pred_proba >= low) & (y_pred_proba < high)
-                
-                if mask.sum() > 0:
-                    range_actual_ctr = float(y_true[mask].mean())
-                    range_pred_ctr = float(y_pred_proba[mask].mean())
-                    range_bias = abs(range_pred_ctr - range_actual_ctr)
-                    range_count = int(mask.sum())
-                    range_ratio = range_count / len(y_true)
-                    
-                    if range_pred_ctr > 0:
-                        range_alignment = min(range_actual_ctr / range_pred_ctr, range_pred_ctr / range_actual_ctr)
-                    else:
-                        range_alignment = 0.0
-                    
-                    metrics[f'ctr_{range_name}_actual'] = range_actual_ctr
-                    metrics[f'ctr_{range_name}_predicted'] = range_pred_ctr
-                    metrics[f'ctr_{range_name}_bias'] = range_bias
-                    metrics[f'ctr_{range_name}_count'] = range_count
-                    metrics[f'ctr_{range_name}_ratio'] = range_ratio
-                    metrics[f'ctr_{range_name}_alignment'] = range_alignment
-                    
-                else:
-                    metrics[f'ctr_{range_name}_actual'] = 0.0
-                    metrics[f'ctr_{range_name}_predicted'] = 0.0
-                    metrics[f'ctr_{range_name}_bias'] = 0.0
-                    metrics[f'ctr_{range_name}_count'] = 0
-                    metrics[f'ctr_{range_name}_ratio'] = 0.0
-                    metrics[f'ctr_{range_name}_alignment'] = 0.0
-                    
-        except Exception as e:
-            logger.warning(f"CTR 범위별 초상세 지표 계산 실패: {e}")
-    
-    def _add_ultra_quantile_metrics(self, metrics: Dict[str, float], y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """분위수별 초상세 성능 지표 추가"""
-        try:
-            quantiles = [0.05, 0.1, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 0.95, 0.99]
-            
-            for q in quantiles:
-                threshold = np.percentile(y_pred_proba, q * 100)
-                top_q_mask = y_pred_proba >= threshold
-                
-                if top_q_mask.sum() > 0:
-                    top_q_ctr = float(y_true[top_q_mask].mean())
-                    top_q_pred_ctr = float(y_pred_proba[top_q_mask].mean())
-                    top_q_size = int(top_q_mask.sum())
-                    
-                    baseline_ctr = metrics.get('ctr_actual', 0.0201)
-                    if baseline_ctr > 0:
-                        top_q_lift = top_q_ctr / baseline_ctr
-                        top_q_precision = top_q_ctr
-                    else:
-                        top_q_lift = 1.0
-                        top_q_precision = 0.0
-                    
-                    if top_q_pred_ctr > 0:
-                        top_q_alignment = min(top_q_ctr / top_q_pred_ctr, top_q_pred_ctr / top_q_ctr)
-                    else:
-                        top_q_alignment = 0.0
-                    
-                    q_label = int(q * 100)
-                    metrics[f'top_{q_label}p_ctr'] = top_q_ctr
-                    metrics[f'top_{q_label}p_pred_ctr'] = top_q_pred_ctr
-                    metrics[f'top_{q_label}p_size'] = top_q_size
-                    metrics[f'top_{q_label}p_lift'] = top_q_lift
-                    metrics[f'top_{q_label}p_precision'] = top_q_precision
-                    metrics[f'top_{q_label}p_alignment'] = top_q_alignment
-                    
-        except Exception as e:
-            logger.warning(f"분위수별 초상세 지표 계산 실패: {e}")
     
     def _calculate_entropy_enhanced(self, probabilities: np.ndarray) -> float:
         """향상된 예측 확률의 엔트로피 계산"""
@@ -992,158 +855,6 @@ class CTRAdvancedMetrics:
             return 'poor'
         else:
             return 'very_poor'
-    
-    def calculate_pr_auc_enhanced(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray]:
-        """향상된 Precision-Recall AUC 계산"""
-        try:
-            precision, recall, thresholds = precision_recall_curve(y_true, y_pred_proba)
-            
-            pr_auc = np.trapz(precision, recall)
-            
-            if np.isnan(pr_auc) or np.isinf(pr_auc):
-                pr_auc = 0.0
-            
-            return pr_auc, precision, recall
-        except Exception as e:
-            logger.error(f"향상된 PR-AUC 계산 오류: {str(e)}")
-            return 0.0, np.array([]), np.array([])
-    
-    def find_optimal_threshold_enhanced(self, 
-                                      y_true: np.ndarray, 
-                                      y_pred_proba: np.ndarray,
-                                      metric: str = 'combined_score_enhanced') -> Tuple[float, float]:
-        """향상된 최적 임계값 찾기"""
-        
-        thresholds = np.arange(0.001, 0.999, 0.001)
-        best_threshold = 0.5
-        best_score = 0.0
-        
-        for threshold in thresholds:
-            try:
-                if metric == 'combined_score_enhanced':
-                    score = self.combined_score_enhanced(y_true, y_pred_proba)
-                elif metric == 'ctr_ultra_optimized_score':
-                    score = self.ctr_ultra_optimized_score(y_true, y_pred_proba)
-                elif metric == 'f1':
-                    y_pred = (y_pred_proba >= threshold).astype(int)
-                    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-                    if cm.shape == (2, 2):
-                        tn, fp, fn, tp = cm.ravel()
-                        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-                        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-                        score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-                    else:
-                        score = 0.0
-                elif metric == 'accuracy':
-                    y_pred = (y_pred_proba >= threshold).astype(int)
-                    score = (y_true == y_pred).mean()
-                else:
-                    continue
-                
-                if score > best_score:
-                    best_score = score
-                    best_threshold = threshold
-                    
-            except Exception as e:
-                continue
-        
-        return best_threshold, best_score
-    
-    def calculate_ultra_calibration_metrics(self, y_true: np.ndarray, y_pred_proba: np.ndarray, n_bins: int = 30) -> Dict[str, float]:
-        """초고급 모델 보정 지표 계산"""
-        try:
-            bin_boundaries = np.linspace(0, 1, n_bins + 1)
-            bin_lowers = bin_boundaries[:-1]
-            bin_uppers = bin_boundaries[1:]
-            
-            bin_accuracies = []
-            bin_confidences = []
-            bin_counts = []
-            bin_weights = []
-            
-            ece = 0.0
-            mce = 0.0
-            total_count = len(y_true)
-            
-            for bin_lower, bin_upper in zip(bin_lowers, bin_uppers):
-                in_bin = (y_pred_proba > bin_lower) & (y_pred_proba <= bin_upper)
-                prop_in_bin = in_bin.mean()
-                
-                if prop_in_bin > 0:
-                    accuracy_in_bin = y_true[in_bin].mean()
-                    avg_confidence_in_bin = y_pred_proba[in_bin].mean()
-                    count_in_bin = in_bin.sum()
-                    
-                    bin_diff = abs(avg_confidence_in_bin - accuracy_in_bin)
-                    ece += bin_diff * prop_in_bin
-                    mce = max(mce, bin_diff)
-                    
-                    bin_accuracies.append(accuracy_in_bin)
-                    bin_confidences.append(avg_confidence_in_bin)
-                    bin_counts.append(count_in_bin)
-                    bin_weights.append(prop_in_bin)
-            
-            # ACE 계산
-            if len(bin_accuracies) > 0:
-                ace = np.mean([abs(acc - conf) for acc, conf in zip(bin_accuracies, bin_confidences)])
-            else:
-                ace = 0.0
-            
-            # 신뢰도 곡선 기울기 및 절편
-            if len(bin_accuracies) > 2:
-                try:
-                    slope, intercept = np.polyfit(bin_confidences, bin_accuracies, 1)
-                    correlation = np.corrcoef(bin_confidences, bin_accuracies)[0, 1]
-                    if np.isnan(correlation):
-                        correlation = 0.5
-                except:
-                    slope, intercept, correlation = 1.0, 0.0, 0.5
-            else:
-                slope, intercept, correlation = 1.0, 0.0, 0.5
-            
-            # 보정 AUC 계산
-            try:
-                if len(bin_confidences) > 2:
-                    calibration_auc = np.trapz(bin_accuracies, bin_confidences)
-                    if np.isnan(calibration_auc):
-                        calibration_auc = 0.5
-                else:
-                    calibration_auc = 0.5
-            except:
-                calibration_auc = 0.5
-            
-            # Sharpness (예측의 확신도)
-            sharpness = y_pred_proba.var()
-            
-            # Refinement (분해 기반)
-            try:
-                refinement = np.mean([prop * acc * (1 - acc) for prop, acc in zip(bin_weights, bin_accuracies) if prop > 0])
-            except:
-                refinement = 0.0
-            
-            return {
-                'ece_enhanced': float(ece),
-                'mce_enhanced': float(mce), 
-                'ace_enhanced': float(ace),
-                'reliability_slope_enhanced': float(slope),
-                'reliability_intercept_enhanced': float(intercept),
-                'reliability_correlation': float(correlation),
-                'calibration_auc': float(calibration_auc),
-                'sharpness': float(sharpness),
-                'refinement': float(refinement),
-                'bin_accuracies': [float(x) for x in bin_accuracies],
-                'bin_confidences': [float(x) for x in bin_confidences],
-                'bin_counts': [int(x) for x in bin_counts],
-                'bin_weights': [float(x) for x in bin_weights]
-            }
-            
-        except Exception as e:
-            logger.error(f"초고급 보정 지표 계산 오류: {str(e)}")
-            return {
-                'ece_enhanced': 0.0, 'mce_enhanced': 0.0, 'ace_enhanced': 0.0, 
-                'reliability_slope_enhanced': 1.0, 'reliability_intercept_enhanced': 0.0,
-                'reliability_correlation': 0.5, 'calibration_auc': 0.5, 'sharpness': 0.0, 'refinement': 0.0
-            }
     
     def clear_cache(self):
         """캐시 정리"""
@@ -1194,22 +905,6 @@ class UltraModelComparator:
                 evaluation_time = time.time() - start_time
                 metrics['evaluation_duration'] = evaluation_time
                 
-                # 초고급 안정성 지표 계산
-                try:
-                    stability_metrics = self._calculate_ultra_stability_metrics(y_true, y_pred_proba)
-                    metrics.update(stability_metrics)
-                except Exception as e:
-                    logger.warning(f"{model_name} 초고급 안정성 지표 계산 실패: {e}")
-                    metrics.update(self._get_default_stability_metrics())
-                
-                # 초고급 로버스트성 지표 계산
-                try:
-                    robustness_metrics = self._calculate_ultra_robustness_metrics(y_true, y_pred_proba)
-                    metrics.update(robustness_metrics)
-                except Exception as e:
-                    logger.warning(f"{model_name} 초고급 로버스트성 지표 계산 실패: {e}")
-                    metrics.update(self._get_default_robustness_metrics())
-                
                 results.append(metrics)
                 
                 logger.info(f"{model_name} 평가 완료 ({evaluation_time:.2f}초)")
@@ -1223,8 +918,6 @@ class UltraModelComparator:
                 default_metrics = self.metrics_calculator._get_default_metrics_ultra()
                 default_metrics['model_name'] = model_name
                 default_metrics['evaluation_duration'] = 0.0
-                default_metrics.update(self._get_default_stability_metrics())
-                default_metrics.update(self._get_default_robustness_metrics())
                 results.append(default_metrics)
         
         if not results:
@@ -1248,9 +941,6 @@ class UltraModelComparator:
                 
                 if sort_columns:
                     comparison_df.sort_values(sort_columns, ascending=False, inplace=True)
-                
-                # 추가 분석
-                self._analyze_ultra_performance_patterns(comparison_df)
         
             self.comparison_results = comparison_df
             
@@ -1267,274 +957,6 @@ class UltraModelComparator:
         except Exception as e:
             logger.error(f"초고성능 비교 결과 생성 실패: {e}")
             return pd.DataFrame()
-    
-    def _calculate_ultra_stability_metrics(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> Dict[str, float]:
-        """초고급 모델 안정성 지표 계산"""
-        try:
-            y_true_array = np.asarray(y_true).flatten()
-            y_pred_array = np.asarray(y_pred_proba).flatten()
-            
-            min_len = min(len(y_true_array), len(y_pred_array))
-            if min_len == 0:
-                logger.warning("빈 배열로 인해 안정성 지표 계산 불가")
-                return self._get_default_stability_metrics()
-            
-            y_true_array = y_true_array[:min_len]
-            y_pred_array = y_pred_array[:min_len]
-            
-            # 강화된 부트스트래핑
-            n_bootstrap = min(50, max(20, min_len // 5000))
-            sample_size = min(min_len, 20000)
-            
-            combined_scores = []
-            ctr_biases = []
-            ap_scores = []
-            
-            np.random.seed(42)
-            
-            for i in range(n_bootstrap):
-                try:
-                    if sample_size >= min_len:
-                        indices = np.arange(min_len)
-                    else:
-                        indices = np.random.choice(min_len, size=sample_size, replace=True)
-                    
-                    indices = np.clip(indices, 0, min_len - 1)
-                    
-                    boot_y_true = y_true_array[indices]
-                    boot_y_pred = y_pred_array[indices]
-                    
-                    unique_classes = np.unique(boot_y_true)
-                    if len(unique_classes) < 2:
-                        continue
-                    
-                    if np.any(np.isnan(boot_y_pred)) or np.any(np.isinf(boot_y_pred)):
-                        boot_y_pred = np.clip(boot_y_pred, 1e-15, 1 - 1e-15)
-                        boot_y_pred = np.nan_to_num(boot_y_pred, nan=0.5, posinf=1.0, neginf=0.0)
-                    
-                    combined_score = self.metrics_calculator.combined_score_enhanced(boot_y_true, boot_y_pred)
-                    ap_score = self.metrics_calculator.average_precision_enhanced(boot_y_true, boot_y_pred)
-                    
-                    ctr_bias = abs(boot_y_pred.mean() - boot_y_true.mean())
-                    
-                    if (combined_score > 0 and not np.isnan(combined_score) and not np.isinf(combined_score) and
-                        ap_score > 0 and not np.isnan(ap_score) and not np.isinf(ap_score)):
-                        combined_scores.append(combined_score)
-                        ap_scores.append(ap_score)
-                        ctr_biases.append(ctr_bias)
-                        
-                except Exception as e:
-                    logger.debug(f"부트스트래핑 {i+1} 실패: {e}")
-                    continue
-            
-            # 결과 계산
-            if len(combined_scores) >= 5:
-                combined_scores = np.array(combined_scores)
-                ap_scores = np.array(ap_scores)
-                ctr_biases = np.array(ctr_biases)
-                
-                stability_metrics = {
-                    'stability_combined_mean': float(combined_scores.mean()),
-                    'stability_combined_std': float(combined_scores.std()),
-                    'stability_combined_cv': float(combined_scores.std() / combined_scores.mean()) if combined_scores.mean() > 0 else float('inf'),
-                    'stability_combined_ci_lower': float(np.percentile(combined_scores, 2.5)),
-                    'stability_combined_ci_upper': float(np.percentile(combined_scores, 97.5)),
-                    'stability_combined_range': float(np.percentile(combined_scores, 97.5) - np.percentile(combined_scores, 2.5)),
-                    
-                    'stability_ap_mean': float(ap_scores.mean()),
-                    'stability_ap_std': float(ap_scores.std()),
-                    'stability_ap_cv': float(ap_scores.std() / ap_scores.mean()) if ap_scores.mean() > 0 else float('inf'),
-                    
-                    'stability_ctr_bias_mean': float(ctr_biases.mean()),
-                    'stability_ctr_bias_std': float(ctr_biases.std()),
-                    'stability_ctr_bias_max': float(ctr_biases.max()),
-                    
-                    'stability_sample_count': len(combined_scores),
-                    'stability_success_rate': len(combined_scores) / n_bootstrap,
-                    
-                    # 종합 안정성 점수
-                    'overall_stability_score': float(
-                        max(0, 1.0 - combined_scores.std() / max(combined_scores.mean(), 0.1)) * 0.5 +
-                        max(0, 1.0 - ap_scores.std() / max(ap_scores.mean(), 0.1)) * 0.3 +
-                        max(0, 1.0 - ctr_biases.std()) * 0.2
-                    )
-                }
-            else:
-                logger.warning("유효한 부트스트래핑 점수가 부족합니다")
-                stability_metrics = self._get_default_stability_metrics()
-            
-            return stability_metrics
-            
-        except Exception as e:
-            logger.warning(f"초고급 안정성 지표 계산 실패: {e}")
-            return self._get_default_stability_metrics()
-    
-    def _calculate_ultra_robustness_metrics(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> Dict[str, float]:
-        """초고급 로버스트성 지표 계산"""
-        try:
-            # 노이즈 추가 테스트
-            noise_levels = [0.001, 0.005, 0.01, 0.02]
-            robustness_scores = []
-            
-            original_score = self.metrics_calculator.combined_score_enhanced(y_true, y_pred_proba)
-            
-            for noise_level in noise_levels:
-                try:
-                    # 예측값에 노이즈 추가
-                    noise = np.random.normal(0, noise_level, len(y_pred_proba))
-                    noisy_pred = np.clip(y_pred_proba + noise, 1e-15, 1 - 1e-15)
-                    
-                    noisy_score = self.metrics_calculator.combined_score_enhanced(y_true, noisy_pred)
-                    
-                    if original_score > 0:
-                        robustness_ratio = noisy_score / original_score
-                    else:
-                        robustness_ratio = 0.0
-                    
-                    robustness_scores.append(robustness_ratio)
-                    
-                except:
-                    robustness_scores.append(0.0)
-            
-            # 극값 제거 테스트
-            try:
-                # 상위/하위 1% 제거
-                q01, q99 = np.percentile(y_pred_proba, [1, 99])
-                trimmed_mask = (y_pred_proba >= q01) & (y_pred_proba <= q99)
-                
-                if trimmed_mask.sum() > 100:
-                    trimmed_score = self.metrics_calculator.combined_score_enhanced(
-                        y_true[trimmed_mask], y_pred_proba[trimmed_mask]
-                    )
-                    trimmed_robustness = trimmed_score / original_score if original_score > 0 else 0.0
-                else:
-                    trimmed_robustness = 0.0
-            except:
-                trimmed_robustness = 0.0
-            
-            # 서브샘플링 테스트
-            try:
-                subsample_robustness = []
-                subsample_sizes = [0.8, 0.9, 0.95]
-                
-                for size_ratio in subsample_sizes:
-                    sample_size = int(len(y_pred_proba) * size_ratio)
-                    if sample_size > 100:
-                        indices = np.random.choice(len(y_pred_proba), sample_size, replace=False)
-                        subsample_score = self.metrics_calculator.combined_score_enhanced(
-                            y_true[indices], y_pred_proba[indices]
-                        )
-                        subsample_ratio = subsample_score / original_score if original_score > 0 else 0.0
-                        subsample_robustness.append(subsample_ratio)
-                    else:
-                        subsample_robustness.append(0.0)
-                
-                avg_subsample_robustness = np.mean(subsample_robustness) if subsample_robustness else 0.0
-            except:
-                avg_subsample_robustness = 0.0
-            
-            return {
-                'robustness_noise_001': robustness_scores[0] if len(robustness_scores) > 0 else 0.0,
-                'robustness_noise_005': robustness_scores[1] if len(robustness_scores) > 1 else 0.0,
-                'robustness_noise_010': robustness_scores[2] if len(robustness_scores) > 2 else 0.0,
-                'robustness_noise_020': robustness_scores[3] if len(robustness_scores) > 3 else 0.0,
-                'robustness_noise_mean': float(np.mean(robustness_scores)) if robustness_scores else 0.0,
-                'robustness_noise_std': float(np.std(robustness_scores)) if len(robustness_scores) > 1 else 0.0,
-                'robustness_trimmed': float(trimmed_robustness),
-                'robustness_subsample': float(avg_subsample_robustness),
-                'overall_robustness_score': float(
-                    np.mean(robustness_scores) * 0.4 +
-                    trimmed_robustness * 0.3 +
-                    avg_subsample_robustness * 0.3
-                ) if robustness_scores else 0.0
-            }
-            
-        except Exception as e:
-            logger.warning(f"초고급 로버스트성 지표 계산 실패: {e}")
-            return self._get_default_robustness_metrics()
-    
-    def _get_default_stability_metrics(self) -> Dict[str, float]:
-        """기본 안정성 지표 반환"""
-        return {
-            'stability_combined_mean': 0.0, 'stability_combined_std': 0.0, 'stability_combined_cv': float('inf'),
-            'stability_combined_ci_lower': 0.0, 'stability_combined_ci_upper': 0.0, 'stability_combined_range': 0.0,
-            'stability_ap_mean': 0.0, 'stability_ap_std': 0.0, 'stability_ap_cv': float('inf'),
-            'stability_ctr_bias_mean': 0.0, 'stability_ctr_bias_std': 0.0, 'stability_ctr_bias_max': 0.0,
-            'stability_sample_count': 0, 'stability_success_rate': 0.0, 'overall_stability_score': 0.0
-        }
-    
-    def _get_default_robustness_metrics(self) -> Dict[str, float]:
-        """기본 로버스트성 지표 반환"""
-        return {
-            'robustness_noise_001': 0.0, 'robustness_noise_005': 0.0, 'robustness_noise_010': 0.0, 'robustness_noise_020': 0.0,
-            'robustness_noise_mean': 0.0, 'robustness_noise_std': 0.0, 'robustness_trimmed': 0.0,
-            'robustness_subsample': 0.0, 'overall_robustness_score': 0.0
-        }
-    
-    def _analyze_ultra_performance_patterns(self, comparison_df: pd.DataFrame):
-        """초고급 성능 패턴 분석"""
-        try:
-            analysis = {}
-            
-            # 목표 달성 분석
-            target_achievers = comparison_df[comparison_df['target_combined_score_achievement'] == 1.0]
-            ultra_achievers = comparison_df[comparison_df['ultra_score_achievement'] == 1.0]
-            
-            analysis['target_achievement_analysis'] = {
-                'total_models': len(comparison_df),
-                'target_achievers_count': len(target_achievers),
-                'ultra_achievers_count': len(ultra_achievers),
-                'target_achievement_rate': len(target_achievers) / len(comparison_df),
-                'ultra_achievement_rate': len(ultra_achievers) / len(comparison_df),
-                'best_combined_score': comparison_df['combined_score_enhanced'].max(),
-                'best_ultra_score': comparison_df['ctr_ultra_optimized_score'].max(),
-                'avg_combined_score': comparison_df['combined_score_enhanced'].mean(),
-                'avg_ultra_score': comparison_df['ctr_ultra_optimized_score'].mean()
-            }
-            
-            # 성능 계층 분석
-            tier_counts = comparison_df['performance_tier'].value_counts().to_dict()
-            analysis['performance_tier_distribution'] = tier_counts
-            
-            # CTR 편향 분석
-            if 'ctr_bias' in comparison_df.columns:
-                ctr_biases = comparison_df['ctr_bias']
-                analysis['ctr_bias_analysis'] = {
-                    'mean_bias': float(ctr_biases.mean()),
-                    'std_bias': float(ctr_biases.std()),
-                    'max_absolute_bias': float(ctr_biases.abs().max()),
-                    'models_with_ultra_low_bias': int((ctr_biases.abs() < 0.0005).sum()),
-                    'models_with_low_bias': int((ctr_biases.abs() < 0.001).sum()),
-                    'overestimating_models': int((ctr_biases > 0.001).sum()),
-                    'underestimating_models': int((ctr_biases < -0.001).sum())
-                }
-            
-            # 안정성 분석
-            stability_cols = [col for col in comparison_df.columns if 'stability' in col and 'overall' in col]
-            if stability_cols:
-                stability_col = stability_cols[0]
-                analysis['stability_analysis'] = {
-                    'mean_stability': float(comparison_df[stability_col].mean()),
-                    'std_stability': float(comparison_df[stability_col].std()),
-                    'highly_stable_models': int((comparison_df[stability_col] > 0.8).sum()),
-                    'unstable_models': int((comparison_df[stability_col] < 0.5).sum())
-                }
-            
-            # 로버스트성 분석
-            robustness_cols = [col for col in comparison_df.columns if 'robustness' in col and 'overall' in col]
-            if robustness_cols:
-                robustness_col = robustness_cols[0]
-                analysis['robustness_analysis'] = {
-                    'mean_robustness': float(comparison_df[robustness_col].mean()),
-                    'std_robustness': float(comparison_df[robustness_col].std()),
-                    'highly_robust_models': int((comparison_df[robustness_col] > 0.8).sum()),
-                    'fragile_models': int((comparison_df[robustness_col] < 0.5).sum())
-                }
-            
-            self.performance_analysis = analysis
-            
-        except Exception as e:
-            logger.warning(f"초고급 성능 패턴 분석 실패: {e}")
     
     def rank_models_ultra(self, 
                          ranking_metric: str = 'ctr_ultra_optimized_score') -> pd.DataFrame:
@@ -1557,11 +979,6 @@ class UltraModelComparator:
             key_columns = ['rank', ranking_metric, 'combined_score_enhanced', 'ap_enhanced', 'wll_enhanced', 
                           'auc', 'f1', 'ctr_bias', 'ctr_ratio', 'ctr_alignment_score',
                           'performance_tier', 'target_combined_score_achievement', 'ultra_score_achievement']
-            
-            if 'overall_stability_score' in ranking_df.columns:
-                key_columns.append('overall_stability_score')
-            if 'overall_robustness_score' in ranking_df.columns:
-                key_columns.append('overall_robustness_score')
             
             available_columns = [col for col in key_columns if col in ranking_df.columns]
             
@@ -1589,41 +1006,132 @@ class UltraModelComparator:
         except Exception as e:
             logger.error(f"최고 초고성능 모델 찾기 실패: {e}")
             return None, 0.0
+
+class EvaluationReporter:
+    """평가 결과 리포팅 클래스"""
     
-    def get_performance_summary(self) -> Dict[str, Any]:
-        """초고성능 성능 요약 반환"""
+    def __init__(self, config: Config = Config):
+        self.config = config
+        self.report_data = {}
         
-        if self.comparison_results.empty:
-            return {'status': 'no_results', 'message': '비교 결과가 없습니다'}
-        
+    def generate_model_performance_report(self, 
+                                        comparator: UltraModelComparator,
+                                        save_path: Optional[Path] = None) -> Dict[str, Any]:
+        """모델 성능 리포트 생성"""
         try:
-            summary = {
-                'total_models': len(self.comparison_results),
-                'target_achievers': int(self.comparison_results['target_combined_score_achievement'].sum()),
-                'ultra_achievers': int(self.comparison_results['ultra_score_achievement'].sum()),
-                'best_combined_score': float(self.comparison_results['combined_score_enhanced'].max()),
-                'best_ultra_score': float(self.comparison_results['ctr_ultra_optimized_score'].max()),
-                'avg_combined_score': float(self.comparison_results['combined_score_enhanced'].mean()),
-                'performance_analysis': self.performance_analysis
+            if comparator.comparison_results.empty:
+                return {'error': '비교 결과가 없습니다'}
+            
+            report = {
+                'summary': {
+                    'total_models': len(comparator.comparison_results),
+                    'evaluation_time': time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'best_model': None,
+                    'best_score': 0.0
+                },
+                'detailed_results': {},
+                'performance_analysis': {},
+                'recommendations': []
             }
             
-            # 최고 모델 정보
-            best_model, best_score = self.get_best_model_ultra()
-            if best_model:
-                summary['best_model'] = {
-                    'name': best_model,
-                    'ultra_score': best_score,
-                    'combined_score': float(self.comparison_results.loc[best_model, 'combined_score_enhanced']),
-                    'performance_tier': self.comparison_results.loc[best_model, 'performance_tier'],
-                    'target_achieved': bool(self.comparison_results.loc[best_model, 'target_combined_score_achievement']),
-                    'ultra_achieved': bool(self.comparison_results.loc[best_model, 'ultra_score_achievement'])
-                }
+            # 최고 성능 모델 찾기
+            best_model, best_score = comparator.get_best_model_ultra()
+            report['summary']['best_model'] = best_model
+            report['summary']['best_score'] = best_score
             
-            return summary
+            # 상세 결과
+            for model_name, row in comparator.comparison_results.iterrows():
+                model_result = {
+                    'combined_score': row.get('combined_score_enhanced', 0.0),
+                    'ultra_score': row.get('ctr_ultra_optimized_score', 0.0),
+                    'ap_score': row.get('ap_enhanced', 0.0),
+                    'auc_score': row.get('auc', 0.5),
+                    'ctr_bias': row.get('ctr_bias', 0.0),
+                    'performance_tier': row.get('performance_tier', 'unknown'),
+                    'target_achieved': row.get('target_combined_score_achievement', 0.0) == 1.0,
+                    'evaluation_time': row.get('evaluation_duration', 0.0)
+                }
+                report['detailed_results'][model_name] = model_result
+            
+            # 성능 분석
+            df = comparator.comparison_results
+            report['performance_analysis'] = {
+                'avg_combined_score': float(df['combined_score_enhanced'].mean()),
+                'std_combined_score': float(df['combined_score_enhanced'].std()),
+                'target_achievers': int(df['target_combined_score_achievement'].sum()),
+                'ultra_achievers': int(df['ultra_score_achievement'].sum()),
+                'tier_distribution': df['performance_tier'].value_counts().to_dict()
+            }
+            
+            # 권장사항 생성
+            if best_score >= 0.30:
+                report['recommendations'].append("목표 달성: Combined Score 0.30+ 달성 모델이 있습니다")
+            else:
+                report['recommendations'].append("개선 필요: 모든 모델이 목표 점수에 미달합니다")
+            
+            if report['performance_analysis']['target_achievers'] == 0:
+                report['recommendations'].append("피처 엔지니어링 및 하이퍼파라미터 튜닝을 강화하세요")
+            
+            # 저장
+            if save_path:
+                try:
+                    save_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(save_path, 'w', encoding='utf-8') as f:
+                        json.dump(report, f, indent=2, ensure_ascii=False)
+                    logger.info(f"평가 리포트 저장: {save_path}")
+                except Exception as e:
+                    logger.warning(f"리포트 저장 실패: {e}")
+            
+            self.report_data = report
+            return report
             
         except Exception as e:
-            logger.error(f"초고성능 성능 요약 생성 실패: {e}")
-            return {'status': 'error', 'message': f'요약 생성 중 오류: {str(e)}'}
+            logger.error(f"평가 리포트 생성 실패: {e}")
+            return {'error': f'리포트 생성 중 오류: {str(e)}'}
+    
+    def save_comparison_results(self, 
+                              comparison_df: pd.DataFrame,
+                              save_path: Optional[Path] = None) -> bool:
+        """비교 결과를 파일로 저장"""
+        try:
+            if save_path is None:
+                save_path = self.config.OUTPUT_DIR / "model_comparison_results.csv"
+            
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            comparison_df.to_csv(save_path, index=True, encoding='utf-8')
+            
+            logger.info(f"모델 비교 결과 저장: {save_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"비교 결과 저장 실패: {e}")
+            return False
+    
+    def generate_summary_table(self, comparison_df: pd.DataFrame) -> pd.DataFrame:
+        """요약 테이블 생성"""
+        try:
+            if comparison_df.empty:
+                return pd.DataFrame()
+            
+            summary_columns = [
+                'combined_score_enhanced', 'ctr_ultra_optimized_score', 
+                'ap_enhanced', 'auc', 'ctr_bias', 'performance_tier',
+                'target_combined_score_achievement', 'ultra_score_achievement'
+            ]
+            
+            available_columns = [col for col in summary_columns if col in comparison_df.columns]
+            
+            if available_columns:
+                summary_df = comparison_df[available_columns].copy()
+                summary_df = summary_df.round(4)
+                return summary_df
+            else:
+                return comparison_df
+            
+        except Exception as e:
+            logger.error(f"요약 테이블 생성 실패: {e}")
+            return pd.DataFrame()
 
-# 기존 클래스명 유지 (하위 호환성)
+# 하위 호환성을 위한 alias들
 CTRMetrics = CTRAdvancedMetrics
+ModelComparator = UltraModelComparator
