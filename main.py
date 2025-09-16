@@ -215,11 +215,30 @@ def execute_full_pipeline(config, quick_mode=False):
             
             logger.info(f"피처 엔지니어링 완료 - X_train: {X_train.shape}, X_test: {X_test.shape}")
             
-            # 피처 엔지니어 저장
-            feature_engineer_path = config.MODEL_DIR / "feature_engineer.pkl"
-            with open(feature_engineer_path, 'wb') as f:
-                pickle.dump(feature_engineer, f)
-            logger.info(f"피처 엔지니어 저장: {feature_engineer_path}")
+            # 피처 엔지니어 정보 저장 (안전한 방식)
+            try:
+                feature_engineer_path = config.MODEL_DIR / "feature_engineer.pkl"
+                
+                # 피처 정보만 저장 (객체 전체가 아닌)
+                feature_info = {
+                    'feature_names': X_train.columns.tolist() if hasattr(X_train, 'columns') else [],
+                    'n_features': X_train.shape[1] if hasattr(X_train, 'shape') else 0,
+                    'target_col': target_col,
+                    'processing_config': getattr(feature_engineer, 'config', {}),
+                    'feature_types': getattr(feature_engineer, 'feature_types', {}),
+                    'generated_features': getattr(feature_engineer, 'generated_features', []),
+                    'removed_columns': getattr(feature_engineer, 'removed_columns', []),
+                    'final_feature_columns': getattr(feature_engineer, 'final_feature_columns', []),
+                    'processing_stats': getattr(feature_engineer, 'processing_stats', {})
+                }
+                
+                with open(feature_engineer_path, 'wb') as f:
+                    pickle.dump(feature_info, f)
+                logger.info(f"피처 정보 저장 완료: {feature_engineer_path}")
+                
+            except Exception as pickle_error:
+                logger.warning(f"피처 엔지니어 저장 실패 (계속 진행): {pickle_error}")
+                # 저장 실패해도 학습은 계속 진행
             
         except Exception as e:
             logger.error(f"피처 엔지니어링 실패: {e}")
