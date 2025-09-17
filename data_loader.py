@@ -605,63 +605,256 @@ class DataChunkProcessor:
             logger.error(f"청크 복구 실패: {e}")
             return False
 
-class SimpleDataLoader:
-    """단순한 데이터 로더 - 메모리 안전성 우선"""
+class StreamingDataLoader:
+    """스트리밍 데이터 로더 - 1070만행 전체 처리"""
     
     def __init__(self, config: Config = Config):
         self.config = config
         self.memory_monitor = MemoryMonitor()
         self.target_column = 'clicked'
         
-        logger.info("단순 데이터 로더 초기화 완료")
+        logger.info("스트리밍 데이터 로더 초기화 완료")
     
-    def load_data_safely(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """메모리 안전 데이터 로딩"""
-        logger.info("=== 메모리 안전 데이터 로딩 시작 ===")
+    def load_full_data_streaming(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """스트리밍 방식으로 1070만행 전체 처리"""
+        logger.info("=== 1070만행 전체 데이터 스트리밍 로딩 시작 ===")
         
         try:
             # 메모리 상태 확인
-            self.memory_monitor.log_memory_status("로딩 시작", force=True)
+            self.memory_monitor.log_memory_status("스트리밍 시작", force=True)
             
-            # 파일 존재 확인
+            # 파일 유효성 검증
             if not self._validate_files():
-                logger.warning("실제 데이터 파일을 사용할 수 없어 샘플 데이터로 대체")
-                return self._create_safe_sample_data()
+                raise ValueError("데이터 파일이 존재하지 않습니다")
             
-            # 작은 크기로 데이터 로딩 시도
-            train_df = self._load_small_sample(str(self.config.TRAIN_PATH), sample_size=500000)
-            test_df = self._load_small_sample(str(self.config.TEST_PATH), sample_size=200000)
+            # 1. 학습 데이터 스트리밍 처리
+            logger.info("학습 데이터 스트리밍 처리 시작")
+            train_df = self._stream_process_file(str(self.config.TRAIN_PATH), is_train=True)
             
-            if train_df is None or test_df is None or train_df.empty or test_df.empty:
-                logger.warning("파일 읽기 실패, 샘플 데이터로 대체")
-                return self._create_safe_sample_data()
+            if train_df is None or train_df.empty:
+                raise ValueError("학습 데이터 스트리밍 처리 실패")
             
-            # 타겟 컬럼 확인
-            if self.target_column not in train_df.columns:
-                possible_targets = [col for col in train_df.columns if 'click' in col.lower()]
-                if possible_targets:
-                    self.target_column = possible_targets[0]
-                    logger.info(f"타겟 컬럼 변경: {self.target_column}")
-                else:
-                    # 타겟 컬럼 생성
-                    train_df[self.target_column] = np.random.binomial(1, 0.02, len(train_df))
-                    logger.warning(f"타겟 컬럼 '{self.target_column}' 생성")
+            # 중간 메모리 정리
+            self.memory_monitor.force_memory_cleanup()
+            self.memory_monitor.log_memory_status("학습 데이터 완료", force=True)
             
-            # 데이터 최적화
-            train_df = self._optimize_dataframe(train_df)
-            test_df = self._optimize_dataframe(test_df)
+            # 2. 테스트 데이터 스트리밍 처리
+            logger.info("테스트 데이터 스트리밍 처리 시작") 
+            test_df = self._stream_process_file(str(self.config.TEST_PATH), is_train=False)
+            
+            if test_df is None or test_df.empty:
+                raise ValueError("테스트 데이터 스트리밍 처리 실패")
             
             # 최종 메모리 상태
-            self.memory_monitor.log_memory_status("로딩 완료", force=True)
+            self.memory_monitor.log_memory_status("스트리밍 완료", force=True)
             
-            logger.info(f"메모리 안전 데이터 로딩 완료 - 학습: {train_df.shape}, 테스트: {test_df.shape}")
+            logger.info(f"=== 전체 데이터 스트리밍 완료 - 학습: {train_df.shape}, 테스트: {test_df.shape} ===")
             
             return train_df, test_df
             
         except Exception as e:
-            logger.error(f"데이터 로딩 실패: {e}")
-            logger.info("샘플 데이터로 대체")
-            return self._create_safe_sample_data()
+            logger.error(f"스트리밍 데이터 로딩 실패: {e}")
+            self.memory_monitor.force_memory_cleanup()
+            raise
+    
+    def _stream_process_file(self, file_path: str, is_train: bool = True) -> pd.DataFrame:
+        """파일 스트리밍 처리"""
+        try:
+            # PyArrow로 메타데이터 확인
+            if not PYARROW_AVAILABLE:
+                raise ValueError("PyArrow가 필요합니다")
+            
+            parquet_file = pq.ParquetFile(file_path)
+            total_rows = parquet_file.metadata.num_rows
+            num_row_groups = parquet_file.num_row_groups
+            
+            logger.info(f"파일 분석 - 총 {total_rows:,}행, {num_row_groups}개 row groups")
+            
+            # 결과 수집용
+            all_chunks = []
+            processed_rows = 0
+            
+            # Row group 단위로 스트리밍 처리
+            for rg_idx in range(num_row_groups):
+                try:
+                    # 메모리 압박 확인
+                    pressure = self.memory_monitor.check_memory_pressure()
+                    if pressure['should_abort']:
+                        logger.error(f"메모리 한계로 중단 - 처리된 행: {processed_rows:,}")
+                        break
+                    
+                    # Row group 읽기
+                    table = parquet_file.read_row_group(rg_idx)
+                    chunk_df = table.to_pandas()
+                    
+                    logger.info(f"Row group {rg_idx+1}/{num_row_groups} 처리: {len(chunk_df):,}행")
+                    
+                    # 즉시 메모리 최적화
+                    chunk_df = self._optimize_dataframe_aggressive(chunk_df)
+                    
+                    # 청크 저장
+                    all_chunks.append(chunk_df)
+                    processed_rows += len(chunk_df)
+                    
+                    # 메모리 해제
+                    del table
+                    gc.collect()
+                    
+                    # 중간 결합 (메모리 절약)
+                    if len(all_chunks) >= 5:
+                        logger.info(f"중간 결합 수행: {len(all_chunks)}개 청크")
+                        combined = self._combine_chunks_immediate(all_chunks)
+                        all_chunks = [combined]
+                        gc.collect()
+                    
+                    # 진행률 출력
+                    progress = (rg_idx + 1) / num_row_groups * 100
+                    if rg_idx % 10 == 0 or rg_idx == num_row_groups - 1:
+                        logger.info(f"진행률: {progress:.1f}% ({processed_rows:,}/{total_rows:,}행)")
+                    
+                except Exception as e:
+                    logger.error(f"Row group {rg_idx} 처리 실패: {e}")
+                    continue
+            
+            # 최종 결합
+            if not all_chunks:
+                raise ValueError("처리된 데이터가 없습니다")
+            
+            logger.info(f"최종 결합: {len(all_chunks)}개 청크")
+            final_df = self._combine_chunks_immediate(all_chunks)
+            
+            # 타겟 컬럼 확인 (학습 데이터인 경우)
+            if is_train:
+                if self.target_column not in final_df.columns:
+                    possible_targets = [col for col in final_df.columns if 'click' in col.lower()]
+                    if possible_targets:
+                        self.target_column = possible_targets[0]
+                        logger.info(f"타겟 컬럼 변경: {self.target_column}")
+                    else:
+                        raise ValueError(f"타겟 컬럼 '{self.target_column}'을 찾을 수 없습니다")
+                
+                # CTR 확인
+                target_ctr = final_df[self.target_column].mean()
+                logger.info(f"실제 CTR: {target_ctr:.4f}")
+            
+            logger.info(f"스트리밍 처리 완료: {final_df.shape} ({processed_rows:,}행 처리됨)")
+            
+            return final_df
+            
+        except Exception as e:
+            logger.error(f"파일 스트리밍 처리 실패: {e}")
+            raise
+    
+    def _combine_chunks_immediate(self, chunks: List[pd.DataFrame]) -> pd.DataFrame:
+        """즉시 청크 결합 - 메모리 효율성 우선"""
+        if not chunks:
+            return pd.DataFrame()
+        
+        if len(chunks) == 1:
+            return chunks[0]
+        
+        try:
+            # 유효한 청크만 선별
+            valid_chunks = [chunk for chunk in chunks if isinstance(chunk, pd.DataFrame) and not chunk.empty]
+            
+            if not valid_chunks:
+                return pd.DataFrame()
+            
+            # 직접 결합
+            combined_df = pd.concat(valid_chunks, ignore_index=True)
+            
+            # 즉시 최적화
+            combined_df = self._optimize_dataframe_aggressive(combined_df)
+            
+            # 원본 청크들 해제
+            for chunk in chunks:
+                del chunk
+            del chunks, valid_chunks
+            gc.collect()
+            
+            return combined_df
+            
+        except Exception as e:
+            logger.error(f"청크 결합 실패: {e}")
+            # 실패 시 첫 번째 유효 청크 반환
+            for chunk in chunks:
+                if isinstance(chunk, pd.DataFrame) and not chunk.empty:
+                    return chunk
+            return pd.DataFrame()
+    
+    def _optimize_dataframe_aggressive(self, df: pd.DataFrame) -> pd.DataFrame:
+        """공격적 DataFrame 최적화"""
+        if df is None or df.empty:
+            return df
+        
+        try:
+            # 정수형 대폭 최적화
+            for col in df.select_dtypes(include=['int64', 'int32']).columns:
+                try:
+                    col_min, col_max = df[col].min(), df[col].max()
+                    if pd.isna(col_min) or pd.isna(col_max):
+                        continue
+                    
+                    if col_min >= 0:
+                        if col_max <= 255:
+                            df[col] = df[col].astype('uint8')
+                        elif col_max <= 65535:
+                            df[col] = df[col].astype('uint16')
+                        else:
+                            df[col] = df[col].astype('uint32')
+                    else:
+                        if col_min >= -128 and col_max <= 127:
+                            df[col] = df[col].astype('int8')
+                        elif col_min >= -32768 and col_max <= 32767:
+                            df[col] = df[col].astype('int16')
+                        else:
+                            df[col] = df[col].astype('int32')
+                            
+                except Exception:
+                    try:
+                        df[col] = df[col].astype('int32')
+                    except Exception:
+                        pass
+            
+            # 실수형 최적화
+            for col in df.select_dtypes(include=['float64']).columns:
+                try:
+                    df[col] = df[col].astype('float32')
+                except Exception:
+                    pass
+            
+            # 범주형 최적화 - 매우 선택적
+            for col in df.select_dtypes(include=['object']).columns:
+                try:
+                    unique_count = df[col].nunique()
+                    total_count = len(df)
+                    
+                    # 매우 낮은 카디널리티만 범주형으로
+                    if unique_count < 100 and unique_count < total_count * 0.1:
+                        df[col] = df[col].astype('category')
+                    else:
+                        # 수치 변환 시도
+                        numeric_series = pd.to_numeric(df[col], errors='coerce')
+                        if not numeric_series.isna().all():
+                            df[col] = numeric_series.fillna(0).astype('float32')
+                        else:
+                            # 해시 변환
+                            df[col] = df[col].astype(str).apply(lambda x: hash(x) % 100000).astype('int32')
+                except Exception:
+                    try:
+                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype('float32')
+                    except Exception:
+                        pass
+            
+            # 결측치 및 무한값 처리
+            df = df.fillna(0)
+            df = df.replace([np.inf, -np.inf], [0, 0])
+            
+            return df
+            
+        except Exception as e:
+            logger.warning(f"DataFrame 최적화 실패: {e}")
+            return df
     
     def _validate_files(self) -> bool:
         """파일 유효성 검증"""
@@ -885,11 +1078,11 @@ class SimpleDataLoader:
         logger.info("대용량 데이터 로더 초기화 완료")
     
     def load_large_data_optimized(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """메모리 효율적 데이터 로딩 - SimpleDataLoader 방식 사용"""
-        logger.info("=== 메모리 효율적 데이터 로딩 시작 ===")
+        """1070만행 전체 데이터 처리"""
+        logger.info("=== 1070만행 전체 데이터 처리 시작 ===")
         
-        # SimpleDataLoader의 load_data_safely 메서드 사용
-        return self.load_data_safely()
+        # 스트리밍 방식으로 전체 데이터 처리
+        return self.load_full_data_streaming()
     
     def _validate_data_files(self) -> bool:
         """데이터 파일 검증"""
@@ -1168,8 +1361,9 @@ class SimpleDataLoader:
         return self.loading_stats.copy()
 
 # 기존 코드와의 호환성을 위한 별칭
-DataLoader = SimpleDataLoader
-LargeDataLoader = SimpleDataLoader
+DataLoader = StreamingDataLoader
+LargeDataLoader = StreamingDataLoader
+SimpleDataLoader = StreamingDataLoader
 MemoryOptimizedChunkReader = DataChunkProcessor
 AggressiveMemoryMonitor = MemoryMonitor
 
@@ -1215,12 +1409,12 @@ if __name__ == "__main__":
     config = Config()
     
     try:
-        loader = LargeDataLoader(config)
-        train_df, test_df = loader.load_large_data_optimized()
+        loader = StreamingDataLoader(config)
+        train_df, test_df = loader.load_full_data_streaming()
         
         print(f"학습 데이터: {train_df.shape}")
         print(f"테스트 데이터: {test_df.shape}")
-        print(f"로딩 통계: {loader.get_loading_stats()}")
+        print(f"전체 처리 완료: {len(train_df) + len(test_df):,}행")
         
     except Exception as e:
         logger.error(f"테스트 실행 실패: {e}")
