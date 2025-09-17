@@ -29,19 +29,21 @@ except ImportError:
     logging.warning("Optuna가 설치되지 않았습니다. 하이퍼파라미터 튜닝 기능이 비활성화됩니다.")
 
 from config import Config
-from models import BaseModel
+from models import BaseModel, CTRCalibrator
 from evaluation import CTRMetrics
 
 logger = logging.getLogger(__name__)
 
 class BaseEnsemble(ABC):
-    """앙상블 모델 기본 클래스 - Combined Score 0.30+ 목표"""
+    """앙상블 모델 기본 클래스 - Combined Score 0.30+ 목표 + Calibration 지원"""
     
     def __init__(self, name: str):
         self.name = name
         self.base_models = {}
         self.is_fitted = False
         self.target_combined_score = 0.30
+        self.ensemble_calibrator = None
+        self.is_calibrated = False
         
     @abstractmethod
     def fit(self, X: pd.DataFrame, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
@@ -58,18 +60,72 @@ class BaseEnsemble(ABC):
         self.base_models[name] = model
     
     def get_base_predictions(self, X: pd.DataFrame) -> Dict[str, np.ndarray]:
-        """모든 기본 모델의 예측 수집"""
+        """모든 기본 모델의 예측 수집 - Calibration 적용"""
         predictions = {}
         
         for name, model in self.base_models.items():
             try:
-                pred = model.predict_proba(X)
+                # 모델이 캘리브레이션되어 있으면 캘리브레이션된 예측 사용
+                if hasattr(model, 'is_calibrated') and model.is_calibrated:
+                    pred = model.predict_proba(X)
+                    logger.info(f"{name} 모델: 캘리브레이션 적용된 예측 사용")
+                else:
+                    pred = model.predict_proba(X)
+                    
                 predictions[name] = pred
             except Exception as e:
                 logger.error(f"{name} 모델 예측 실패: {str(e)}")
                 predictions[name] = np.full(len(X), 0.0201)
         
         return predictions
+    
+    def apply_ensemble_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, 
+                                 ensemble_predictions: np.ndarray, method: str = 'auto'):
+        """앙상블 수준 캘리브레이션 적용"""
+        try:
+            logger.info(f"{self.name} 앙상블에 캘리브레이션 적용: {method}")
+            
+            if len(ensemble_predictions) != len(y_val):
+                logger.warning("앙상블 캘리브레이션: 크기 불일치")
+                return
+            
+            # CTRCalibrator 생성 및 학습
+            self.ensemble_calibrator = CTRCalibrator(target_ctr=0.0201, method=method)
+            self.ensemble_calibrator.fit(y_val.values, ensemble_predictions)
+            
+            self.is_calibrated = True
+            
+            # 캘리브레이션 효과 확인
+            calibrated_predictions = self.ensemble_calibrator.predict(ensemble_predictions)
+            
+            original_ctr = ensemble_predictions.mean()
+            calibrated_ctr = calibrated_predictions.mean()
+            actual_ctr = y_val.mean()
+            
+            logger.info(f"앙상블 캘리브레이션 결과:")
+            logger.info(f"  - 원본 CTR: {original_ctr:.4f}")
+            logger.info(f"  - 캘리브레이션 CTR: {calibrated_ctr:.4f}")
+            logger.info(f"  - 실제 CTR: {actual_ctr:.4f}")
+            logger.info(f"  - 최적 방법: {self.ensemble_calibrator.best_method}")
+            
+        except Exception as e:
+            logger.error(f"앙상블 캘리브레이션 적용 실패: {e}")
+            self.is_calibrated = False
+    
+    def predict_proba_calibrated(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
+        """캘리브레이션이 적용된 앙상블 예측"""
+        # 기본 앙상블 예측
+        raw_prediction = self.predict_proba(base_predictions)
+        
+        # 앙상블 수준 캘리브레이션 적용
+        if self.is_calibrated and self.ensemble_calibrator is not None:
+            try:
+                calibrated_prediction = self.ensemble_calibrator.predict(raw_prediction)
+                return np.clip(calibrated_prediction, 1e-15, 1 - 1e-15)
+            except Exception as e:
+                logger.warning(f"앙상블 캘리브레이션 예측 실패: {e}")
+        
+        return raw_prediction
     
     def _enhance_ensemble_diversity(self, predictions: np.ndarray) -> np.ndarray:
         """앙상블 예측 다양성 향상"""
@@ -92,14 +148,13 @@ class BaseEnsemble(ABC):
             return predictions
 
 class CTRSuperOptimalEnsemble(BaseEnsemble):
-    """CTR 예측 슈퍼 최적화 앙상블 - Combined Score 0.32+ 목표"""
+    """CTR 예측 슈퍼 최적화 앙상블 - Combined Score 0.32+ 목표 + Calibration 지원"""
     
     def __init__(self, target_ctr: float = 0.0201, optimization_method: str = 'ultra_combined'):
         super().__init__("CTRSuperOptimalEnsemble")
         self.target_ctr = target_ctr
         self.optimization_method = optimization_method
         self.final_weights = {}
-        self.advanced_calibrator = None
         self.metrics_calculator = CTRMetrics()
         self.temperature = 1.0
         self.bias_correction = 0.0
@@ -109,8 +164,8 @@ class CTRSuperOptimalEnsemble(BaseEnsemble):
         self.target_combined_score = 0.32
         
     def fit(self, X: pd.DataFrame, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
-        """슈퍼 최적화 앙상블 학습 - Combined Score 0.32+ 목표"""
-        logger.info(f"CTR 슈퍼 최적화 앙상블 학습 시작 - 목표: Combined Score 0.32+")
+        """슈퍼 최적화 앙상블 학습 - Combined Score 0.32+ 목표 + Calibration"""
+        logger.info(f"CTR 슈퍼 최적화 앙상블 학습 시작 - 목표: Combined Score 0.32+ + Calibration")
         
         available_models = list(base_predictions.keys())
         logger.info(f"사용 가능한 모델: {available_models}")
@@ -137,25 +192,57 @@ class CTRSuperOptimalEnsemble(BaseEnsemble):
         logger.info("4단계: 성능 부스터 적용")
         self._apply_performance_boosters(ensemble_pred, y)
         
-        # 5단계: 최종 검증 및 조정
-        logger.info("5단계: 최종 검증 및 조정")
+        # 5단계: 앙상블 캘리브레이션 적용
+        logger.info("5단계: 앙상블 캘리브레이션 적용")
+        try:
+            # 검증 데이터 분할 (캘리브레이션용)
+            split_idx = int(len(X) * 0.8)
+            X_cal = X.iloc[split_idx:]
+            y_cal = y.iloc[split_idx:]
+            
+            # 캘리브레이션용 앙상블 예측
+            cal_base_predictions = {}
+            for name in available_models:
+                if name in base_predictions:
+                    cal_base_predictions[name] = base_predictions[name][split_idx:]
+            
+            cal_ensemble_pred = self._create_weighted_ensemble(cal_base_predictions)
+            cal_ensemble_pred = self._apply_all_corrections(cal_ensemble_pred)
+            
+            # 앙상블 캘리브레이션 적용
+            self.apply_ensemble_calibration(X_cal, y_cal, cal_ensemble_pred, method='auto')
+            
+        except Exception as e:
+            logger.warning(f"앙상블 캘리브레이션 적용 실패: {e}")
+        
+        # 6단계: 최종 검증 및 조정
+        logger.info("6단계: 최종 검증 및 조정")
         final_pred = self._apply_all_corrections(ensemble_pred)
+        
+        if self.is_calibrated and self.ensemble_calibrator:
+            try:
+                final_pred = self.ensemble_calibrator.predict(final_pred)
+            except:
+                pass
+        
         final_score = self.metrics_calculator.combined_score(y, final_pred)
         
         logger.info(f"슈퍼 최적화 앙상블 최종 Combined Score: {final_score:.4f}")
+        logger.info(f"앙상블 캘리브레이션 적용: {'Yes' if self.is_calibrated else 'No'}")
         
         self.is_fitted = True
         logger.info("CTR 슈퍼 최적화 앙상블 학습 완료")
     
     def _multi_layer_weight_optimization(self, base_predictions: Dict[str, np.ndarray], y: pd.Series) -> Dict[str, float]:
-        """다층 가중치 최적화 - Combined Score 극대화"""
+        """다층 가중치 최적화 - Combined Score 극대화 + Calibration 고려"""
         
         model_names = list(base_predictions.keys())
         
-        # Layer 1: 개별 모델 성능 평가
+        # Layer 1: 개별 모델 성능 평가 (Calibration 상태 고려)
         individual_scores = {}
         ctr_alignment_scores = {}
         diversity_scores = {}
+        calibration_scores = {}
         
         for name, pred in base_predictions.items():
             combined_score = self.metrics_calculator.combined_score(y, pred)
@@ -170,9 +257,20 @@ class CTRSuperOptimalEnsemble(BaseEnsemble):
             pred_entropy = -np.mean(pred * np.log(pred + 1e-15) + (1 - pred) * np.log(1 - pred + 1e-15))
             diversity = pred_std * pred_entropy
             
+            # 캘리브레이션 품질 평가
+            model = self.base_models.get(name)
+            calibration_quality = 0.5  # 기본값
+            if model and hasattr(model, 'is_calibrated') and model.is_calibrated:
+                calibration_quality = 0.8
+                if hasattr(model, 'calibrator') and model.calibrator:
+                    calibration_summary = model.calibrator.get_calibration_summary()
+                    if calibration_summary['calibration_scores']:
+                        calibration_quality = max(calibration_summary['calibration_scores'].values())
+            
             individual_scores[name] = combined_score
             ctr_alignment_scores[name] = ctr_alignment
             diversity_scores[name] = diversity
+            calibration_scores[name] = calibration_quality
         
         # Layer 2: 상호 보완성 분석
         complementarity_matrix = {}
@@ -192,54 +290,47 @@ class CTRSuperOptimalEnsemble(BaseEnsemble):
                 else:
                     complementarity_matrix[name1][name2] = 0.0
         
-        # Layer 3: Optuna 기반 고급 최적화
+        # Layer 3: Optuna 기반 고급 최적화 (Calibration 가중치 포함)
         if OPTUNA_AVAILABLE:
             try:
-                optimized_weights = self._optuna_ultra_optimization(base_predictions, y, individual_scores)
+                optimized_weights = self._optuna_ultra_optimization_with_calibration(
+                    base_predictions, y, individual_scores, calibration_scores
+                )
             except Exception as e:
                 logger.warning(f"Optuna 초고도 최적화 실패: {e}")
-                optimized_weights = self._fallback_optimization(individual_scores, ctr_alignment_scores, diversity_scores)
+                optimized_weights = self._fallback_optimization_with_calibration(
+                    individual_scores, ctr_alignment_scores, diversity_scores, calibration_scores
+                )
         else:
-            optimized_weights = self._fallback_optimization(individual_scores, ctr_alignment_scores, diversity_scores)
+            optimized_weights = self._fallback_optimization_with_calibration(
+                individual_scores, ctr_alignment_scores, diversity_scores, calibration_scores
+            )
         
-        logger.info(f"다층 최적화 가중치: {optimized_weights}")
+        logger.info(f"다층 최적화 가중치 (Calibration 고려): {optimized_weights}")
         return optimized_weights
     
-    def _calculate_difference_contribution(self, pred1: np.ndarray, pred2: np.ndarray, y: pd.Series) -> float:
-        """차이 기여도 계산"""
-        try:
-            avg_pred = (pred1 + pred2) / 2
-            avg_score = self.metrics_calculator.combined_score(y, avg_pred)
-            
-            individual_score1 = self.metrics_calculator.combined_score(y, pred1)
-            individual_score2 = self.metrics_calculator.combined_score(y, pred2)
-            
-            max_individual = max(individual_score1, individual_score2)
-            
-            if max_individual > 0:
-                improvement_ratio = avg_score / max_individual
-                return min(improvement_ratio, 2.0)
-            else:
-                return 1.0
-        except:
-            return 1.0
-    
-    def _optuna_ultra_optimization(self, base_predictions: Dict[str, np.ndarray], y: pd.Series, 
-                                 individual_scores: Dict[str, float]) -> Dict[str, float]:
-        """Optuna 초고도 가중치 최적화"""
+    def _optuna_ultra_optimization_with_calibration(self, base_predictions: Dict[str, np.ndarray], 
+                                                   y: pd.Series, 
+                                                   individual_scores: Dict[str, float],
+                                                   calibration_scores: Dict[str, float]) -> Dict[str, float]:
+        """Optuna 초고도 가중치 최적화 - Calibration 고려"""
         
         model_names = list(base_predictions.keys())
         
-        def ultra_objective(trial):
+        def ultra_objective_with_calibration(trial):
             weights = {}
             
-            # Dynamic weight bounds based on individual performance
+            # Dynamic weight bounds based on individual performance and calibration
             for name in model_names:
                 base_performance = individual_scores.get(name, 0.1)
+                calibration_quality = calibration_scores.get(name, 0.5)
                 
-                if base_performance > 0.25:
+                # 캘리브레이션 품질이 높은 모델에 더 높은 가중치 범위 부여
+                performance_factor = base_performance + 0.3 * calibration_quality
+                
+                if performance_factor > 0.6:
                     min_weight, max_weight = 0.1, 0.8
-                elif base_performance > 0.20:
+                elif performance_factor > 0.4:
                     min_weight, max_weight = 0.05, 0.6
                 else:
                     min_weight, max_weight = 0.01, 0.4
@@ -293,7 +384,7 @@ class CTRSuperOptimalEnsemble(BaseEnsemble):
             
             ensemble_pred = np.clip(ensemble_pred, 1e-15, 1 - 1e-15)
             
-            # Multi-objective optimization
+            # Multi-objective optimization (Calibration 보너스 포함)
             combined_score = self.metrics_calculator.combined_score(y, ensemble_pred)
             
             # CTR alignment bonus
@@ -304,8 +395,13 @@ class CTRSuperOptimalEnsemble(BaseEnsemble):
             # Diversity bonus
             diversity = ensemble_pred.std()
             
-            # Final score
-            final_score = combined_score * (1 + 0.15 * ctr_alignment) * (1 + 0.1 * diversity)
+            # Calibration bonus (캘리브레이션된 모델들의 가중 평균)
+            calibration_bonus = sum(weights[name] * calibration_scores.get(name, 0.5) 
+                                  for name in weights if name in calibration_scores)
+            calibration_bonus /= sum(weights.values()) if sum(weights.values()) > 0 else 1.0
+            
+            # Final score with calibration bonus
+            final_score = combined_score * (1 + 0.15 * ctr_alignment) * (1 + 0.1 * diversity) * (1 + 0.2 * calibration_bonus)
             
             return final_score
         
@@ -315,7 +411,7 @@ class CTRSuperOptimalEnsemble(BaseEnsemble):
             pruner=MedianPruner(n_startup_trials=15, n_warmup_steps=10)
         )
         
-        study.optimize(ultra_objective, n_trials=150, show_progress_bar=False)
+        study.optimize(ultra_objective_with_calibration, n_trials=150, show_progress_bar=False)
         
         # Extract optimized weights
         optimized_weights = {}
@@ -333,25 +429,29 @@ class CTRSuperOptimalEnsemble(BaseEnsemble):
         if total_weight > 0:
             optimized_weights = {k: v/total_weight for k, v in optimized_weights.items()}
         
-        logger.info(f"Optuna 초고도 최적화 완료 - 최고 점수: {study.best_value:.4f}")
+        logger.info(f"Optuna 초고도 최적화 완료 (Calibration 고려) - 최고 점수: {study.best_value:.4f}")
         logger.info(f"최적화 방법: {self.ensemble_method}, Temperature: {self.temperature:.3f}")
         
         return optimized_weights
     
-    def _fallback_optimization(self, individual_scores: Dict[str, float], 
-                              ctr_alignment_scores: Dict[str, float],
-                              diversity_scores: Dict[str, float]) -> Dict[str, float]:
-        """대체 최적화 방법"""
+    def _fallback_optimization_with_calibration(self, individual_scores: Dict[str, float], 
+                                              ctr_alignment_scores: Dict[str, float],
+                                              diversity_scores: Dict[str, float],
+                                              calibration_scores: Dict[str, float]) -> Dict[str, float]:
+        """대체 최적화 방법 - Calibration 고려"""
         
         weights = {}
         for name in individual_scores.keys():
             performance_weight = individual_scores.get(name, 0.1)
             alignment_weight = ctr_alignment_scores.get(name, 0.5)
             diversity_weight = diversity_scores.get(name, 0.5)
+            calibration_weight = calibration_scores.get(name, 0.5)
             
-            combined_weight = (0.5 * performance_weight + 
-                             0.3 * alignment_weight + 
-                             0.2 * diversity_weight)
+            # Calibration 가중치 추가
+            combined_weight = (0.4 * performance_weight + 
+                             0.25 * alignment_weight + 
+                             0.15 * diversity_weight +
+                             0.2 * calibration_weight)  # Calibration 20% 가중치
             
             weights[name] = max(combined_weight, 0.01)
         
@@ -361,6 +461,25 @@ class CTRSuperOptimalEnsemble(BaseEnsemble):
             weights = {k: v/total_weight for k, v in weights.items()}
         
         return weights
+    
+    def _calculate_difference_contribution(self, pred1: np.ndarray, pred2: np.ndarray, y: pd.Series) -> float:
+        """차이 기여도 계산"""
+        try:
+            avg_pred = (pred1 + pred2) / 2
+            avg_score = self.metrics_calculator.combined_score(y, avg_pred)
+            
+            individual_score1 = self.metrics_calculator.combined_score(y, pred1)
+            individual_score2 = self.metrics_calculator.combined_score(y, pred2)
+            
+            max_individual = max(individual_score1, individual_score2)
+            
+            if max_individual > 0:
+                improvement_ratio = avg_score / max_individual
+                return min(improvement_ratio, 2.0)
+            else:
+                return 1.0
+        except:
+            return 1.0
     
     def _apply_super_ctr_postprocessing(self, predictions: np.ndarray, y: pd.Series):
         """슈퍼 CTR 특화 후처리 최적화"""
@@ -676,7 +795,7 @@ class CTRSuperOptimalEnsemble(BaseEnsemble):
             return predictions
     
     def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """슈퍼 최적화된 앙상블 예측"""
+        """슈퍼 최적화된 앙상블 예측 - Calibration 지원"""
         if not self.is_fitted:
             raise ValueError("앙상블 모델이 학습되지 않았습니다")
         
@@ -686,10 +805,18 @@ class CTRSuperOptimalEnsemble(BaseEnsemble):
         # 모든 보정 기법 적용
         final_pred = self._apply_all_corrections(ensemble_pred)
         
+        # 앙상블 수준 캘리브레이션 적용
+        if self.is_calibrated and self.ensemble_calibrator is not None:
+            try:
+                final_pred = self.ensemble_calibrator.predict(final_pred)
+                final_pred = np.clip(final_pred, 1e-15, 1 - 1e-15)
+            except Exception as e:
+                logger.warning(f"앙상블 캘리브레이션 예측 실패: {e}")
+        
         return final_pred
 
 class CTRAdvancedStabilizedEnsemble(BaseEnsemble):
-    """CTR 예측 고급 안정화 앙상블"""
+    """CTR 예측 고급 안정화 앙상블 - Calibration 지원"""
     
     def __init__(self, diversification_method: str = 'advanced_rank_weighted'):
         super().__init__("CTRAdvancedStabilizedEnsemble")
@@ -697,11 +824,12 @@ class CTRAdvancedStabilizedEnsemble(BaseEnsemble):
         self.model_weights = {}
         self.diversity_weights = {}
         self.stability_weights = {}
+        self.calibration_weights = {}
         self.final_weights = {}
         self.metrics_calculator = CTRMetrics()
         
     def fit(self, X: pd.DataFrame, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
-        """고급 안정화 앙상블 학습"""
+        """고급 안정화 앙상블 학습 - Calibration 고려"""
         logger.info(f"CTR 고급 안정화 앙상블 학습 시작 - 방법: {self.diversification_method}")
         
         available_models = list(base_predictions.keys())
@@ -722,15 +850,40 @@ class CTRAdvancedStabilizedEnsemble(BaseEnsemble):
         # 3. 안정성 가중치 계산
         self.stability_weights = self._calculate_stability_weights(base_predictions, y)
         
-        # 4. 최종 가중치 결합
-        self.final_weights = self._combine_weights_advanced()
+        # 4. 캘리브레이션 가중치 계산
+        self.calibration_weights = self._calculate_calibration_weights()
+        
+        # 5. 최종 가중치 결합 (Calibration 고려)
+        self.final_weights = self._combine_weights_advanced_with_calibration()
+        
+        # 6. 앙상블 캘리브레이션 적용
+        try:
+            ensemble_pred = self._create_stabilized_ensemble(base_predictions)
+            
+            # 검증 데이터 분할
+            split_idx = int(len(X) * 0.8)
+            X_cal = X.iloc[split_idx:]
+            y_cal = y.iloc[split_idx:]
+            
+            cal_base_predictions = {}
+            for name in available_models:
+                if name in base_predictions:
+                    cal_base_predictions[name] = base_predictions[name][split_idx:]
+            
+            cal_ensemble_pred = self._create_stabilized_ensemble(cal_base_predictions)
+            
+            self.apply_ensemble_calibration(X_cal, y_cal, cal_ensemble_pred, method='auto')
+            
+        except Exception as e:
+            logger.warning(f"안정화 앙상블 캘리브레이션 적용 실패: {e}")
         
         self.is_fitted = True
         logger.info(f"CTR 고급 안정화 앙상블 학습 완료 - 최종 가중치: {self.final_weights}")
+        logger.info(f"앙상블 캘리브레이션 적용: {'Yes' if self.is_calibrated else 'No'}")
     
     def _evaluate_individual_performance_advanced(self, base_predictions: Dict[str, np.ndarray], 
                                                 y: pd.Series) -> Dict[str, float]:
-        """고급 개별 모델 성능 평가"""
+        """고급 개별 모델 성능 평가 - Calibration 고려"""
         
         performance_weights = {}
         
@@ -754,21 +907,63 @@ class CTRAdvancedStabilizedEnsemble(BaseEnsemble):
                 
                 quality_score = pred_std * pred_range * pred_entropy
                 
-                # Final performance score
+                # Calibration bonus
+                model = self.base_models.get(name)
+                calibration_bonus = 1.0  # 기본값
+                if model and hasattr(model, 'is_calibrated') and model.is_calibrated:
+                    calibration_bonus = 1.2  # 20% 보너스
+                    if hasattr(model, 'calibrator') and model.calibrator:
+                        calibration_summary = model.calibrator.get_calibration_summary()
+                        if calibration_summary['calibration_scores']:
+                            calibration_quality = max(calibration_summary['calibration_scores'].values())
+                            calibration_bonus = 1.0 + 0.3 * calibration_quality  # 최대 30% 보너스
+                
+                # Final performance score with calibration bonus
                 performance_score = (0.5 * combined_score + 
                                    0.2 * ctr_penalty + 
                                    0.2 * (ap_score * (1 / (1 + wll_score))) + 
-                                   0.1 * quality_score)
+                                   0.1 * quality_score) * calibration_bonus
                 
                 performance_weights[name] = max(performance_score, 0.01)
                 
-                logger.info(f"{name} - Combined: {combined_score:.4f}, CTR편향: {ctr_bias:.4f}, 품질: {quality_score:.4f}, 최종: {performance_score:.4f}")
+                logger.info(f"{name} - Combined: {combined_score:.4f}, CTR편향: {ctr_bias:.4f}, "
+                          f"품질: {quality_score:.4f}, 캘리브레이션 보너스: {calibration_bonus:.2f}x, "
+                          f"최종: {performance_score:.4f}")
                 
             except Exception as e:
                 logger.warning(f"{name} 고급 성능 평가 실패: {e}")
                 performance_weights[name] = 0.01
         
         return performance_weights
+    
+    def _calculate_calibration_weights(self) -> Dict[str, float]:
+        """캘리브레이션 가중치 계산"""
+        calibration_weights = {}
+        
+        for name, model in self.base_models.items():
+            try:
+                calibration_weight = 0.5  # 기본값
+                
+                if hasattr(model, 'is_calibrated') and model.is_calibrated:
+                    calibration_weight = 0.8  # 캘리브레이션 적용 모델
+                    
+                    if hasattr(model, 'calibrator') and model.calibrator:
+                        calibration_summary = model.calibrator.get_calibration_summary()
+                        if calibration_summary['calibration_scores']:
+                            # 캘리브레이션 품질에 따른 가중치
+                            calibration_quality = max(calibration_summary['calibration_scores'].values())
+                            calibration_weight = 0.5 + 0.5 * calibration_quality  # 0.5 ~ 1.0
+                            
+                            logger.info(f"{name} 캘리브레이션 품질: {calibration_quality:.4f}, "
+                                      f"가중치: {calibration_weight:.4f}")
+                
+                calibration_weights[name] = calibration_weight
+                
+            except Exception as e:
+                logger.warning(f"{name} 캘리브레이션 가중치 계산 실패: {e}")
+                calibration_weights[name] = 0.5
+        
+        return calibration_weights
     
     def _calculate_diversity_weights_advanced(self, base_predictions: Dict[str, np.ndarray]) -> Dict[str, float]:
         """고급 다양성 가중치 계산"""
@@ -965,8 +1160,8 @@ class CTRAdvancedStabilizedEnsemble(BaseEnsemble):
         
         return stability_weights
     
-    def _combine_weights_advanced(self) -> Dict[str, float]:
-        """고급 가중치 결합"""
+    def _combine_weights_advanced_with_calibration(self) -> Dict[str, float]:
+        """고급 가중치 결합 - Calibration 고려"""
         
         combined_weights = {}
         model_names = list(self.model_weights.keys())
@@ -975,21 +1170,34 @@ class CTRAdvancedStabilizedEnsemble(BaseEnsemble):
         performance_sum = sum(self.model_weights.values())
         diversity_sum = sum(self.diversity_weights.values())
         stability_sum = sum(self.stability_weights.values())
+        calibration_sum = sum(self.calibration_weights.values())
         
-        if performance_sum > 0 and diversity_sum > 0 and stability_sum > 0:
+        if performance_sum > 0 and diversity_sum > 0 and stability_sum > 0 and calibration_sum > 0:
             for name in model_names:
                 perf_weight = self.model_weights[name] / performance_sum
                 div_weight = self.diversity_weights[name] / diversity_sum
                 stab_weight = self.stability_weights[name] / stability_sum
+                cal_weight = self.calibration_weights[name] / calibration_sum
                 
-                # Advanced combination with adaptive weighting
-                adaptive_performance_ratio = 0.6 + 0.2 * (perf_weight - 0.5)  # 0.4 to 0.8
-                adaptive_diversity_ratio = 0.3 - 0.1 * (div_weight - 0.5)    # 0.2 to 0.4  
-                adaptive_stability_ratio = 1.0 - adaptive_performance_ratio - adaptive_diversity_ratio
+                # Advanced combination with adaptive weighting (Calibration 포함)
+                adaptive_performance_ratio = 0.5 + 0.15 * (perf_weight - 0.5)  # 0.425 to 0.575
+                adaptive_diversity_ratio = 0.25 - 0.05 * (div_weight - 0.5)    # 0.225 to 0.275
+                adaptive_stability_ratio = 0.15 - 0.05 * (stab_weight - 0.5)   # 0.125 to 0.175
+                adaptive_calibration_ratio = 0.1 + 0.05 * (cal_weight - 0.5)   # 0.075 to 0.125
+                
+                # 비율 정규화
+                total_ratio = (adaptive_performance_ratio + adaptive_diversity_ratio + 
+                             adaptive_stability_ratio + adaptive_calibration_ratio)
+                
+                adaptive_performance_ratio /= total_ratio
+                adaptive_diversity_ratio /= total_ratio
+                adaptive_stability_ratio /= total_ratio
+                adaptive_calibration_ratio /= total_ratio
                 
                 combined_weight = (adaptive_performance_ratio * perf_weight + 
                                  adaptive_diversity_ratio * div_weight + 
-                                 adaptive_stability_ratio * stab_weight)
+                                 adaptive_stability_ratio * stab_weight +
+                                 adaptive_calibration_ratio * cal_weight)
                 
                 combined_weights[name] = combined_weight
         else:
@@ -1003,11 +1211,8 @@ class CTRAdvancedStabilizedEnsemble(BaseEnsemble):
         
         return combined_weights
     
-    def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """고급 안정화된 앙상블 예측"""
-        if not self.is_fitted:
-            raise ValueError("앙상블 모델이 학습되지 않았습니다")
-        
+    def _create_stabilized_ensemble(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
+        """안정화된 앙상블 생성"""
         ensemble_pred = np.zeros(len(list(base_predictions.values())[0]))
         
         for name, weight in self.final_weights.items():
@@ -1017,9 +1222,27 @@ class CTRAdvancedStabilizedEnsemble(BaseEnsemble):
         ensemble_pred = self._enhance_ensemble_diversity(ensemble_pred)
         
         return ensemble_pred
+    
+    def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
+        """고급 안정화된 앙상블 예측 - Calibration 지원"""
+        if not self.is_fitted:
+            raise ValueError("앙상블 모델이 학습되지 않았습니다")
+        
+        # 안정화된 앙상블 예측
+        ensemble_pred = self._create_stabilized_ensemble(base_predictions)
+        
+        # 앙상블 수준 캘리브레이션 적용
+        if self.is_calibrated and self.ensemble_calibrator is not None:
+            try:
+                ensemble_pred = self.ensemble_calibrator.predict(ensemble_pred)
+                ensemble_pred = np.clip(ensemble_pred, 1e-15, 1 - 1e-15)
+            except Exception as e:
+                logger.warning(f"안정화 앙상블 캘리브레이션 예측 실패: {e}")
+        
+        return ensemble_pred
 
 class CTRAdvancedMetaLearning(BaseEnsemble):
-    """CTR 예측 고급 메타 학습 앙상블"""
+    """CTR 예측 고급 메타 학습 앙상블 - Calibration 지원"""
     
     def __init__(self, meta_model_type: str = 'advanced_stacking', use_meta_features: bool = True):
         super().__init__("CTRAdvancedMetaLearning")
@@ -1030,15 +1253,15 @@ class CTRAdvancedMetaLearning(BaseEnsemble):
         self.meta_feature_selector = None
         
     def fit(self, X: pd.DataFrame, y: pd.Series, base_predictions: Optional[Dict[str, np.ndarray]] = None):
-        """고급 메타 학습 앙상블 학습"""
+        """고급 메타 학습 앙상블 학습 - Calibration 지원"""
         logger.info(f"CTR 고급 메타 학습 앙상블 학습 시작 - 메타모델: {self.meta_model_type}")
         
-        # Out-of-fold 예측 생성
-        oof_predictions = self._generate_advanced_oof_predictions(X, y)
+        # Out-of-fold 예측 생성 (Calibration 고려)
+        oof_predictions = self._generate_advanced_oof_predictions_with_calibration(X, y)
         
         # 고급 메타 피처 생성
         if self.use_meta_features:
-            meta_features = self._create_advanced_meta_features(oof_predictions, X)
+            meta_features = self._create_advanced_meta_features_with_calibration(oof_predictions, X)
         else:
             meta_features = oof_predictions
         
@@ -1048,11 +1271,27 @@ class CTRAdvancedMetaLearning(BaseEnsemble):
         # 고급 메타 모델 학습
         self._train_advanced_meta_model(meta_features, y)
         
+        # 메타 앙상블 캘리브레이션 적용
+        try:
+            # 검증 데이터 분할
+            split_idx = int(len(X) * 0.8)
+            X_cal = X.iloc[split_idx:]
+            y_cal = y.iloc[split_idx:]
+            meta_features_cal = meta_features.iloc[split_idx:]
+            
+            meta_pred_cal = self.predict_meta_model(meta_features_cal)
+            
+            self.apply_ensemble_calibration(X_cal, y_cal, meta_pred_cal, method='auto')
+            
+        except Exception as e:
+            logger.warning(f"메타 앙상블 캘리브레이션 적용 실패: {e}")
+        
         self.is_fitted = True
         logger.info("CTR 고급 메타 학습 앙상블 학습 완료")
+        logger.info(f"메타 앙상블 캘리브레이션 적용: {'Yes' if self.is_calibrated else 'No'}")
     
-    def _generate_advanced_oof_predictions(self, X: pd.DataFrame, y: pd.Series) -> pd.DataFrame:
-        """고급 Out-of-fold 예측 생성"""
+    def _generate_advanced_oof_predictions_with_calibration(self, X: pd.DataFrame, y: pd.Series) -> pd.DataFrame:
+        """고급 Out-of-fold 예측 생성 - Calibration 고려"""
         
         oof_predictions = pd.DataFrame(index=X.index)
         
@@ -1070,10 +1309,16 @@ class CTRAdvancedMetaLearning(BaseEnsemble):
                     X_train_fold = X.iloc[train_idx]
                     X_val_fold = X.iloc[val_idx]
                     y_train_fold = y.iloc[train_idx]
+                    y_val_fold = y.iloc[val_idx]
                     
                     fold_model = self._clone_model_advanced(model)
                     fold_model.fit(X_train_fold, y_train_fold)
                     
+                    # 캘리브레이션 적용 (fold 단위)
+                    if hasattr(fold_model, 'apply_calibration'):
+                        fold_model.apply_calibration(X_val_fold, y_val_fold, method='auto', cv_folds=3)
+                    
+                    # 캘리브레이션된 예측 사용
                     oof_pred_tscv[val_idx] = fold_model.predict_proba(X_val_fold)
                     
                 except Exception as e:
@@ -1086,10 +1331,16 @@ class CTRAdvancedMetaLearning(BaseEnsemble):
                     X_train_fold = X.iloc[train_idx]
                     X_val_fold = X.iloc[val_idx]
                     y_train_fold = y.iloc[train_idx]
+                    y_val_fold = y.iloc[val_idx]
                     
                     fold_model = self._clone_model_advanced(model)
                     fold_model.fit(X_train_fold, y_train_fold)
                     
+                    # 캘리브레이션 적용 (fold 단위)
+                    if hasattr(fold_model, 'apply_calibration'):
+                        fold_model.apply_calibration(X_val_fold, y_val_fold, method='auto', cv_folds=3)
+                    
+                    # 캘리브레이션된 예측 사용
                     oof_pred_kfold[val_idx] = fold_model.predict_proba(X_val_fold)
                     
                 except Exception as e:
@@ -1100,38 +1351,22 @@ class CTRAdvancedMetaLearning(BaseEnsemble):
             oof_predictions[f'{model_name}_tscv'] = oof_pred_tscv
             oof_predictions[f'{model_name}_kfold'] = oof_pred_kfold
             oof_predictions[f'{model_name}_combined'] = (oof_pred_tscv + oof_pred_kfold) / 2
+            
+            # 캘리브레이션 상태 정보 추가
+            model_calibrated = (hasattr(model, 'is_calibrated') and model.is_calibrated)
+            oof_predictions[f'{model_name}_calibrated'] = 1.0 if model_calibrated else 0.0
         
         return oof_predictions
     
-    def _clone_model_advanced(self, model: BaseModel) -> BaseModel:
-        """고급 모델 복사"""
-        from models import ModelFactory
-        
-        try:
-            model_type = model.name.lower()
-            if 'lightgbm' in model_type:
-                model_type = 'lightgbm'
-            elif 'xgboost' in model_type:
-                model_type = 'xgboost'
-            elif 'catboost' in model_type:
-                model_type = 'catboost'
-            elif 'deepctr' in model_type:
-                return ModelFactory.create_model('deepctr', input_dim=100, params=model.params)
-            else:
-                model_type = 'logistic'
-            
-            return ModelFactory.create_model(model_type, params=model.params)
-        except:
-            return model
-    
-    def _create_advanced_meta_features(self, oof_predictions: pd.DataFrame, X: pd.DataFrame) -> pd.DataFrame:
-        """고급 메타 피처 생성"""
+    def _create_advanced_meta_features_with_calibration(self, oof_predictions: pd.DataFrame, X: pd.DataFrame) -> pd.DataFrame:
+        """고급 메타 피처 생성 - Calibration 정보 포함"""
         
         meta_features = oof_predictions.copy()
         
         try:
             # 기본 통계 피처
-            base_cols = [col for col in oof_predictions.columns if not col.endswith('_tscv') and not col.endswith('_kfold')]
+            base_cols = [col for col in oof_predictions.columns 
+                        if not col.endswith('_tscv') and not col.endswith('_kfold') and not col.endswith('_calibrated')]
             
             meta_features['pred_mean'] = oof_predictions[base_cols].mean(axis=1)
             meta_features['pred_std'] = oof_predictions[base_cols].std(axis=1)
@@ -1140,6 +1375,31 @@ class CTRAdvancedMetaLearning(BaseEnsemble):
             meta_features['pred_median'] = oof_predictions[base_cols].median(axis=1)
             meta_features['pred_q25'] = oof_predictions[base_cols].quantile(0.25, axis=1)
             meta_features['pred_q75'] = oof_predictions[base_cols].quantile(0.75, axis=1)
+            
+            # 캘리브레이션 관련 메타 피처
+            calibrated_cols = [col for col in oof_predictions.columns if col.endswith('_calibrated')]
+            if calibrated_cols:
+                meta_features['calibration_ratio'] = oof_predictions[calibrated_cols].mean(axis=1)
+                
+                # 캘리브레이션된 모델들과 비캘리브레이션 모델들의 예측 차이
+                calibrated_model_names = [col.replace('_calibrated', '') for col in calibrated_cols 
+                                        if oof_predictions[col].iloc[0] == 1.0]
+                uncalibrated_model_names = [col.replace('_calibrated', '') for col in calibrated_cols 
+                                          if oof_predictions[col].iloc[0] == 0.0]
+                
+                if calibrated_model_names and uncalibrated_model_names:
+                    calibrated_preds = oof_predictions[[f'{name}_combined' for name in calibrated_model_names 
+                                                      if f'{name}_combined' in oof_predictions.columns]]
+                    uncalibrated_preds = oof_predictions[[f'{name}_combined' for name in uncalibrated_model_names 
+                                                        if f'{name}_combined' in oof_predictions.columns]]
+                    
+                    if not calibrated_preds.empty and not uncalibrated_preds.empty:
+                        meta_features['calibrated_vs_uncalibrated_diff'] = (
+                            calibrated_preds.mean(axis=1) - uncalibrated_preds.mean(axis=1)
+                        )
+                        meta_features['calibrated_vs_uncalibrated_ratio'] = (
+                            calibrated_preds.mean(axis=1) / (uncalibrated_preds.mean(axis=1) + 1e-8)
+                        )
             
             # 고급 분포 피처
             meta_features['pred_skew'] = oof_predictions[base_cols].skew(axis=1)
@@ -1169,12 +1429,18 @@ class CTRAdvancedMetaLearning(BaseEnsemble):
                 meta_features[f'{base_name}_cv_diff'] = oof_predictions[tscv_col] - oof_predictions[kfold_col]
                 meta_features[f'{base_name}_cv_ratio'] = oof_predictions[tscv_col] / (oof_predictions[kfold_col] + 1e-8)
             
-            # 신뢰도 및 합의 피처
+            # 신뢰도 및 합의 피처 (캘리브레이션 고려)
             meta_features['prediction_confidence'] = 1 - meta_features['pred_std']
             meta_features['consensus_strength'] = np.exp(-meta_features['pred_std'])
             meta_features['prediction_entropy'] = -np.sum(
                 oof_predictions[base_cols].values * np.log(oof_predictions[base_cols].values + 1e-15), axis=1
             )
+            
+            # 캘리브레이션 가중 신뢰도 (캘리브레이션된 모델에 더 높은 가중치)
+            if 'calibration_ratio' in meta_features.columns:
+                meta_features['calibration_weighted_confidence'] = (
+                    meta_features['prediction_confidence'] * (1 + 0.2 * meta_features['calibration_ratio'])
+                )
             
             # 극값 피처
             meta_features['is_extreme_high'] = (meta_features['pred_mean'] > meta_features['pred_mean'].quantile(0.95)).astype(int)
@@ -1197,12 +1463,33 @@ class CTRAdvancedMetaLearning(BaseEnsemble):
                 except:
                     pass
             
-            logger.info(f"고급 메타 피처 생성 완료: {meta_features.shape[1]}개 피처")
+            logger.info(f"고급 메타 피처 생성 완료 (Calibration 포함): {meta_features.shape[1]}개 피처")
             
         except Exception as e:
             logger.warning(f"고급 메타 피처 생성 중 오류: {e}")
         
         return meta_features
+    
+    def _clone_model_advanced(self, model: BaseModel) -> BaseModel:
+        """고급 모델 복사"""
+        from models import ModelFactory
+        
+        try:
+            model_type = model.name.lower()
+            if 'lightgbm' in model_type:
+                model_type = 'lightgbm'
+            elif 'xgboost' in model_type:
+                model_type = 'xgboost'
+            elif 'catboost' in model_type:
+                model_type = 'catboost'
+            elif 'deepctr' in model_type:
+                return ModelFactory.create_model('deepctr', input_dim=100, params=model.params)
+            else:
+                model_type = 'logistic'
+            
+            return ModelFactory.create_model(model_type, params=model.params)
+        except:
+            return model
     
     def _preprocess_meta_features(self, meta_features: pd.DataFrame, y: pd.Series) -> pd.DataFrame:
         """메타 피처 전처리 및 선택"""
@@ -1331,7 +1618,7 @@ class CTRAdvancedMetaLearning(BaseEnsemble):
         return np.clip(meta_pred, 1e-15, 1 - 1e-15)
     
     def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """고급 메타 학습 예측"""
+        """고급 메타 학습 예측 - Calibration 지원"""
         if not self.is_fitted:
             raise ValueError("앙상블 모델이 학습되지 않았습니다")
         
@@ -1341,7 +1628,7 @@ class CTRAdvancedMetaLearning(BaseEnsemble):
             
             # 메타 피처 생성 (학습 시와 동일한 구조로)
             if self.use_meta_features:
-                meta_features = self._create_inference_advanced_meta_features(pred_df)
+                meta_features = self._create_inference_advanced_meta_features_with_calibration(pred_df)
             else:
                 meta_features = pred_df
             
@@ -1357,6 +1644,15 @@ class CTRAdvancedMetaLearning(BaseEnsemble):
             
             # 예측
             ensemble_pred = self.predict_meta_model(meta_features_scaled)
+            
+            # 앙상블 수준 캘리브레이션 적용
+            if self.is_calibrated and self.ensemble_calibrator is not None:
+                try:
+                    ensemble_pred = self.ensemble_calibrator.predict(ensemble_pred)
+                    ensemble_pred = np.clip(ensemble_pred, 1e-15, 1 - 1e-15)
+                except Exception as e:
+                    logger.warning(f"메타 앙상블 캘리브레이션 예측 실패: {e}")
+            
             ensemble_pred = self._enhance_ensemble_diversity(ensemble_pred)
             
             return ensemble_pred
@@ -1365,8 +1661,8 @@ class CTRAdvancedMetaLearning(BaseEnsemble):
             logger.error(f"고급 메타 학습 예측 실패: {str(e)}")
             return np.mean(list(base_predictions.values()), axis=0)
     
-    def _create_inference_advanced_meta_features(self, pred_df: pd.DataFrame) -> pd.DataFrame:
-        """추론용 고급 메타 피처 생성 (학습 시와 동일한 구조)"""
+    def _create_inference_advanced_meta_features_with_calibration(self, pred_df: pd.DataFrame) -> pd.DataFrame:
+        """추론용 고급 메타 피처 생성 - Calibration 정보 포함"""
         
         meta_features = pred_df.copy()
         
@@ -1381,6 +1677,19 @@ class CTRAdvancedMetaLearning(BaseEnsemble):
             meta_features['pred_median'] = pred_df.median(axis=1)
             meta_features['pred_q25'] = pred_df.quantile(0.25, axis=1)
             meta_features['pred_q75'] = pred_df.quantile(0.75, axis=1)
+            
+            # 캘리브레이션 정보 추론 (기본 모델의 캘리브레이션 상태 기반)
+            calibration_ratio = 0.0
+            calibrated_count = 0
+            for name in base_cols:
+                model = self.base_models.get(name)
+                if model and hasattr(model, 'is_calibrated') and model.is_calibrated:
+                    calibrated_count += 1
+            
+            if len(base_cols) > 0:
+                calibration_ratio = calibrated_count / len(base_cols)
+            
+            meta_features['calibration_ratio'] = calibration_ratio
             
             # 고급 분포 피처
             meta_features['pred_skew'] = pred_df.skew(axis=1)
@@ -1408,6 +1717,11 @@ class CTRAdvancedMetaLearning(BaseEnsemble):
                 pred_df.values * np.log(pred_df.values + 1e-15), axis=1
             )
             
+            # 캘리브레이션 가중 신뢰도
+            meta_features['calibration_weighted_confidence'] = (
+                meta_features['prediction_confidence'] * (1 + 0.2 * calibration_ratio)
+            )
+            
             # 극값 피처
             global_q95 = meta_features['pred_mean'].quantile(0.95)
             global_q05 = meta_features['pred_mean'].quantile(0.05)
@@ -1425,7 +1739,7 @@ class CTRAdvancedMetaLearning(BaseEnsemble):
         return meta_features
 
 class CTRSuperEnsembleManager:
-    """CTR 특화 슈퍼 앙상블 관리 클래스 - Combined Score 0.32+ 목표"""
+    """CTR 특화 슈퍼 앙상블 관리 클래스 - Combined Score 0.32+ 목표 + Calibration 지원"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -1436,14 +1750,24 @@ class CTRSuperEnsembleManager:
         self.metrics_calculator = CTRMetrics()
         self.super_optimal_ensemble = None
         self.target_combined_score = 0.32
+        self.calibration_manager = {}
         
     def add_base_model(self, name: str, model: BaseModel):
-        """기본 모델 추가"""
+        """기본 모델 추가 - Calibration 상태 확인"""
         self.base_models[name] = model
-        logger.info(f"기본 모델 추가: {name}")
+        
+        # 캘리브레이션 상태 로깅
+        calibration_status = "No"
+        if hasattr(model, 'is_calibrated') and model.is_calibrated:
+            calibration_status = "Yes"
+            if hasattr(model, 'calibrator') and model.calibrator:
+                calibration_method = getattr(model.calibrator, 'best_method', 'unknown')
+                calibration_status = f"Yes ({calibration_method})"
+        
+        logger.info(f"기본 모델 추가: {name} - Calibration: {calibration_status}")
     
     def create_ensemble(self, ensemble_type: str, **kwargs) -> BaseEnsemble:
-        """CTR 특화 고성능 앙상블 생성"""
+        """CTR 특화 고성능 앙상블 생성 - Calibration 지원"""
         
         if ensemble_type == 'super_optimal':
             target_ctr = kwargs.get('target_ctr', 0.0201)
@@ -1473,48 +1797,67 @@ class CTRSuperEnsembleManager:
         return ensemble
     
     def train_all_ensembles(self, X: pd.DataFrame, y: pd.Series):
-        """모든 고성능 앙상블 학습"""
-        logger.info("모든 고성능 앙상블 학습 시작")
+        """모든 고성능 앙상블 학습 - Calibration 지원"""
+        logger.info("모든 고성능 앙상블 학습 시작 (Calibration 지원)")
         
-        # 기본 모델 예측 수집
+        # 기본 모델 예측 수집 (Calibration 적용)
         base_predictions = {}
+        calibration_info = {}
+        
         for name, model in self.base_models.items():
             try:
                 start_time = time.time()
-                pred = model.predict_proba(X)
+                
+                # 캘리브레이션이 적용된 예측 사용
+                if hasattr(model, 'is_calibrated') and model.is_calibrated:
+                    pred = model.predict_proba(X)  # 이미 캘리브레이션된 예측
+                    calibration_info[name] = {'calibrated': True, 'method': getattr(model.calibrator, 'best_method', 'unknown') if hasattr(model, 'calibrator') and model.calibrator else 'unknown'}
+                else:
+                    pred = model.predict_proba(X)
+                    calibration_info[name] = {'calibrated': False, 'method': 'none'}
+                
                 prediction_time = time.time() - start_time
                 
                 base_predictions[name] = pred
-                logger.info(f"{name} 모델 예측 완료 ({prediction_time:.2f}초)")
+                logger.info(f"{name} 모델 예측 완료 ({prediction_time:.2f}초) - "
+                          f"Calibration: {'Yes' if calibration_info[name]['calibrated'] else 'No'}")
+                
             except Exception as e:
                 logger.error(f"{name} 모델 예측 실패: {str(e)}")
                 base_predictions[name] = np.full(len(X), 0.0201)
+                calibration_info[name] = {'calibrated': False, 'method': 'error'}
         
-        # 각 앙상블 학습
+        # 각 앙상블 학습 (Calibration 지원)
         for ensemble_type, ensemble in self.ensembles.items():
             try:
                 start_time = time.time()
                 ensemble.fit(X, y, base_predictions)
                 training_time = time.time() - start_time
                 
-                logger.info(f"{ensemble_type} 고성능 앙상블 학습 완료 ({training_time:.2f}초)")
+                calibration_status = "Yes" if ensemble.is_calibrated else "No"
+                logger.info(f"{ensemble_type} 고성능 앙상블 학습 완료 ({training_time:.2f}초) - "
+                          f"Ensemble Calibration: {calibration_status}")
                 
             except Exception as e:
                 logger.error(f"{ensemble_type} 고성능 앙상블 학습 실패: {str(e)}")
+        
+        # 캘리브레이션 정보 저장
+        self.calibration_manager = calibration_info
         
         # 메모리 정리
         gc.collect()
     
     def evaluate_ensembles(self, X_val: pd.DataFrame, y_val: pd.Series) -> Dict[str, float]:
-        """고성능 앙상블 성능 평가"""
-        logger.info("고성능 앙상블 성능 평가 시작")
+        """고성능 앙상블 성능 평가 - Calibration 효과 포함"""
+        logger.info("고성능 앙상블 성능 평가 시작 (Calibration 효과 분석 포함)")
         
         results = {}
         
-        # 기본 모델 예측 수집
+        # 기본 모델 예측 수집 (Calibration 적용)
         base_predictions = {}
         for name, model in self.base_models.items():
             try:
+                # 캘리브레이션된 예측 사용
                 pred = model.predict_proba(X_val)
                 base_predictions[name] = pred
                 
@@ -1524,32 +1867,65 @@ class CTRSuperEnsembleManager:
                 results[f"base_{name}"] = score
                 results[f"base_{name}_ctr_optimized"] = ctr_optimized_score
                 
+                # 캘리브레이션 효과 분석
+                calibration_status = self.calibration_manager.get(name, {})
+                if calibration_status.get('calibrated', False):
+                    # 원본 예측과 비교 (가능한 경우)
+                    if hasattr(model, 'predict_proba_raw'):
+                        try:
+                            raw_pred = model.predict_proba_raw(X_val)
+                            raw_score = self.metrics_calculator.combined_score(y_val, raw_pred)
+                            calibration_improvement = score - raw_score
+                            results[f"base_{name}_calibration_improvement"] = calibration_improvement
+                            logger.info(f"{name} 캘리브레이션 개선효과: {calibration_improvement:+.4f}")
+                        except:
+                            pass
+                
             except Exception as e:
                 logger.error(f"{name} 모델 검증 예측 실패: {str(e)}")
                 results[f"base_{name}"] = 0.0
                 results[f"base_{name}_ctr_optimized"] = 0.0
         
-        # 앙상블 성능 평가
+        # 앙상블 성능 평가 (Calibration 효과 포함)
         for ensemble_type, ensemble in self.ensembles.items():
             if ensemble.is_fitted:
                 try:
-                    ensemble_pred = ensemble.predict_proba(base_predictions)
+                    # 원본 앙상블 예측
+                    raw_ensemble_pred = ensemble.predict_proba(base_predictions)
                     
-                    combined_score = self.metrics_calculator.combined_score(y_val, ensemble_pred)
-                    ctr_optimized_score = self.metrics_calculator.ctr_optimized_score(y_val, ensemble_pred)
-                    ap_score = self.metrics_calculator.average_precision(y_val, ensemble_pred)
-                    wll_score = self.metrics_calculator.weighted_log_loss(y_val, ensemble_pred)
+                    # 캘리브레이션 적용 예측 (있는 경우)
+                    if ensemble.is_calibrated:
+                        calibrated_ensemble_pred = ensemble.predict_proba_calibrated(base_predictions)
+                    else:
+                        calibrated_ensemble_pred = raw_ensemble_pred
+                    
+                    # 성능 지표 계산
+                    combined_score = self.metrics_calculator.combined_score(y_val, calibrated_ensemble_pred)
+                    ctr_optimized_score = self.metrics_calculator.ctr_optimized_score(y_val, calibrated_ensemble_pred)
+                    ap_score = self.metrics_calculator.average_precision(y_val, calibrated_ensemble_pred)
+                    wll_score = self.metrics_calculator.weighted_log_loss(y_val, calibrated_ensemble_pred)
                     
                     results[f"ensemble_{ensemble_type}"] = combined_score
                     results[f"ensemble_{ensemble_type}_ctr_optimized"] = ctr_optimized_score
                     results[f"ensemble_{ensemble_type}_ap"] = ap_score
                     results[f"ensemble_{ensemble_type}_wll"] = wll_score
                     
+                    # 캘리브레이션 효과 분석
+                    if ensemble.is_calibrated:
+                        try:
+                            raw_combined_score = self.metrics_calculator.combined_score(y_val, raw_ensemble_pred)
+                            calibration_improvement = combined_score - raw_combined_score
+                            results[f"ensemble_{ensemble_type}_calibration_improvement"] = calibration_improvement
+                            logger.info(f"{ensemble_type} 앙상블 캘리브레이션 개선효과: {calibration_improvement:+.4f}")
+                        except:
+                            pass
+                    
                     logger.info(f"{ensemble_type} 앙상블 Combined Score: {combined_score:.4f}")
                     logger.info(f"{ensemble_type} 앙상블 CTR Optimized Score: {ctr_optimized_score:.4f}")
+                    logger.info(f"{ensemble_type} 앙상블 Calibration: {'Yes' if ensemble.is_calibrated else 'No'}")
                     
                     # CTR 분석
-                    predicted_ctr = ensemble_pred.mean()
+                    predicted_ctr = calibrated_ensemble_pred.mean()
                     actual_ctr = y_val.mean()
                     ctr_bias = abs(predicted_ctr - actual_ctr)
                     logger.info(f"{ensemble_type} CTR: 예측 {predicted_ctr:.4f} vs 실제 {actual_ctr:.4f} (편향: {ctr_bias:.4f})")
@@ -1563,9 +1939,12 @@ class CTRSuperEnsembleManager:
                     results[f"ensemble_{ensemble_type}"] = 0.0
                     results[f"ensemble_{ensemble_type}_ctr_optimized"] = 0.0
         
-        # 최고 성능 앙상블 선택
+        # 최고 성능 앙상블 선택 (Calibration 고려)
         if results:
-            ensemble_results = {k: v for k, v in results.items() if k.startswith('ensemble_') and not k.endswith('_ctr_optimized') and not k.endswith('_ap') and not k.endswith('_wll')}
+            ensemble_results = {k: v for k, v in results.items() 
+                              if k.startswith('ensemble_') and not k.endswith('_ctr_optimized') 
+                              and not k.endswith('_ap') and not k.endswith('_wll') 
+                              and not k.endswith('_calibration_improvement')}
             
             if ensemble_results:
                 best_name = max(ensemble_results, key=ensemble_results.get)
@@ -1580,21 +1959,33 @@ class CTRSuperEnsembleManager:
                     logger.info("🎉 목표 Combined Score 0.32+ 달성!")
                 else:
                     logger.info(f"목표까지 {self.target_combined_score - best_score:.4f} 부족")
+                    
+                # 캘리브레이션 상태 확인
+                best_ensemble_obj = self.ensembles[ensemble_type]
+                if best_ensemble_obj.is_calibrated:
+                    logger.info("🎯 최고 앙상블에 캘리브레이션 적용됨")
             else:
                 logger.info("평가 가능한 앙상블이 없습니다.")
                 self.best_ensemble = None
         
         self.ensemble_results = results
+        
+        # 캘리브레이션 효과 요약
+        calibration_improvements = [v for k, v in results.items() if k.endswith('_calibration_improvement')]
+        if calibration_improvements:
+            avg_improvement = np.mean(calibration_improvements)
+            logger.info(f"평균 캘리브레이션 개선 효과: {avg_improvement:+.4f}")
+        
         return results
     
     def predict_with_best_ensemble(self, X: pd.DataFrame) -> np.ndarray:
-        """최고 성능 앙상블로 예측"""
+        """최고 성능 앙상블로 예측 - Calibration 적용"""
         
-        # 기본 모델 예측 수집
+        # 기본 모델 예측 수집 (Calibration 적용)
         base_predictions = {}
         for name, model in self.base_models.items():
             try:
-                pred = model.predict_proba(X)
+                pred = model.predict_proba(X)  # 캘리브레이션된 예측 사용
                 base_predictions[name] = pred
             except Exception as e:
                 logger.error(f"{name} 예측 실패: {str(e)}")
@@ -1606,7 +1997,10 @@ class CTRSuperEnsembleManager:
             best_score = 0
             
             for result_name, score in self.ensemble_results.items():
-                if result_name.startswith('base_') and not result_name.endswith('_ctr_optimized') and score > best_score:
+                if (result_name.startswith('base_') and 
+                    not result_name.endswith('_ctr_optimized') and 
+                    not result_name.endswith('_calibration_improvement') and 
+                    score > best_score):
                     best_score = score
                     best_model_name = result_name.replace('base_', '')
             
@@ -1618,10 +2012,14 @@ class CTRSuperEnsembleManager:
                 logger.info("평균 앙상블 사용")
                 return np.mean(list(base_predictions.values()), axis=0)
         
-        return self.best_ensemble.predict_proba(base_predictions)
+        # 최고 앙상블 예측 (Calibration 포함)
+        if self.best_ensemble.is_calibrated:
+            return self.best_ensemble.predict_proba_calibrated(base_predictions)
+        else:
+            return self.best_ensemble.predict_proba(base_predictions)
     
     def save_ensembles(self, output_dir: Path = None):
-        """고성능 앙상블 저장"""
+        """고성능 앙상블 저장 - Calibration 정보 포함"""
         if output_dir is None:
             output_dir = self.config.MODEL_DIR
         
@@ -1641,17 +2039,25 @@ class CTRSuperEnsembleManager:
                 except Exception as e:
                     logger.error(f"{ensemble_type} 고성능 앙상블 저장 실패: {str(e)}")
         
-        # 최고 앙상블 정보 저장
+        # 최고 앙상블 정보 저장 (Calibration 정보 포함)
         best_info = {
             'best_ensemble_type': self.best_ensemble.name if self.best_ensemble else None,
             'ensemble_results': self.ensemble_results,
             'target_combined_score': self.target_combined_score,
             'super_optimal_available': self.super_optimal_ensemble is not None,
+            'calibration_info': self.calibration_manager,
+            'best_ensemble_calibrated': self.best_ensemble.is_calibrated if self.best_ensemble else False,
             'target_achieved': any(
                 score >= self.target_combined_score 
                 for key, score in self.ensemble_results.items() 
-                if key.startswith('ensemble_') and not key.endswith('_ctr_optimized') and not key.endswith('_ap') and not key.endswith('_wll')
-            )
+                if key.startswith('ensemble_') and not key.endswith('_ctr_optimized') 
+                and not key.endswith('_ap') and not key.endswith('_wll')
+                and not key.endswith('_calibration_improvement')
+            ),
+            'calibration_effects': {
+                key: value for key, value in self.ensemble_results.items()
+                if key.endswith('_calibration_improvement')
+            }
         }
         
         try:
@@ -1660,12 +2066,12 @@ class CTRSuperEnsembleManager:
             with open(info_path, 'w', encoding='utf-8') as f:
                 json.dump(best_info, f, indent=2, ensure_ascii=False, default=str)
             
-            logger.info(f"고성능 앙상블 정보 저장: {info_path}")
+            logger.info(f"고성능 앙상블 정보 저장: {info_path} (Calibration 정보 포함)")
         except Exception as e:
             logger.error(f"고성능 앙상블 정보 저장 실패: {str(e)}")
     
     def load_ensembles(self, input_dir: Path = None):
-        """고성능 앙상블 로딩"""
+        """고성능 앙상블 로딩 - Calibration 정보 포함"""
         if input_dir is None:
             input_dir = self.config.MODEL_DIR
         
@@ -1686,12 +2092,13 @@ class CTRSuperEnsembleManager:
                 if ensemble_type == 'super_optimal':
                     self.super_optimal_ensemble = ensemble
                 
-                logger.info(f"{ensemble_type} 고성능 앙상블 로딩 완료")
+                calibration_status = "Yes" if ensemble.is_calibrated else "No"
+                logger.info(f"{ensemble_type} 고성능 앙상블 로딩 완료 - Calibration: {calibration_status}")
                 
             except Exception as e:
                 logger.error(f"{ensemble_file} 고성능 앙상블 로딩 실패: {str(e)}")
         
-        # 최고 앙상블 정보 로딩
+        # 최고 앙상블 정보 로딩 (Calibration 정보 포함)
         info_path = input_dir / "high_performance_ensemble_info.json"
         if info_path.exists():
             try:
@@ -1708,26 +2115,49 @@ class CTRSuperEnsembleManager:
                 
                 self.ensemble_results = best_info.get('ensemble_results', {})
                 self.target_combined_score = best_info.get('target_combined_score', 0.32)
+                self.calibration_manager = best_info.get('calibration_info', {})
+                
+                logger.info("고성능 앙상블 정보 로딩 완료 (Calibration 정보 포함)")
                 
             except Exception as e:
                 logger.error(f"고성능 앙상블 정보 로딩 실패: {str(e)}")
     
     def get_ensemble_summary(self) -> Dict[str, Any]:
-        """고성능 앙상블 요약 정보"""
+        """고성능 앙상블 요약 정보 - Calibration 분석 포함"""
         
         target_achieved_count = sum(
             1 for key, score in self.ensemble_results.items()
             if key.startswith('ensemble_') and not key.endswith('_ctr_optimized') 
             and not key.endswith('_ap') and not key.endswith('_wll')
+            and not key.endswith('_calibration_improvement')
             and score >= self.target_combined_score
         )
+        
+        # 캘리브레이션 분석
+        calibrated_base_models = sum(
+            1 for info in self.calibration_manager.values()
+            if info.get('calibrated', False)
+        )
+        
+        calibrated_ensembles = sum(
+            1 for ensemble in self.ensembles.values()
+            if hasattr(ensemble, 'is_calibrated') and ensemble.is_calibrated
+        )
+        
+        calibration_improvements = [
+            v for k, v in self.ensemble_results.items()
+            if k.endswith('_calibration_improvement') and v > 0
+        ]
         
         return {
             'total_ensembles': len(self.ensembles),
             'fitted_ensembles': sum(1 for e in self.ensembles.values() if e.is_fitted),
             'best_ensemble': self.best_ensemble.name if self.best_ensemble else None,
+            'best_ensemble_calibrated': self.best_ensemble.is_calibrated if self.best_ensemble else False,
             'ensemble_results': self.ensemble_results,
             'base_models_count': len(self.base_models),
+            'calibrated_base_models': calibrated_base_models,
+            'calibrated_ensembles': calibrated_ensembles,
             'super_optimal_ensemble_available': self.super_optimal_ensemble is not None and self.super_optimal_ensemble.is_fitted,
             'ensemble_types': list(self.ensembles.keys()),
             'target_combined_score': self.target_combined_score,
@@ -1736,9 +2166,21 @@ class CTRSuperEnsembleManager:
             'best_combined_score': max(
                 (score for key, score in self.ensemble_results.items()
                  if key.startswith('ensemble_') and not key.endswith('_ctr_optimized') 
-                 and not key.endswith('_ap') and not key.endswith('_wll')),
+                 and not key.endswith('_ap') and not key.endswith('_wll')
+                 and not key.endswith('_calibration_improvement')),
                 default=0.0
-            )
+            ),
+            'calibration_analysis': {
+                'base_models_calibration_rate': calibrated_base_models / max(len(self.base_models), 1),
+                'ensemble_calibration_rate': calibrated_ensembles / max(len(self.ensembles), 1),
+                'positive_calibration_improvements': len(calibration_improvements),
+                'avg_calibration_improvement': np.mean(calibration_improvements) if calibration_improvements else 0.0,
+                'calibration_methods_used': {
+                    info.get('method', 'unknown'): 1 
+                    for info in self.calibration_manager.values() 
+                    if info.get('calibrated', False)
+                }
+            }
         }
 
 # 기존 클래스명 유지 (하위 호환성)
