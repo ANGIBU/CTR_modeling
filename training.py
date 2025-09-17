@@ -73,7 +73,7 @@ class LargeDataMemoryTracker:
     
     @staticmethod
     def get_available_memory() -> float:
-        """사용 가능한 메모리 (GB) - 40GB 사용 가능 기준"""
+        """사용 가능한 메모리 (GB)"""
         if PSUTIL_AVAILABLE:
             try:
                 available = psutil.virtual_memory().available / (1024**3)
@@ -84,7 +84,7 @@ class LargeDataMemoryTracker:
     
     @staticmethod
     def get_gpu_memory_usage() -> Dict[str, float]:
-        """GPU 메모리 사용량 - RTX 4060 Ti 16GB 기준"""
+        """GPU 메모리 사용량"""
         if TORCH_AVAILABLE and torch.cuda.is_available():
             try:
                 total_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
@@ -106,7 +106,7 @@ class LargeDataMemoryTracker:
     
     @staticmethod
     def force_cleanup():
-        """강제 메모리 정리 - 대용량 데이터 처리용"""
+        """강제 메모리 정리"""
         try:
             gc.collect()
             if TORCH_AVAILABLE and torch.cuda.is_available():
@@ -218,6 +218,7 @@ class CTRHighPerformanceTrainer:
             
             model.fit(X_train, y_train, X_val, y_val)
             
+            # 캘리브레이션 적용 - CTRCalibrator 사용
             if apply_calibration and X_val is not None and y_val is not None:
                 current_memory = self.memory_tracker.get_available_memory()
                 if current_memory > 5:
@@ -237,7 +238,7 @@ class CTRHighPerformanceTrainer:
                 'model': model,
                 'params': params or {},
                 'training_time': training_time,
-                'calibrated': apply_calibration,
+                'calibrated': apply_calibration and model.is_calibrated,
                 'memory_used': memory_after - memory_before,
                 'gpu_memory_used': gpu_info_after['allocated'] - gpu_info_before['allocated'],
                 'data_size': len(X_train),
@@ -256,7 +257,7 @@ class CTRHighPerformanceTrainer:
     def _apply_memory_efficient_sampling(self, X_train: pd.DataFrame, y_train: pd.Series, 
                                        X_val: Optional[pd.DataFrame], y_val: Optional[pd.Series],
                                        available_memory: float) -> Tuple:
-        """메모리 효율적인 데이터 샘플링 - 1070만행 처리용"""
+        """메모리 효율적인 데이터 샘플링"""
         
         data_size_gb = (X_train.memory_usage(deep=True).sum() + y_train.memory_usage(deep=True)) / (1024**3)
         
@@ -404,7 +405,7 @@ class CTRHighPerformanceTrainer:
         return optimized_params
     
     def _apply_high_performance_calibration(self, model: BaseModel, X_val: pd.DataFrame, y_val: pd.Series):
-        """고성능 CTR Calibration 적용"""
+        """고성능 CTR Calibration 적용 - CTRCalibrator 사용"""
         try:
             logger.info(f"{model.name} 고성능 CTR Calibration 적용 시작")
             
@@ -412,6 +413,7 @@ class CTRHighPerformanceTrainer:
                 logger.warning("메모리 부족으로 Calibration 생략")
                 return
             
+            # 검증 데이터 크기 조정 (메모리 효율성)
             val_size = min(len(X_val), 50000)
             if len(X_val) > val_size:
                 sample_indices = np.random.choice(len(X_val), val_size, replace=False)
@@ -421,38 +423,42 @@ class CTRHighPerformanceTrainer:
                 X_val_sample = X_val
                 y_val_sample = y_val
             
-            raw_predictions = model.predict_proba_raw(X_val_sample)
+            # 모델의 캘리브레이션 메서드 호출
+            model.apply_calibration(X_val_sample, y_val_sample, method='auto', cv_folds=3)
             
-            calibrator = CTRCalibrator(target_ctr=0.0201)
+            # 캘리브레이션 결과 저장
+            if model.is_calibrated and model.calibrator is not None:
+                self.calibrators[model.name] = model.calibrator
+                
+                # 캘리브레이션 효과 확인
+                raw_predictions = model.predict_proba_raw(X_val_sample)
+                calibrated_predictions = model.predict_proba(X_val_sample)
+                
+                original_ctr = raw_predictions.mean()
+                calibrated_ctr = calibrated_predictions.mean()
+                actual_ctr = y_val_sample.mean()
+                
+                logger.info(f"고성능 CTR Calibration 결과")
+                logger.info(f"  - 원본 CTR: {original_ctr:.4f}")
+                logger.info(f"  - 캘리브레이션 CTR: {calibrated_ctr:.4f}")
+                logger.info(f"  - 실제 CTR: {actual_ctr:.4f}")
+                logger.info(f"  - 캘리브레이션 방법: {model.calibrator.best_method}")
+                
+                # 캘리브레이션 품질 점수 로깅
+                calibration_summary = model.calibrator.get_calibration_summary()
+                if calibration_summary['calibration_scores']:
+                    best_score = max(calibration_summary['calibration_scores'].values())
+                    logger.info(f"  - 캘리브레이션 품질 점수: {best_score:.4f}")
             
-            if self.config.CALIBRATION_CONFIG.get('platt_scaling', True):
-                calibrator.fit_platt_scaling(y_val_sample.values, raw_predictions)
-            
-            if self.config.CALIBRATION_CONFIG.get('isotonic_regression', True):
-                calibrator.fit_isotonic_regression(y_val_sample.values, raw_predictions)
-            
-            if self.config.CALIBRATION_CONFIG.get('temperature_scaling', True):
-                calibrator.fit_temperature_scaling(y_val_sample.values, raw_predictions)
-            
-            calibrator.fit_bias_correction(y_val_sample.values, raw_predictions)
-            
-            model.apply_calibration(X_val_sample, y_val_sample, method='platt', cv_folds=5)
-            
-            self.calibrators[model.name] = calibrator
-            
-            calibrated_predictions = model.predict_proba(X_val_sample)
-            
-            original_ctr = raw_predictions.mean()
-            calibrated_ctr = calibrated_predictions.mean()
-            actual_ctr = y_val_sample.mean()
-            
-            logger.info(f"고성능 CTR Calibration 결과 - 원본: {original_ctr:.4f}, 보정: {calibrated_ctr:.4f}, 실제: {actual_ctr:.4f}")
-            
+            # 메모리 정리
             del raw_predictions, calibrated_predictions
             LargeDataMemoryTracker.force_cleanup()
             
         except Exception as e:
             logger.error(f"고성능 CTR Calibration 적용 실패 ({model.name}): {str(e)}")
+            # 캘리브레이션 실패해도 모델 자체는 유지
+            model.is_calibrated = False
+            model.calibrator = None
     
     def cross_validate_ctr_model_optimized(self,
                                          model_type: str,
@@ -507,7 +513,8 @@ class CTRHighPerformanceTrainer:
                 'ctr_bias_scores': [],
                 'training_times': [],
                 'memory_usage': [],
-                'gpu_memory_usage': []
+                'gpu_memory_usage': [],
+                'calibration_scores': []
             }
             
             metrics_calculator = CTRMetrics()
@@ -528,10 +535,11 @@ class CTRHighPerformanceTrainer:
                     model = self.train_single_model_optimized(
                         model_type, X_train_fold, y_train_fold,
                         X_val_fold, y_val_fold, params,
-                        apply_calibration=False
+                        apply_calibration=True  # CV에서도 캘리브레이션 적용
                     )
                     training_time = time.time() - start_time
                     
+                    # 캘리브레이션된 예측 사용
                     y_pred_proba = model.predict_proba(X_val_fold)
                     
                     unique_predictions = len(np.unique(y_pred_proba))
@@ -548,6 +556,13 @@ class CTRHighPerformanceTrainer:
                     ctr_bias = abs(predicted_ctr - actual_ctr)
                     ctr_bias_score = np.exp(-ctr_bias * 200)
                     
+                    # 캘리브레이션 품질 점수
+                    calibration_score = 0.0
+                    if model.is_calibrated and model.calibrator is not None:
+                        calibration_summary = model.calibrator.get_calibration_summary()
+                        if calibration_summary['calibration_scores']:
+                            calibration_score = max(calibration_summary['calibration_scores'].values())
+                    
                     memory_after = self.memory_tracker.get_memory_usage()
                     gpu_after = self.memory_tracker.get_gpu_memory_usage()
                     
@@ -556,6 +571,7 @@ class CTRHighPerformanceTrainer:
                     cv_scores['combined_scores'].append(combined_score)
                     cv_scores['ctr_optimized_scores'].append(ctr_optimized_score)
                     cv_scores['ctr_bias_scores'].append(ctr_bias_score)
+                    cv_scores['calibration_scores'].append(calibration_score)
                     cv_scores['training_times'].append(training_time)
                     cv_scores['memory_usage'].append(memory_after - memory_before)
                     cv_scores['gpu_memory_usage'].append(gpu_after['allocated'] - gpu_before['allocated'])
@@ -563,6 +579,7 @@ class CTRHighPerformanceTrainer:
                     logger.info(f"고성능 CTR 폴드 {fold + 1} 완료")
                     logger.info(f"AP: {ap_score:.4f}, WLL: {wll_score:.4f}, Combined: {combined_score:.4f}")
                     logger.info(f"CTR최적화: {ctr_optimized_score:.4f}, CTR편향: {ctr_bias:.4f}")
+                    logger.info(f"캘리브레이션 점수: {calibration_score:.4f}")
                     
                     del X_train_fold, X_val_fold, y_train_fold, y_val_fold, model, y_pred_proba
                     LargeDataMemoryTracker.force_cleanup()
@@ -574,6 +591,7 @@ class CTRHighPerformanceTrainer:
                     cv_scores['combined_scores'].append(0.0)
                     cv_scores['ctr_optimized_scores'].append(0.0)
                     cv_scores['ctr_bias_scores'].append(0.0)
+                    cv_scores['calibration_scores'].append(0.0)
                     cv_scores['training_times'].append(0.0)
                     cv_scores['memory_usage'].append(0.0)
                     cv_scores['gpu_memory_usage'].append(0.0)
@@ -582,6 +600,7 @@ class CTRHighPerformanceTrainer:
             valid_combined_scores = [s for s in cv_scores['combined_scores'] if s > 0]
             valid_ctr_scores = [s for s in cv_scores['ctr_optimized_scores'] if s > 0]
             valid_ctr_bias_scores = [s for s in cv_scores['ctr_bias_scores'] if s > 0]
+            valid_calibration_scores = [s for s in cv_scores['calibration_scores'] if s > 0]
             
             if not valid_combined_scores:
                 logger.warning(f"{model_type} 고성능 CTR 모든 폴드가 실패했습니다")
@@ -591,6 +610,7 @@ class CTRHighPerformanceTrainer:
                     'combined_std': 0.0,
                     'ctr_optimized_mean': 0.0,
                     'ctr_bias_mean': 0.0,
+                    'calibration_mean': 0.0,
                     'scores_detail': cv_scores,
                     'params': params or {}
                 }
@@ -603,6 +623,8 @@ class CTRHighPerformanceTrainer:
                     'ctr_optimized_std': np.std(valid_ctr_scores) if len(valid_ctr_scores) > 1 else 0.0,
                     'ctr_bias_mean': np.mean(valid_ctr_bias_scores) if valid_ctr_bias_scores else 0.0,
                     'ctr_bias_std': np.std(valid_ctr_bias_scores) if len(valid_ctr_bias_scores) > 1 else 0.0,
+                    'calibration_mean': np.mean(valid_calibration_scores) if valid_calibration_scores else 0.0,
+                    'calibration_std': np.std(valid_calibration_scores) if len(valid_calibration_scores) > 1 else 0.0,
                     'scores_detail': cv_scores,
                     'params': params or {},
                     'successful_folds': len(valid_combined_scores),
@@ -620,6 +642,7 @@ class CTRHighPerformanceTrainer:
             logger.info(f"평균 Combined Score: {cv_results['combined_mean']:.4f} (±{cv_results['combined_std']:.4f})")
             logger.info(f"평균 CTR 최적화 점수: {cv_results['ctr_optimized_mean']:.4f}")
             logger.info(f"평균 CTR 편향 점수: {cv_results['ctr_bias_mean']:.4f}")
+            logger.info(f"평균 캘리브레이션 점수: {cv_results['calibration_mean']:.4f}")
             logger.info(f"성공한 폴드: {cv_results['successful_folds']}/{cv_folds}")
             
             return cv_results
@@ -813,8 +836,13 @@ class CTRHighPerformanceTrainer:
                 combined_score = cv_result['combined_mean']
                 ctr_optimized_score = cv_result.get('ctr_optimized_mean', 0.0)
                 ctr_bias_score = cv_result.get('ctr_bias_mean', 0.0)
+                calibration_score = cv_result.get('calibration_mean', 0.0)
                 
-                final_score = 0.5 * combined_score + 0.3 * ctr_optimized_score + 0.2 * ctr_bias_score
+                # 캘리브레이션 점수 포함한 최종 점수
+                final_score = (0.4 * combined_score + 
+                              0.25 * ctr_optimized_score + 
+                              0.15 * ctr_bias_score +
+                              0.2 * calibration_score)
                 
                 LargeDataMemoryTracker.force_cleanup()
                 
@@ -916,12 +944,13 @@ class CTRHighPerformanceTrainer:
                     params = self._get_high_performance_params(model_type)
                 
                 model = self.train_single_model_optimized(
-                    model_type, X_train, y_train, X_val, y_val, params
+                    model_type, X_train, y_train, X_val, y_val, params, apply_calibration=True
                 )
                 
                 trained_models[model_type] = model
                 
                 logger.info(f"{model_type} 고성능 CTR 모델 학습 완료")
+                logger.info(f"캘리브레이션 적용: {model.is_calibrated}")
                 
                 self._cleanup_memory_after_training(model_type)
                 
@@ -1122,7 +1151,8 @@ class CTRHighPerformanceTrainer:
                     'device': str(self.device),
                     'high_performance_optimized': True,
                     'rtx_4060ti_optimized': self.rtx_4060ti_optimized,
-                    'combined_score_target': 0.30
+                    'combined_score_target': 0.30,
+                    'calibration_applied': model_info.get('calibrated', False)
                 }
                 
                 metadata_path = output_dir / f"{model_name}_high_performance_metadata.json"
@@ -1134,6 +1164,7 @@ class CTRHighPerformanceTrainer:
             except Exception as e:
                 logger.error(f"{model_name} 고성능 CTR 모델 저장 실패: {str(e)}")
         
+        # Calibrators 저장
         if self.calibrators:
             calibrator_path = output_dir / "high_performance_ctr_calibrators.pkl"
             try:
@@ -1143,6 +1174,7 @@ class CTRHighPerformanceTrainer:
             except Exception as e:
                 logger.error(f"고성능 CTR Calibrator 저장 실패: {str(e)}")
         
+        # CV 결과 저장
         if self.cv_results:
             cv_results_path = output_dir / "high_performance_cv_results.json"
             try:
@@ -1152,6 +1184,7 @@ class CTRHighPerformanceTrainer:
             except Exception as e:
                 logger.error(f"고성능 CV 결과 저장 실패: {str(e)}")
         
+        # 최적 파라미터 저장
         if self.best_params:
             best_params_path = output_dir / "high_performance_best_params.json"
             try:
@@ -1216,6 +1249,7 @@ class CTRHighPerformanceTrainer:
             except Exception as e:
                 logger.error(f"{model_file} 고성능 CTR 모델 로딩 실패: {str(e)}")
         
+        # Calibrators 로딩
         calibrator_path = input_dir / "high_performance_ctr_calibrators.pkl"
         if calibrator_path.exists():
             try:
@@ -1225,6 +1259,7 @@ class CTRHighPerformanceTrainer:
             except Exception as e:
                 logger.error(f"고성능 CTR Calibrator 로딩 실패: {str(e)}")
         
+        # CV 결과 로딩
         cv_results_path = input_dir / "high_performance_cv_results.json"
         if cv_results_path.exists():
             try:
@@ -1234,6 +1269,7 @@ class CTRHighPerformanceTrainer:
             except Exception as e:
                 logger.error(f"고성능 CV 결과 로딩 실패: {str(e)}")
         
+        # 최적 파라미터 로딩
         best_params_path = input_dir / "high_performance_best_params.json"
         if best_params_path.exists():
             try:
@@ -1256,8 +1292,10 @@ class CTRHighPerformanceTrainer:
             'gpu_available': self.gpu_available,
             'rtx_4060ti_optimized': self.rtx_4060ti_optimized,
             'calibration_applied': len(self.calibrators) > 0,
+            'ensemble_types': list(self.trained_models.keys()),
+            'target_combined_score': 0.30,
+            'calibrated_models': [name for name, info in self.trained_models.items() if info.get('calibrated', False)],
             'high_performance_optimized': True,
-            'combined_score_target': 0.30,
             'total_memory_used': sum(
                 info.get('memory_used', 0.0) for info in self.trained_models.values()
             ),
@@ -1285,11 +1323,13 @@ class CTRHighPerformanceTrainer:
                     'combined_std': best_model[1]['combined_std'],
                     'ctr_optimized_score': best_model[1].get('ctr_optimized_mean', 0.0),
                     'ctr_bias_score': best_model[1].get('ctr_bias_mean', 0.0),
+                    'calibration_score': best_model[1].get('calibration_mean', 0.0),
                     'target_achieved': best_model[1]['combined_mean'] >= 0.30
                 }
         
         return summary
 
+# 기존 코드와의 호환성을 위한 별칭
 ModelTrainer = CTRHighPerformanceTrainer
 
 class HighPerformanceTrainingPipeline:
@@ -1314,6 +1354,7 @@ class HighPerformanceTrainingPipeline:
         logger.info(f"데이터 크기: {len(X_train):,}행")
         logger.info(f"초기 메모리 상태: {self.memory_tracker.get_available_memory():.2f}GB")
         logger.info(f"GPU 메모리: {self.memory_tracker.get_gpu_memory_usage()['free']:.2f}GB")
+        logger.info(f"캘리브레이션 적용: True")
         
         pipeline_start_time = time.time()
         
@@ -1338,8 +1379,9 @@ class HighPerformanceTrainingPipeline:
                 else:
                     n_trials = 20
             
+            # 하이퍼파라미터 튜닝 (캘리브레이션 포함)
             if tune_hyperparameters and OPTUNA_AVAILABLE:
-                logger.info("고성능 CTR 하이퍼파라미터 튜닝 단계")
+                logger.info("고성능 CTR 하이퍼파라미터 튜닝 단계 (캘리브레이션 포함)")
                 for model_type in model_types:
                     try:
                         if self.memory_tracker.get_available_memory() < 8:
@@ -1365,7 +1407,8 @@ class HighPerformanceTrainingPipeline:
             else:
                 logger.info("고성능 CTR 하이퍼파라미터 튜닝 생략")
             
-            logger.info("고성능 CTR 교차검증 평가 단계")
+            # 교차검증 평가 (캘리브레이션 포함)
+            logger.info("고성능 CTR 교차검증 평가 단계 (캘리브레이션 포함)")
             for model_type in model_types:
                 try:
                     if self.memory_tracker.get_available_memory() < 6:
@@ -1388,7 +1431,8 @@ class HighPerformanceTrainingPipeline:
                     logger.error(f"{model_type} 고성능 교차검증 실패: {str(e)}")
                     LargeDataMemoryTracker.force_cleanup()
             
-            logger.info("고성능 CTR 최종 모델 학습 단계")
+            # 최종 모델 학습 (캘리브레이션 포함)
+            logger.info("고성능 CTR 최종 모델 학습 단계 (캘리브레이션 포함)")
             logger.info(f"학습 전 메모리 상태: {self.memory_tracker.get_available_memory():.2f}GB")
             
             trained_models = self.trainer.train_all_ctr_models_optimized(
@@ -1397,6 +1441,7 @@ class HighPerformanceTrainingPipeline:
             
             logger.info(f"학습 후 메모리 상태: {self.memory_tracker.get_available_memory():.2f}GB")
             
+            # 모델 저장
             try:
                 self.trainer.save_models()
                 logger.info("고성능 CTR 모델 저장 완료")
@@ -1410,14 +1455,18 @@ class HighPerformanceTrainingPipeline:
             summary['memory_available_end'] = self.memory_tracker.get_available_memory()
             summary['gpu_memory_end'] = self.memory_tracker.get_gpu_memory_usage()
             summary['high_performance_pipeline'] = True
+            summary['calibration_pipeline'] = True
             
             logger.info(f"고성능 CTR 전체 학습 파이프라인 완료 (소요시간: {pipeline_time:.2f}초)")
             logger.info(f"최종 메모리 상태: {summary['memory_available_end']:.2f}GB")
+            logger.info(f"캘리브레이션 적용 모델 수: {len(summary['calibrated_models'])}")
             
             if 'best_model' in summary:
                 best_score = summary['best_model']['combined_score']
                 target_achieved = summary['best_model']['target_achieved']
+                calibration_score = summary['best_model'].get('calibration_score', 0.0)
                 logger.info(f"최고 Combined Score: {best_score:.4f}")
+                logger.info(f"최고 Calibration Score: {calibration_score:.4f}")
                 logger.info(f"목표 달성 여부: {target_achieved} (목표: 0.30+)")
             
             return summary
@@ -1429,4 +1478,5 @@ class HighPerformanceTrainingPipeline:
         finally:
             LargeDataMemoryTracker.force_cleanup()
 
+# 기존 코드와의 호환성을 위한 별칭
 TrainingPipeline = HighPerformanceTrainingPipeline

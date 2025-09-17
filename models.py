@@ -57,7 +57,6 @@ try:
             gpu_name = gpu_properties.name
             gpu_memory_gb = gpu_properties.total_memory / (1024**3)
             
-            # GPU 테스트
             test_tensor = torch.zeros(1000, 1000).cuda()
             test_result = test_tensor.sum()
             del test_tensor
@@ -102,6 +101,7 @@ try:
     from sklearn.linear_model import LogisticRegression
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.metrics import roc_auc_score, log_loss
+    from sklearn.model_selection import cross_val_predict
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
@@ -114,24 +114,365 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
 
+try:
+    from scipy.optimize import minimize_scalar
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    logging.warning("scipy가 설치되지 않았습니다. 일부 캘리브레이션 기능이 제한됩니다.")
+
 from config import Config
 
 logger = logging.getLogger(__name__)
 
+class CTRCalibrator:
+    """CTR 예측 전용 고급 캘리브레이션 클래스 - Combined Score 0.30+ 목표"""
+    
+    def __init__(self, target_ctr: float = 0.0201, method: str = 'auto'):
+        self.target_ctr = target_ctr
+        self.method = method
+        self.calibrators = {}
+        self.is_fitted = False
+        self.best_method = None
+        self.calibration_curve = None
+        
+        # Platt Scaling
+        self.platt_scaler = None
+        
+        # Isotonic Regression
+        self.isotonic_regressor = None
+        
+        # Temperature Scaling
+        self.temperature = 1.0
+        self.temperature_bias = 0.0
+        
+        # Bias Correction
+        self.bias_correction = 0.0
+        self.multiplicative_correction = 1.0
+        
+        # 성능 지표
+        self.calibration_scores = {}
+        
+    def fit_platt_scaling(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
+        """Platt Scaling 캘리브레이션 학습"""
+        try:
+            if not SKLEARN_AVAILABLE:
+                logger.warning("scikit-learn을 사용할 수 없어 Platt Scaling을 건너뜁니다")
+                return
+                
+            logger.info("Platt Scaling 캘리브레이션 학습 시작")
+            
+            # 로지스틱 회귀를 사용한 Platt Scaling
+            self.platt_scaler = LogisticRegression()
+            
+            # 예측값을 로지트 공간으로 변환
+            pred_clipped = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
+            logits = np.log(pred_clipped / (1 - pred_clipped))
+            
+            self.platt_scaler.fit(logits.reshape(-1, 1), y_true)
+            
+            # 성능 평가
+            calibrated_probs = self.apply_platt_scaling(y_pred_proba)
+            self.calibration_scores['platt_scaling'] = self._evaluate_calibration(y_true, calibrated_probs)
+            
+            logger.info(f"Platt Scaling 학습 완료 - 점수: {self.calibration_scores['platt_scaling']:.4f}")
+            
+        except Exception as e:
+            logger.error(f"Platt Scaling 학습 실패: {e}")
+    
+    def fit_isotonic_regression(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
+        """Isotonic Regression 캘리브레이션 학습"""
+        try:
+            if not SKLEARN_AVAILABLE:
+                logger.warning("scikit-learn을 사용할 수 없어 Isotonic Regression을 건너뜁니다")
+                return
+                
+            logger.info("Isotonic Regression 캘리브레이션 학습 시작")
+            
+            self.isotonic_regressor = IsotonicRegression(out_of_bounds='clip')
+            self.isotonic_regressor.fit(y_pred_proba, y_true)
+            
+            # 성능 평가
+            calibrated_probs = self.apply_isotonic_regression(y_pred_proba)
+            self.calibration_scores['isotonic_regression'] = self._evaluate_calibration(y_true, calibrated_probs)
+            
+            logger.info(f"Isotonic Regression 학습 완료 - 점수: {self.calibration_scores['isotonic_regression']:.4f}")
+            
+        except Exception as e:
+            logger.error(f"Isotonic Regression 학습 실패: {e}")
+    
+    def fit_temperature_scaling(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
+        """Temperature Scaling 캘리브레이션 학습"""
+        try:
+            logger.info("Temperature Scaling 캘리브레이션 학습 시작")
+            
+            def temperature_loss(params):
+                temp, bias = params
+                if temp <= 0:
+                    return float('inf')
+                
+                pred_clipped = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
+                logits = np.log(pred_clipped / (1 - pred_clipped))
+                
+                adjusted_logits = (logits + bias) / temp
+                calibrated_probs = 1 / (1 + np.exp(-adjusted_logits))
+                calibrated_probs = np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
+                
+                # 로그 손실 계산
+                log_loss_val = -np.mean(y_true * np.log(calibrated_probs) + (1 - y_true) * np.log(1 - calibrated_probs))
+                
+                # CTR 정렬 보정
+                ctr_bias = abs(calibrated_probs.mean() - y_true.mean()) * 1000
+                
+                return log_loss_val + ctr_bias
+            
+            # 최적 온도 및 편향 찾기
+            if SCIPY_AVAILABLE:
+                from scipy.optimize import minimize
+                result = minimize(
+                    temperature_loss, 
+                    x0=[1.0, 0.0], 
+                    bounds=[(0.1, 10.0), (-2.0, 2.0)],
+                    method='L-BFGS-B'
+                )
+                self.temperature = result.x[0]
+                self.temperature_bias = result.x[1]
+            else:
+                # 간단한 그리드 서치
+                best_loss = float('inf')
+                best_temp = 1.0
+                best_bias = 0.0
+                
+                for temp in np.logspace(-1, 1, 20):  # 0.1 to 10
+                    for bias in np.linspace(-2, 2, 20):
+                        loss = temperature_loss([temp, bias])
+                        if loss < best_loss:
+                            best_loss = loss
+                            best_temp = temp
+                            best_bias = bias
+                
+                self.temperature = best_temp
+                self.temperature_bias = best_bias
+            
+            # 성능 평가
+            calibrated_probs = self.apply_temperature_scaling(y_pred_proba)
+            self.calibration_scores['temperature_scaling'] = self._evaluate_calibration(y_true, calibrated_probs)
+            
+            logger.info(f"Temperature Scaling 학습 완료 - 온도: {self.temperature:.3f}, 편향: {self.temperature_bias:.3f}")
+            logger.info(f"Temperature Scaling 점수: {self.calibration_scores['temperature_scaling']:.4f}")
+            
+        except Exception as e:
+            logger.error(f"Temperature Scaling 학습 실패: {e}")
+            self.temperature = 1.0
+            self.temperature_bias = 0.0
+    
+    def fit_bias_correction(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
+        """편향 보정 학습"""
+        try:
+            logger.info("편향 보정 학습 시작")
+            
+            actual_ctr = y_true.mean()
+            predicted_ctr = y_pred_proba.mean()
+            
+            # 가법적 편향 보정
+            self.bias_correction = actual_ctr - predicted_ctr
+            
+            # 승법적 편향 보정
+            if predicted_ctr > 0:
+                self.multiplicative_correction = actual_ctr / predicted_ctr
+            else:
+                self.multiplicative_correction = 1.0
+            
+            logger.info(f"편향 보정 완료 - 가법: {self.bias_correction:.4f}, 승법: {self.multiplicative_correction:.4f}")
+            
+        except Exception as e:
+            logger.error(f"편향 보정 학습 실패: {e}")
+    
+    def fit(self, y_true: np.ndarray, y_pred_proba: np.ndarray, methods: List[str] = None):
+        """전체 캘리브레이션 학습"""
+        logger.info("CTR 캘리브레이션 학습 시작")
+        
+        if methods is None:
+            methods = ['platt_scaling', 'isotonic_regression', 'temperature_scaling', 'bias_correction']
+        
+        y_true = np.asarray(y_true)
+        y_pred_proba = np.asarray(y_pred_proba)
+        
+        # 입력 검증
+        if len(y_true) != len(y_pred_proba):
+            raise ValueError("y_true와 y_pred_proba의 길이가 다릅니다")
+        
+        if len(y_true) == 0:
+            raise ValueError("빈 배열은 처리할 수 없습니다")
+        
+        # 각 방법별 학습
+        if 'platt_scaling' in methods:
+            self.fit_platt_scaling(y_true, y_pred_proba)
+        
+        if 'isotonic_regression' in methods:
+            self.fit_isotonic_regression(y_true, y_pred_proba)
+        
+        if 'temperature_scaling' in methods:
+            self.fit_temperature_scaling(y_true, y_pred_proba)
+        
+        if 'bias_correction' in methods:
+            self.fit_bias_correction(y_true, y_pred_proba)
+        
+        # 최적 방법 선택
+        if self.calibration_scores:
+            self.best_method = max(self.calibration_scores, key=self.calibration_scores.get)
+            logger.info(f"최적 캘리브레이션 방법: {self.best_method} (점수: {self.calibration_scores[self.best_method]:.4f})")
+        else:
+            self.best_method = 'bias_correction'
+            logger.warning("모든 캘리브레이션 방법이 실패했습니다. 편향 보정만 사용")
+        
+        self.is_fitted = True
+        logger.info("CTR 캘리브레이션 학습 완료")
+    
+    def apply_platt_scaling(self, y_pred_proba: np.ndarray) -> np.ndarray:
+        """Platt Scaling 적용"""
+        if self.platt_scaler is None:
+            return y_pred_proba
+        
+        try:
+            pred_clipped = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
+            logits = np.log(pred_clipped / (1 - pred_clipped))
+            calibrated_probs = self.platt_scaler.predict_proba(logits.reshape(-1, 1))[:, 1]
+            return np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
+        except Exception as e:
+            logger.warning(f"Platt Scaling 적용 실패: {e}")
+            return y_pred_proba
+    
+    def apply_isotonic_regression(self, y_pred_proba: np.ndarray) -> np.ndarray:
+        """Isotonic Regression 적용"""
+        if self.isotonic_regressor is None:
+            return y_pred_proba
+        
+        try:
+            calibrated_probs = self.isotonic_regressor.predict(y_pred_proba)
+            return np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
+        except Exception as e:
+            logger.warning(f"Isotonic Regression 적용 실패: {e}")
+            return y_pred_proba
+    
+    def apply_temperature_scaling(self, y_pred_proba: np.ndarray) -> np.ndarray:
+        """Temperature Scaling 적용"""
+        try:
+            pred_clipped = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
+            logits = np.log(pred_clipped / (1 - pred_clipped))
+            
+            adjusted_logits = (logits + self.temperature_bias) / self.temperature
+            calibrated_probs = 1 / (1 + np.exp(-adjusted_logits))
+            
+            return np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
+        except Exception as e:
+            logger.warning(f"Temperature Scaling 적용 실패: {e}")
+            return y_pred_proba
+    
+    def apply_bias_correction(self, y_pred_proba: np.ndarray) -> np.ndarray:
+        """편향 보정 적용"""
+        try:
+            # 승법적 보정 후 가법적 보정
+            corrected = y_pred_proba * self.multiplicative_correction + self.bias_correction
+            return np.clip(corrected, 1e-15, 1 - 1e-15)
+        except Exception as e:
+            logger.warning(f"편향 보정 적용 실패: {e}")
+            return y_pred_proba
+    
+    def predict(self, y_pred_proba: np.ndarray, method: str = None) -> np.ndarray:
+        """캘리브레이션된 예측 반환"""
+        if not self.is_fitted:
+            logger.warning("캘리브레이션이 학습되지 않았습니다. 원본 예측을 반환합니다.")
+            return y_pred_proba
+        
+        if method is None:
+            method = self.best_method
+        
+        y_pred_proba = np.asarray(y_pred_proba)
+        
+        if method == 'platt_scaling':
+            return self.apply_platt_scaling(y_pred_proba)
+        elif method == 'isotonic_regression':
+            return self.apply_isotonic_regression(y_pred_proba)
+        elif method == 'temperature_scaling':
+            return self.apply_temperature_scaling(y_pred_proba)
+        elif method == 'bias_correction':
+            return self.apply_bias_correction(y_pred_proba)
+        else:
+            logger.warning(f"알 수 없는 캘리브레이션 방법: {method}. 편향 보정 사용")
+            return self.apply_bias_correction(y_pred_proba)
+    
+    def _evaluate_calibration(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
+        """캘리브레이션 품질 평가"""
+        try:
+            # Expected Calibration Error (ECE) 계산
+            ece = self._calculate_ece(y_true, y_pred_proba)
+            
+            # CTR 정렬도
+            actual_ctr = y_true.mean()
+            predicted_ctr = y_pred_proba.mean()
+            ctr_alignment = 1.0 - abs(actual_ctr - predicted_ctr) / max(actual_ctr, 0.001)
+            
+            # 종합 점수 (낮은 ECE와 높은 CTR 정렬도가 좋음)
+            calibration_score = 0.6 * (1.0 - ece) + 0.4 * ctr_alignment
+            
+            return max(0.0, calibration_score)
+            
+        except Exception as e:
+            logger.warning(f"캘리브레이션 평가 실패: {e}")
+            return 0.0
+    
+    def _calculate_ece(self, y_true: np.ndarray, y_pred_proba: np.ndarray, n_bins: int = 10) -> float:
+        """Expected Calibration Error 계산"""
+        try:
+            bin_boundaries = np.linspace(0, 1, n_bins + 1)
+            bin_lowers = bin_boundaries[:-1]
+            bin_uppers = bin_boundaries[1:]
+            
+            ece = 0
+            for bin_lower, bin_upper in zip(bin_lowers, bin_uppers):
+                in_bin = (y_pred_proba > bin_lower) & (y_pred_proba <= bin_upper)
+                prop_in_bin = in_bin.mean()
+                
+                if prop_in_bin > 0:
+                    accuracy_in_bin = y_true[in_bin].mean()
+                    avg_confidence_in_bin = y_pred_proba[in_bin].mean()
+                    
+                    ece += abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
+            
+            return ece
+            
+        except Exception as e:
+            logger.warning(f"ECE 계산 실패: {e}")
+            return 1.0
+    
+    def get_calibration_summary(self) -> Dict[str, Any]:
+        """캘리브레이션 요약 정보"""
+        return {
+            'is_fitted': self.is_fitted,
+            'best_method': self.best_method,
+            'calibration_scores': self.calibration_scores.copy(),
+            'temperature': self.temperature,
+            'temperature_bias': self.temperature_bias,
+            'bias_correction': self.bias_correction,
+            'multiplicative_correction': self.multiplicative_correction,
+            'available_methods': list(self.calibration_scores.keys())
+        }
+
 class MemoryMonitor:
     """메모리 모니터링 클래스 - 64GB RAM 환경 최적화"""
     
-    def __init__(self, max_memory_gb: float = 50.0):  # 45GB → 50GB로 증가
+    def __init__(self, max_memory_gb: float = 50.0):
         self.monitoring_enabled = PSUTIL_AVAILABLE
         self.max_memory_gb = max_memory_gb
         self.lock = threading.Lock()
         self._last_check_time = 0
-        self._check_interval = 3.0  # 5초 → 3초로 변경 (더 빈번한 체크)
+        self._check_interval = 3.0
         
         # RTX 4060 Ti + 64GB RAM 환경에 최적화된 메모리 임계값
-        self.warning_threshold = max_memory_gb * 0.70   # 35GB
-        self.critical_threshold = max_memory_gb * 0.80  # 40GB  
-        self.abort_threshold = max_memory_gb * 0.90     # 45GB (기존 28.5GB → 45GB로 대폭 증가)
+        self.warning_threshold = max_memory_gb * 0.70
+        self.critical_threshold = max_memory_gb * 0.80
+        self.abort_threshold = max_memory_gb * 0.90
         
         logger.info(f"메모리 임계값 - 경고: {self.warning_threshold:.1f}GB, "
                    f"위험: {self.critical_threshold:.1f}GB, 중단: {self.abort_threshold:.1f}GB")
@@ -167,13 +508,12 @@ class MemoryMonitor:
             return 40.0
     
     def check_memory_pressure(self) -> bool:
-        """메모리 압박 상태 확인 - 완화된 기준"""
+        """메모리 압박 상태 확인"""
         try:
             usage = self.get_memory_usage()
             available = self.get_available_memory()
             
-            # 더 관대한 기준 (64GB 환경 고려)
-            return usage > self.critical_threshold or available < 12.0  # 8GB → 12GB로 완화
+            return usage > self.critical_threshold or available < 12.0
         except Exception:
             return False
     
@@ -211,36 +551,31 @@ class MemoryMonitor:
             }
     
     def force_memory_cleanup(self, intensive: bool = False):
-        """강화된 메모리 정리 - RTX 4060 Ti 환경 최적화"""
+        """강화된 메모리 정리"""
         try:
             initial_memory = self.get_memory_usage()
             
-            # 정리 강도 결정
-            cleanup_rounds = 12 if intensive else 8  # 강도 증가
+            cleanup_rounds = 12 if intensive else 8
             sleep_time = 0.3 if intensive else 0.2
             
-            # 강화된 가비지 컬렉션
             for i in range(cleanup_rounds):
                 collected = gc.collect()
                 if sleep_time > 0:
                     time.sleep(sleep_time)
                 
-                # 중간 체크
                 if i % 4 == 0:
                     current_memory = self.get_memory_usage()
-                    if initial_memory - current_memory > 3.0:  # 3GB 이상 해제되면 조기 종료
+                    if initial_memory - current_memory > 3.0:
                         break
             
-            # RTX 4060 Ti GPU 메모리 정리
             if TORCH_AVAILABLE and torch.cuda.is_available():
                 try:
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
-                    torch.cuda.empty_cache()  # 두 번 실행
+                    torch.cuda.empty_cache()
                 except Exception:
                     pass
             
-            # Windows 메모리 정리 강화
             try:
                 import ctypes
                 if hasattr(ctypes, 'windll'):
@@ -264,7 +599,7 @@ class MemoryMonitor:
             return 0.0
 
 class BaseModel(ABC):
-    """모든 모델의 기본 클래스 - 메모리 최적화 강화"""
+    """모든 모델의 기본 클래스 - 캘리브레이션 지원"""
     
     def __init__(self, name: str, params: Dict[str, Any] = None):
         self.name = name
@@ -276,7 +611,6 @@ class BaseModel(ABC):
         self.is_calibrated = False
         self.prediction_diversity_threshold = 1000
         
-        # 메모리 모니터링 추가
         self.memory_monitor = MemoryMonitor()
         
     @abstractmethod
@@ -295,25 +629,58 @@ class BaseModel(ABC):
         proba = self.predict_proba(X)
         return (proba >= 0.5).astype(int)
     
+    def apply_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, 
+                         method: str = 'auto', cv_folds: int = 3):
+        """캘리브레이션 적용"""
+        try:
+            logger.info(f"{self.name} 모델에 캘리브레이션 적용: {method}")
+            
+            if not self.is_fitted:
+                logger.warning("모델이 학습되지 않아 캘리브레이션을 건너뜁니다")
+                return
+            
+            # 검증 데이터에 대한 예측
+            raw_predictions = self.predict_proba_raw(X_val)
+            
+            # 캘리브레이터 생성 및 학습
+            self.calibrator = CTRCalibrator()
+            self.calibrator.fit(y_val.values, raw_predictions)
+            
+            self.is_calibrated = True
+            
+            # 캘리브레이션 효과 확인
+            calibrated_predictions = self.calibrator.predict(raw_predictions)
+            
+            original_ctr = raw_predictions.mean()
+            calibrated_ctr = calibrated_predictions.mean()
+            actual_ctr = y_val.mean()
+            
+            logger.info(f"캘리브레이션 결과 - 원본 CTR: {original_ctr:.4f}, "
+                       f"캘리브레이션 CTR: {calibrated_ctr:.4f}, 실제 CTR: {actual_ctr:.4f}")
+            
+        except Exception as e:
+            logger.error(f"캘리브레이션 적용 실패: {e}")
+            self.is_calibrated = False
+    
+    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
+        """캘리브레이션 이전 원본 예측 - 하위클래스에서 구현"""
+        return self.predict_proba(X)
+    
     def _memory_safe_fit(self, fit_function, *args, **kwargs):
         """메모리 안전 학습 래퍼"""
         try:
-            # 학습 전 메모리 상태 확인
             memory_status = self.memory_monitor.get_memory_status()
             
             if memory_status['should_cleanup']:
                 logger.info(f"{self.name}: 학습 전 메모리 정리 수행")
                 self.memory_monitor.force_memory_cleanup()
             
-            # 메모리 압박 시 파라미터 조정
             if memory_status['should_simplify']:
                 logger.warning(f"{self.name}: 메모리 부족으로 단순화 모드 활성화")
                 self._simplify_for_memory()
             
-            # 실제 학습 수행
             result = fit_function(*args, **kwargs)
             
-            # 학습 후 메모리 정리
             self.memory_monitor.force_memory_cleanup()
             
             return result
@@ -326,20 +693,18 @@ class BaseModel(ABC):
     def _memory_safe_predict(self, predict_function, X: pd.DataFrame, batch_size: int = None) -> np.ndarray:
         """메모리 안전 예측 래퍼"""
         try:
-            # 메모리 상태에 따른 배치 크기 조정
             memory_status = self.memory_monitor.get_memory_status()
             
             if batch_size is None:
                 if memory_status['level'] == 'abort':
-                    batch_size = 1000   # 극도로 작은 배치
+                    batch_size = 1000
                 elif memory_status['level'] == 'critical':
                     batch_size = 5000
                 elif memory_status['level'] == 'warning':
                     batch_size = 15000
                 else:
-                    batch_size = 50000  # 기본값
+                    batch_size = 50000
             
-            # 배치별 예측
             n_samples = len(X)
             predictions = []
             
@@ -351,18 +716,15 @@ class BaseModel(ABC):
                     batch_pred = predict_function(batch_X)
                     predictions.append(batch_pred)
                     
-                    # 메모리 정리 (매 5배치마다)
                     if (i // batch_size) % 5 == 0:
                         gc.collect()
                     
-                    # 메모리 압박 체크
                     if self.memory_monitor.check_memory_pressure():
                         logger.warning(f"{self.name}: 예측 중 메모리 압박 감지, 정리 수행")
                         self.memory_monitor.force_memory_cleanup()
                         
                 except Exception as e:
                     logger.warning(f"{self.name}: 배치 {i}-{batch_end} 예측 실패: {e}")
-                    # 실패한 배치는 기본값으로 채움
                     batch_size_actual = batch_end - i
                     predictions.append(np.full(batch_size_actual, 0.0201))
             
@@ -374,15 +736,14 @@ class BaseModel(ABC):
     
     def _simplify_for_memory(self):
         """메모리 부족 시 모델 파라미터 단순화"""
-        pass  # 하위 클래스에서 구현
+        pass
     
     def _ensure_feature_consistency(self, X: pd.DataFrame) -> pd.DataFrame:
-        """피처 일관성 보장 - 메모리 효율적"""
+        """피처 일관성 보장"""
         if self.feature_names is None:
             return X
         
         try:
-            # 메모리 효율적인 방식으로 처리
             missing_features = [f for f in self.feature_names if f not in X.columns]
             if missing_features:
                 for feature in missing_features:
@@ -413,7 +774,7 @@ class BaseModel(ABC):
             return predictions
 
 class HighPerformanceLightGBMModel(BaseModel):
-    """메모리 최적화된 고성능 LightGBM 모델"""
+    """메모리 최적화된 고성능 LightGBM 모델 - 캘리브레이션 지원"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not LIGHTGBM_AVAILABLE:
@@ -423,26 +784,26 @@ class HighPerformanceLightGBMModel(BaseModel):
             'objective': 'binary',
             'metric': 'binary_logloss',
             'boosting_type': 'gbdt',
-            'num_leaves': 255,      # 511 → 255로 축소 (메모리 절약)
-            'learning_rate': 0.03,  # 0.025 → 0.03으로 증가 (빠른 수렴)
+            'num_leaves': 255,
+            'learning_rate': 0.03,
             'feature_fraction': 0.8,
             'bagging_fraction': 0.75,
             'bagging_freq': 5,
-            'min_child_samples': 200,  # 300 → 200으로 축소
-            'min_child_weight': 10,    # 15 → 10으로 축소
-            'lambda_l1': 2.0,          # 3.0 → 2.0으로 축소
-            'lambda_l2': 2.0,          # 3.0 → 2.0으로 축소
-            'max_depth': 12,           # 15 → 12로 축소
+            'min_child_samples': 200,
+            'min_child_weight': 10,
+            'lambda_l1': 2.0,
+            'lambda_l2': 2.0,
+            'max_depth': 12,
             'verbose': -1,
             'random_state': Config.RANDOM_STATE,
-            'n_estimators': 2000,      # 4000 → 2000으로 축소 (메모리 절약)
+            'n_estimators': 2000,
             'early_stopping_rounds': 150,
             'scale_pos_weight': 49.0,
             'force_row_wise': True,
             'max_bin': 255,
-            'num_threads': 8,          # 12 → 8로 축소 (안정성)
+            'num_threads': 8,
             'device_type': 'cpu',
-            'min_data_in_leaf': 100,   # 120 → 100으로 축소
+            'min_data_in_leaf': 100,
             'feature_fraction_bynode': 0.8
         }
         
@@ -455,11 +816,11 @@ class HighPerformanceLightGBMModel(BaseModel):
     def _simplify_for_memory(self):
         """메모리 부족 시 파라미터 단순화"""
         self.params.update({
-            'num_leaves': 127,         # 255 → 127로 축소
-            'max_depth': 8,            # 12 → 8로 축소
-            'n_estimators': 1000,      # 2000 → 1000으로 축소
-            'min_child_samples': 300,  # 200 → 300으로 증가
-            'num_threads': 4           # 8 → 4로 축소
+            'num_leaves': 127,
+            'max_depth': 8,
+            'n_estimators': 1000,
+            'min_child_samples': 300,
+            'num_threads': 4
         })
         logger.info(f"{self.name}: 메모리 절약을 위해 파라미터 단순화")
     
@@ -471,25 +832,22 @@ class HighPerformanceLightGBMModel(BaseModel):
         def _fit_internal():
             self.feature_names = list(X_train.columns)
             
-            # 결측치 처리
             X_train_clean = X_train.fillna(0)
             if X_val is not None:
                 X_val_clean = X_val.fillna(0)
             else:
                 X_val_clean = None
             
-            # 데이터 타입 최적화
             for col in X_train_clean.columns:
                 if X_train_clean[col].dtype in ['float64']:
                     X_train_clean[col] = X_train_clean[col].astype('float32')
                 if X_val_clean is not None and col in X_val_clean.columns and X_val_clean[col].dtype in ['float64']:
                     X_val_clean[col] = X_val_clean[col].astype('float32')
             
-            # LightGBM 데이터셋 생성 - 메모리 효율적
             train_data = lgb.Dataset(
                 X_train_clean, 
                 label=y_train, 
-                free_raw_data=True,  # 메모리 절약
+                free_raw_data=True,
                 feature_name=list(X_train_clean.columns)
             )
             
@@ -501,28 +859,25 @@ class HighPerformanceLightGBMModel(BaseModel):
                     X_val_clean, 
                     label=y_val, 
                     reference=train_data, 
-                    free_raw_data=True,  # 메모리 절약
+                    free_raw_data=True,
                     feature_name=list(X_val_clean.columns)
                 )
                 valid_sets.append(val_data)
                 valid_names.append('valid')
             
-            # 콜백 설정
             callbacks = []
             early_stopping = self.params.get('early_stopping_rounds', 150)
             if early_stopping:
                 callbacks.append(lgb.early_stopping(early_stopping, verbose=False))
             
-            # 메모리 모니터링 콜백 추가
             def memory_callback(env):
-                if env.iteration % 50 == 0:  # 50 이터레이션마다 체크
+                if env.iteration % 50 == 0:
                     if self.memory_monitor.check_memory_pressure():
                         logger.warning("학습 중 메모리 압박 감지")
                         self.memory_monitor.force_memory_cleanup()
             
             callbacks.append(memory_callback)
             
-            # 모델 학습
             self.model = lgb.train(
                 self.params,
                 train_data,
@@ -533,7 +888,6 @@ class HighPerformanceLightGBMModel(BaseModel):
             
             self.is_fitted = True
             
-            # 학습 데이터 해제
             del train_data
             if 'val_data' in locals():
                 del val_data
@@ -546,7 +900,7 @@ class HighPerformanceLightGBMModel(BaseModel):
         return self._memory_safe_fit(_fit_internal)
     
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """메모리 안전한 원본 예측"""
+        """캘리브레이션 이전 원본 예측"""
         if not self.is_fitted:
             raise ValueError("모델이 학습되지 않았습니다.")
         
@@ -554,7 +908,6 @@ class HighPerformanceLightGBMModel(BaseModel):
             X_processed = self._ensure_feature_consistency(batch_X)
             X_processed = X_processed.fillna(0)
             
-            # 데이터 타입 최적화
             for col in X_processed.columns:
                 if X_processed[col].dtype in ['float64']:
                     X_processed[col] = X_processed[col].astype('float32')
@@ -568,59 +921,56 @@ class HighPerformanceLightGBMModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X)
     
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """메모리 안전한 확률 예측"""
+        """캘리브레이션이 적용된 확률 예측"""
         raw_pred = self.predict_proba_raw(X)
         
         if self.is_calibrated and self.calibrator is not None:
             try:
-                calibrated_pred = self.calibrator.predict_proba(raw_pred.reshape(-1, 1))[:, 1]
+                calibrated_pred = self.calibrator.predict(raw_pred)
                 return np.clip(calibrated_pred, 1e-15, 1 - 1e-15)
             except:
                 pass
         
         return raw_pred
 
+# 다른 모델들도 동일한 패턴으로 구현 (XGBoost, CatBoost, DeepCTR, Logistic)
 class HighPerformanceXGBoostModel(BaseModel):
-    """메모리 최적화된 고성능 XGBoost 모델"""
+    """메모리 최적화된 고성능 XGBoost 모델 - 캘리브레이션 지원"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
             raise ImportError("XGBoost가 설치되지 않았습니다.")
         
-        # RTX 4060 Ti 환경에 최적화된 기본 파라미터
         default_params = {
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
-            'tree_method': 'hist',         # GPU 대신 CPU 사용 (메모리 절약)
-            'max_depth': 8,                # 10 → 8로 축소
-            'learning_rate': 0.03,         # 0.025 → 0.03으로 증가
+            'tree_method': 'hist',
+            'max_depth': 8,
+            'learning_rate': 0.03,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
             'colsample_bylevel': 0.8,
             'colsample_bynode': 0.8,
-            'min_child_weight': 15,        # 20 → 15로 축소
-            'reg_alpha': 2.0,              # 3.0 → 2.0으로 축소
-            'reg_lambda': 2.0,             # 3.0 → 2.0으로 축소
+            'min_child_weight': 15,
+            'reg_alpha': 2.0,
+            'reg_lambda': 2.0,
             'scale_pos_weight': 49.0,
             'random_state': Config.RANDOM_STATE,
-            'n_estimators': 2000,          # 4000 → 2000으로 축소
+            'n_estimators': 2000,
             'early_stopping_rounds': 150,
             'max_bin': 255,
-            'nthread': 8,                  # 12 → 8로 축소
+            'nthread': 8,
             'grow_policy': 'lossguide',
-            'max_leaves': 255,             # 511 → 255로 축소
+            'max_leaves': 255,
             'gamma': 0.1
         }
         
-        # GPU 사용 가능 시에만 GPU 설정 적용
         if rtx_4060ti_detected and TORCH_AVAILABLE:
             try:
-                # GPU 메모리 테스트
                 test_tensor = torch.zeros(1000, 1000).cuda()
                 del test_tensor
                 torch.cuda.empty_cache()
                 
-                # 메모리 상태 확인
                 memory_monitor_temp = MemoryMonitor()
                 memory_status = memory_monitor_temp.get_memory_status()
                 
@@ -646,14 +996,13 @@ class HighPerformanceXGBoostModel(BaseModel):
     def _simplify_for_memory(self):
         """메모리 부족 시 파라미터 단순화"""
         self.params.update({
-            'max_depth': 6,               # 8 → 6으로 축소
-            'max_leaves': 127,            # 255 → 127로 축소
-            'n_estimators': 1000,         # 2000 → 1000으로 축소
-            'min_child_weight': 20,       # 15 → 20으로 증가
-            'nthread': 4,                 # 8 → 4로 축소
-            'tree_method': 'hist',        # GPU 비활성화
+            'max_depth': 6,
+            'max_leaves': 127,
+            'n_estimators': 1000,
+            'min_child_weight': 20,
+            'nthread': 4,
+            'tree_method': 'hist',
         })
-        # GPU 관련 설정 제거
         self.params.pop('gpu_id', None)
         self.params.pop('predictor', None)
         logger.info(f"{self.name}: 메모리 절약을 위해 파라미터 단순화 및 CPU 모드 전환")
@@ -666,7 +1015,6 @@ class HighPerformanceXGBoostModel(BaseModel):
         def _fit_internal():
             self.feature_names = list(X_train.columns)
             
-            # 결측치 처리 및 데이터 타입 최적화
             X_train_clean = X_train.fillna(0)
             if X_val is not None:
                 X_val_clean = X_val.fillna(0)
@@ -679,7 +1027,6 @@ class HighPerformanceXGBoostModel(BaseModel):
                 if X_val_clean is not None and col in X_val_clean.columns and X_val_clean[col].dtype in ['float64']:
                     X_val_clean[col] = X_val_clean[col].astype('float32')
             
-            # DMatrix 생성 - 메모리 효율적
             dtrain = xgb.DMatrix(
                 X_train_clean, 
                 label=y_train, 
@@ -701,7 +1048,6 @@ class HighPerformanceXGBoostModel(BaseModel):
             
             early_stopping = self.params.get('early_stopping_rounds', 150)
             
-            # 모델 학습
             self.model = xgb.train(
                 self.params,
                 dtrain,
@@ -712,7 +1058,6 @@ class HighPerformanceXGBoostModel(BaseModel):
             
             self.is_fitted = True
             
-            # 학습 데이터 해제
             del dtrain
             if dval is not None:
                 del dval
@@ -725,7 +1070,7 @@ class HighPerformanceXGBoostModel(BaseModel):
         return self._memory_safe_fit(_fit_internal)
     
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """메모리 안전한 원본 예측"""
+        """캘리브레이션 이전 원본 예측"""
         if not self.is_fitted:
             raise ValueError("모델이 학습되지 않았습니다.")
         
@@ -748,7 +1093,7 @@ class HighPerformanceXGBoostModel(BaseModel):
             else:
                 proba = self.model.predict(dtest)
             
-            del dtest  # 즉시 해제
+            del dtest
             
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
             return self._enhance_prediction_diversity(proba)
@@ -756,12 +1101,12 @@ class HighPerformanceXGBoostModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X)
     
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """메모리 안전한 확률 예측"""
+        """캘리브레이션이 적용된 확률 예측"""
         raw_pred = self.predict_proba_raw(X)
         
         if self.is_calibrated and self.calibrator is not None:
             try:
-                calibrated_pred = self.calibrator.predict_proba(raw_pred.reshape(-1, 1))[:, 1]
+                calibrated_pred = self.calibrator.predict(raw_pred)
                 return np.clip(calibrated_pred, 1e-15, 1 - 1e-15)
             except:
                 pass
@@ -769,38 +1114,36 @@ class HighPerformanceXGBoostModel(BaseModel):
         return raw_pred
 
 class HighPerformanceCatBoostModel(BaseModel):
-    """메모리 최적화된 고성능 CatBoost 모델"""
+    """메모리 최적화된 고성능 CatBoost 모델 - 캘리브레이션 지원"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not CATBOOST_AVAILABLE:
             raise ImportError("CatBoost가 설치되지 않았습니다.")
         
-        # 메모리 효율적인 기본 파라미터
         default_params = {
             'loss_function': 'Logloss',
             'eval_metric': 'Logloss',
-            'task_type': 'CPU',           # 메모리 절약을 위해 CPU 기본값
-            'depth': 8,                   # 10 → 8로 축소
-            'learning_rate': 0.03,        # 0.025 → 0.03으로 증가
-            'l2_leaf_reg': 10,            # 15 → 10으로 축소
-            'iterations': 2000,           # 4000 → 2000으로 축소
+            'task_type': 'CPU',
+            'depth': 8,
+            'learning_rate': 0.03,
+            'l2_leaf_reg': 10,
+            'iterations': 2000,
             'random_seed': Config.RANDOM_STATE,
             'verbose': False,
             'auto_class_weights': 'Balanced',
-            'max_ctr_complexity': 2,      # 3 → 2로 축소
-            'thread_count': 8,            # 12 → 8로 축소
+            'max_ctr_complexity': 2,
+            'thread_count': 8,
             'bootstrap_type': 'Bayesian',
             'bagging_temperature': 1.0,
-            'leaf_estimation_iterations': 8,  # 12 → 8로 축소
+            'leaf_estimation_iterations': 8,
             'leaf_estimation_method': 'Newton',
             'grow_policy': 'Lossguide',
-            'max_leaves': 255,            # 511 → 255로 축소
-            'min_data_in_leaf': 80,       # 120 → 80으로 축소
+            'max_leaves': 255,
+            'min_data_in_leaf': 80,
             'od_wait': 150,
             'od_type': 'IncToDec'
         }
         
-        # GPU 사용 조건 - 메모리 상태가 양호할 때만
         if rtx_4060ti_detected and TORCH_AVAILABLE:
             try:
                 memory_monitor_temp = MemoryMonitor()
@@ -824,7 +1167,6 @@ class HighPerformanceCatBoostModel(BaseModel):
         super().__init__("MemoryOptimizedCatBoost", default_params)
         self.prediction_diversity_threshold = 1500
         
-        # 모델 초기화 시 충돌 파라미터 제거
         init_params = {k: v for k, v in self.params.items() 
                       if k not in ['early_stopping_rounds', 'use_best_model', 'eval_set', 'od_wait', 'od_type']}
         
@@ -845,17 +1187,16 @@ class HighPerformanceCatBoostModel(BaseModel):
     def _simplify_for_memory(self):
         """메모리 부족 시 파라미터 단순화"""
         self.params.update({
-            'depth': 6,                   # 8 → 6으로 축소
-            'max_leaves': 127,            # 255 → 127로 축소
-            'iterations': 1000,           # 2000 → 1000으로 축소
-            'min_data_in_leaf': 100,      # 80 → 100으로 증가
-            'thread_count': 4,            # 8 → 4로 축소
-            'task_type': 'CPU',           # GPU 비활성화
-            'max_ctr_complexity': 1       # 2 → 1로 축소
+            'depth': 6,
+            'max_leaves': 127,
+            'iterations': 1000,
+            'min_data_in_leaf': 100,
+            'thread_count': 4,
+            'task_type': 'CPU',
+            'max_ctr_complexity': 1
         })
         self.params.pop('devices', None)
         
-        # 모델 재초기화
         init_params = {k: v for k, v in self.params.items() 
                       if k not in ['early_stopping_rounds', 'use_best_model', 'eval_set', 'od_wait', 'od_type']}
         self.model = CatBoostClassifier(**init_params)
@@ -869,7 +1210,6 @@ class HighPerformanceCatBoostModel(BaseModel):
         def _fit_internal():
             self.feature_names = list(X_train.columns)
             
-            # 결측치 처리 및 데이터 타입 최적화
             X_train_clean = X_train.fillna(0)
             if X_val is not None:
                 X_val_clean = X_val.fillna(0)
@@ -882,7 +1222,6 @@ class HighPerformanceCatBoostModel(BaseModel):
                 if X_val_clean is not None and col in X_val_clean.columns and X_val_clean[col].dtype in ['float64']:
                     X_val_clean[col] = X_val_clean[col].astype('float32')
             
-            # 학습 파라미터 설정
             fit_params = {
                 'X': X_train_clean,
                 'y': y_train,
@@ -902,11 +1241,10 @@ class HighPerformanceCatBoostModel(BaseModel):
                 
                 if 'gpu' in str(e).lower() or 'cuda' in str(e).lower():
                     logger.info("GPU 학습 실패, CPU로 재시도")
-                    self._simplify_for_memory()  # CPU 모드로 전환
+                    self._simplify_for_memory()
                     self.model.fit(**fit_params)
                     self.is_fitted = True
                 else:
-                    # 단순화된 학습 시도
                     logger.info("단순화된 학습 시도")
                     simple_fit_params = {
                         'X': X_train_clean,
@@ -916,7 +1254,6 @@ class HighPerformanceCatBoostModel(BaseModel):
                     self.model.fit(**simple_fit_params)
                     self.is_fitted = True
             
-            # 학습 데이터 해제
             del X_train_clean
             if X_val_clean is not None:
                 del X_val_clean
@@ -926,7 +1263,7 @@ class HighPerformanceCatBoostModel(BaseModel):
         return self._memory_safe_fit(_fit_internal)
     
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """메모리 안전한 원본 예측"""
+        """캘리브레이션 이전 원본 예측"""
         if not self.is_fitted:
             raise ValueError("모델이 학습되지 않았습니다.")
         
@@ -948,20 +1285,121 @@ class HighPerformanceCatBoostModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X)
     
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """메모리 안전한 확률 예측"""
+        """캘리브레이션이 적용된 확률 예측"""
         raw_pred = self.predict_proba_raw(X)
         
         if self.is_calibrated and self.calibrator is not None:
             try:
-                calibrated_pred = self.calibrator.predict_proba(raw_pred.reshape(-1, 1))[:, 1]
+                calibrated_pred = self.calibrator.predict(raw_pred)
                 return np.clip(calibrated_pred, 1e-15, 1 - 1e-15)
             except:
                 pass
         
         return raw_pred
 
+# DeepCTR과 Logistic 모델도 유사하게 구현...
+class HighPerformanceLogisticModel(BaseModel):
+    """메모리 최적화된 고성능 로지스틱 회귀 모델 - 캘리브레이션 지원"""
+    
+    def __init__(self, params: Dict[str, Any] = None):
+        if not SKLEARN_AVAILABLE:
+            raise ImportError("scikit-learn이 설치되지 않았습니다.")
+            
+        default_params = {
+            'C': 0.1,
+            'max_iter': 2000,
+            'random_state': Config.RANDOM_STATE,
+            'class_weight': 'balanced',
+            'solver': 'liblinear',
+            'penalty': 'l2',
+            'tol': 1e-4,
+            'fit_intercept': True
+        }
+        if params:
+            default_params.update(params)
+        super().__init__("MemoryOptimizedLogisticRegression", default_params)
+        
+        self.model = LogisticRegression(**self.params)
+        self.prediction_diversity_threshold = 1000
+    
+    def _simplify_for_memory(self):
+        """메모리 부족 시 파라미터 단순화"""
+        self.params.update({
+            'C': 1.0,
+            'max_iter': 500,
+            'tol': 1e-3,
+            'solver': 'liblinear'
+        })
+        self.model = LogisticRegression(**self.params)
+        logger.info(f"{self.name}: 메모리 절약을 위해 파라미터 단순화")
+    
+    def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
+            X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
+        """메모리 최적화된 로지스틱 회귀 모델 학습"""
+        logger.info(f"{self.name} 모델 학습 시작 (데이터: {len(X_train):,})")
+        
+        def _fit_internal():
+            self.feature_names = list(X_train.columns)
+            
+            X_train_clean = X_train.fillna(0)
+            
+            for col in X_train_clean.columns:
+                if X_train_clean[col].dtype in ['float64']:
+                    X_train_clean[col] = X_train_clean[col].astype('float32')
+            
+            try:
+                self.model.fit(X_train_clean, y_train)
+                self.is_fitted = True
+            except Exception as e:
+                logger.warning(f"로지스틱 회귀 학습 실패: {e}")
+                self._simplify_for_memory()
+                self.model.fit(X_train_clean, y_train)
+                self.is_fitted = True
+            
+            del X_train_clean
+            
+            return self
+        
+        return self._memory_safe_fit(_fit_internal)
+    
+    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
+        """캘리브레이션 이전 원본 예측"""
+        if not self.is_fitted:
+            raise ValueError("모델이 학습되지 않았습니다.")
+        
+        def _predict_internal(batch_X):
+            X_processed = self._ensure_feature_consistency(batch_X)
+            X_processed = X_processed.fillna(0)
+            
+            for col in X_processed.columns:
+                if X_processed[col].dtype in ['float64']:
+                    X_processed[col] = X_processed[col].astype('float32')
+            
+            proba = self.model.predict_proba(X_processed)
+            if proba.ndim == 2:
+                proba = proba[:, 1]
+            
+            proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            return self._enhance_prediction_diversity(proba)
+        
+        return self._memory_safe_predict(_predict_internal, X)
+    
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        """캘리브레이션이 적용된 확률 예측"""
+        raw_pred = self.predict_proba_raw(X)
+        
+        if self.is_calibrated and self.calibrator is not None:
+            try:
+                calibrated_pred = self.calibrator.predict(raw_pred)
+                return np.clip(calibrated_pred, 1e-15, 1 - 1e-15)
+            except:
+                pass
+        
+        return raw_pred
+
+# RTX4060Ti 최적화 DeepCTR 모델도 구현 (기존과 동일하되 캘리브레이션 지원 추가)
 class RTX4060TiOptimizedDeepCTRModel(BaseModel):
-    """RTX 4060 Ti 16GB + 64GB RAM 최적화 DeepCTR 모델"""
+    """RTX 4060 Ti 16GB + 64GB RAM 최적화 DeepCTR 모델 - 캘리브레이션 지원"""
     
     def __init__(self, input_dim: int, params: Dict[str, Any] = None):
         if not TORCH_AVAILABLE:
@@ -969,12 +1407,10 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
             
         BaseModel.__init__(self, "RTX4060TiOptimizedDeepCTR", params)
         
-        # 메모리 상태에 따른 동적 파라미터 설정
         memory_monitor_temp = MemoryMonitor()
         memory_status = memory_monitor_temp.get_memory_status()
         
         if memory_status['level'] in ['critical', 'abort']:
-            # 메모리 부족 시 단순화된 설정
             default_params = {
                 'hidden_dims': [256, 128, 64],
                 'dropout_rate': 0.3,
@@ -989,7 +1425,6 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
                 'use_focal_loss': False
             }
         elif memory_status['level'] == 'warning':
-            # 적당한 설정
             default_params = {
                 'hidden_dims': [512, 256, 128, 64],
                 'dropout_rate': 0.25,
@@ -1004,7 +1439,6 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
                 'use_focal_loss': True
             }
         else:
-            # 메모리 여유 시 고성능 설정
             default_params = {
                 'hidden_dims': [1024, 512, 256, 128, 64] if rtx_4060ti_detected else [512, 256, 128, 64],
                 'dropout_rate': 0.2,
@@ -1032,17 +1466,14 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
         self.gpu_available = False
         self.rtx_optimized = False
         
-        # GPU 설정 - 메모리 상태 고려
         if TORCH_AVAILABLE and memory_status['level'] not in ['abort']:
             try:
                 if torch.cuda.is_available():
-                    # GPU 메모리 테스트
                     test_tensor = torch.zeros(1000, 1000).cuda()
                     test_result = test_tensor.sum().item()
                     del test_tensor
                     torch.cuda.empty_cache()
                     
-                    # RTX 4060 Ti 최적화 설정
                     torch.cuda.set_per_process_memory_fraction(0.8)
                     torch.backends.cudnn.benchmark = True
                     torch.backends.cuda.matmul.allow_tf32 = True
@@ -1060,12 +1491,10 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
                 self.device = 'cpu'
                 self.gpu_available = False
         
-        # 네트워크 및 기타 컴포넌트 초기화
         try:
             self.network = self._build_memory_optimized_network()
             self.optimizer = None
             
-            # Mixed Precision 설정 - 메모리 상태 고려
             self.scaler = None
             if AMP_AVAILABLE and self.gpu_available and memory_status['level'] == 'normal':
                 try:
@@ -1074,7 +1503,6 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
                 except:
                     self.scaler = None
             
-            # 손실 함수 설정
             if TORCH_AVAILABLE:
                 pos_weight = torch.tensor([49.0], device=self.device)
                 self.criterion = self._get_memory_efficient_loss(pos_weight)
@@ -1112,16 +1540,12 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
             layers = []
             prev_dim = self.input_dim
             
-            # 입력 정규화
             if use_batch_norm:
                 layers.append(nn.BatchNorm1d(prev_dim))
             
-            # 히든 레이어 구성
             for i, hidden_dim in enumerate(hidden_dims):
-                # 선형 레이어
                 linear = nn.Linear(prev_dim, hidden_dim)
                 
-                # 가중치 초기화 최적화
                 if self.rtx_optimized:
                     nn.init.kaiming_uniform_(linear.weight, mode='fan_in', nonlinearity='relu')
                 else:
@@ -1130,11 +1554,9 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
                 
                 layers.append(linear)
                 
-                # 배치 정규화
                 if use_batch_norm:
                     layers.append(nn.BatchNorm1d(hidden_dim))
                 
-                # 활성화 함수
                 if activation == 'relu':
                     layers.append(nn.ReLU(inplace=True))
                 elif activation == 'gelu':
@@ -1142,21 +1564,17 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
                 elif activation == 'swish':
                     layers.append(nn.SiLU(inplace=True))
                 
-                # 잔차 연결 (메모리 허용 시)
                 if use_residual and i > 0 and prev_dim == hidden_dim and hidden_dim >= 128:
                     layers.append(ResidualConnection(hidden_dim))
                 
-                # 셀프 어텐션 (메모리가 충분할 때만)
                 if use_attention and i == len(hidden_dims) // 2 and hidden_dim >= 256:
                     layers.append(SelfAttentionLayer(hidden_dim))
                 
-                # 드롭아웃
                 if i < len(hidden_dims) - 1:
                     layers.append(nn.Dropout(dropout_rate))
                 
                 prev_dim = hidden_dim
             
-            # 출력 레이어
             output_layer = nn.Linear(prev_dim, 1)
             if self.rtx_optimized:
                 nn.init.kaiming_uniform_(output_layer.weight, gain=0.1)
@@ -1168,7 +1586,6 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
             
             network = nn.Sequential(*layers)
             
-            # JIT 컴파일 (RTX 최적화 및 메모리 여유 시)
             if self.rtx_optimized and self.memory_monitor.get_memory_status()['level'] == 'normal':
                 try:
                     network = torch.jit.script(network)
@@ -1203,22 +1620,20 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
     def _simplify_for_memory(self):
         """메모리 부족 시 모델 단순화"""
         self.params.update({
-            'hidden_dims': [256, 128, 64],    # 레이어 축소
-            'batch_size': 256,                # 배치 크기 축소
-            'epochs': 20,                     # 에포크 축소
-            'use_attention': False,           # 어텐션 비활성화
-            'use_residual': False,            # 잔차 연결 비활성화
-            'dropout_rate': 0.4               # 드롭아웃 증가
+            'hidden_dims': [256, 128, 64],
+            'batch_size': 256,
+            'epochs': 20,
+            'use_attention': False,
+            'use_residual': False,
+            'dropout_rate': 0.4
         })
         
-        # GPU 비활성화
         if self.gpu_available:
             self.device = 'cpu'
             self.gpu_available = False
             self.rtx_optimized = False
             self.scaler = None
         
-        # 네트워크 재구성
         self.network = self._build_memory_optimized_network()
         pos_weight = torch.tensor([49.0], device=self.device)
         self.criterion = self._get_memory_efficient_loss(pos_weight)
@@ -1280,7 +1695,6 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
         def _fit_internal():
             self.feature_names = list(X_train.columns)
             
-            # 데이터 전처리
             X_train_clean = X_train.fillna(0)
             if X_val is not None:
                 X_val_clean = X_val.fillna(0)
@@ -1291,7 +1705,6 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
             if X_val_clean is not None:
                 X_val_values = X_val_clean.values.astype('float32')
             
-            # 정규화
             mean = X_train_values.mean(axis=0, keepdims=True)
             std = X_train_values.std(axis=0, keepdims=True) + 1e-8
             X_train_values = (X_train_values - mean) / std
@@ -1300,7 +1713,6 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
             
             self.normalization_params = {'mean': mean, 'std': std}
             
-            # 옵티마이저 설정
             self.optimizer = optim.AdamW(
                 self.parameters(), 
                 lr=self.params['learning_rate'],
@@ -1309,7 +1721,6 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
                 betas=(0.9, 0.999)
             )
             
-            # 스케줄러 설정 (메모리 효율적)
             total_steps = len(X_train) // self.params['batch_size'] * self.params['epochs']
             scheduler = optim.lr_scheduler.OneCycleLR(
                 self.optimizer,
@@ -1319,13 +1730,11 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
                 anneal_strategy='cos'
             )
             
-            # 데이터 로더 생성 (메모리 효율적)
             batch_size = self.params['batch_size']
             
             X_train_tensor = torch.FloatTensor(X_train_values)
             y_train_tensor = torch.FloatTensor(y_train.values)
             
-            # GPU 메모리가 부족하면 CPU에서 처리
             try:
                 X_train_tensor = X_train_tensor.to(self.device)
                 y_train_tensor = y_train_tensor.to(self.device)
@@ -1347,8 +1756,8 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
                 train_dataset, 
                 batch_size=batch_size, 
                 shuffle=True,
-                num_workers=0,  # 메모리 절약
-                pin_memory=self.gpu_available and batch_size <= 1024,  # 큰 배치에서는 비활성화
+                num_workers=0,
+                pin_memory=self.gpu_available and batch_size <= 1024,
                 drop_last=True
             )
             
@@ -1361,16 +1770,14 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
                     val_dataset, 
                     batch_size=batch_size,
                     num_workers=0,
-                    pin_memory=False  # 검증에서는 비활성화
+                    pin_memory=False
                 )
             
-            # 학습 루프
             best_val_loss = float('inf')
             patience_counter = 0
             max_epochs = self.params['epochs']
             
             for epoch in range(max_epochs):
-                # 메모리 상태 체크
                 memory_status = self.memory_monitor.get_memory_status()
                 if memory_status['should_cleanup']:
                     self.memory_monitor.force_memory_cleanup()
@@ -1379,7 +1786,7 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
                     logger.warning("학습 중 메모리 부족 감지, 모델 단순화")
                     self._simplify_for_memory()
                     self._already_simplified = True
-                    break  # 단순화 후 학습 재시작 필요
+                    break
                 
                 self.train()
                 train_loss = 0.0
@@ -1418,7 +1825,6 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
                         train_loss += loss.item()
                         batch_count += 1
                         
-                        # 메모리 정리 (RTX 최적화)
                         if self.rtx_optimized and batch_idx % 50 == 0:
                             torch.cuda.empty_cache()
                         
@@ -1438,7 +1844,6 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
                     
                 train_loss /= batch_count
                 
-                # 검증
                 val_loss = train_loss
                 if val_loader is not None:
                     self.eval()
@@ -1479,11 +1884,9 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
                             logger.info(f"DeepCTR 조기 종료: epoch {epoch + 1}")
                             break
                 
-                # 로깅 (메모리 효율적)
                 if (epoch + 1) % 10 == 0:
                     logger.info(f"DeepCTR Epoch {epoch + 1}: Train Loss = {train_loss:.4f}, Val Loss = {val_loss:.4f}")
                 
-                # 메모리 정리
                 if self.rtx_optimized and (epoch + 1) % 5 == 0:
                     torch.cuda.empty_cache()
                 elif (epoch + 1) % 10 == 0:
@@ -1492,7 +1895,6 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
             self.is_fitted = True
             logger.info(f"{self.name} 모델 학습 완료")
             
-            # 학습 데이터 해제
             del X_train_tensor, y_train_tensor
             if val_loader is not None:
                 del X_val_tensor, y_val_tensor
@@ -1505,7 +1907,7 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
         return self._memory_safe_fit(_fit_internal)
     
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """메모리 안전한 원본 예측"""
+        """캘리브레이션 이전 원본 예측"""
         if not self.is_fitted:
             raise ValueError("모델이 학습되지 않았습니다.")
         
@@ -1524,10 +1926,8 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
                 X_tensor = torch.FloatTensor(X_values).to(self.device)
             except RuntimeError as e:
                 if 'out of memory' in str(e).lower():
-                    # GPU 메모리 부족 시 CPU로 처리
                     logger.warning("예측 중 GPU 메모리 부족, CPU 사용")
                     X_tensor = torch.FloatTensor(X_values).to('cpu')
-                    # 모델도 임시로 CPU로 이동
                     self.network = self.network.to('cpu')
                     self.temperature = self.temperature.to('cpu')
                 else:
@@ -1552,7 +1952,6 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
                     else:
                         raise
             
-            # 모델을 원래 디바이스로 복원
             if self.device != 'cpu':
                 try:
                     self.network = self.network.to(self.device)
@@ -1566,13 +1965,13 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X, batch_size=1024)
     
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """메모리 안전한 확률 예측"""
+        """캘리브레이션이 적용된 확률 예측"""
         try:
             raw_pred = self.predict_proba_raw(X)
             
             if self.is_calibrated and self.calibrator is not None:
                 try:
-                    calibrated_pred = self.calibrator.predict_proba(raw_pred.reshape(-1, 1))[:, 1]
+                    calibrated_pred = self.calibrator.predict(raw_pred)
                     return np.clip(calibrated_pred, 1e-15, 1 - 1e-15)
                 except:
                     pass
@@ -1580,112 +1979,8 @@ class RTX4060TiOptimizedDeepCTRModel(BaseModel):
             return raw_pred
             
         finally:
-            # 예측 후 GPU 메모리 정리
             if self.rtx_optimized:
                 torch.cuda.empty_cache()
-
-class HighPerformanceLogisticModel(BaseModel):
-    """메모리 최적화된 고성능 로지스틱 회귀 모델"""
-    
-    def __init__(self, params: Dict[str, Any] = None):
-        if not SKLEARN_AVAILABLE:
-            raise ImportError("scikit-learn이 설치되지 않았습니다.")
-            
-        default_params = {
-            'C': 0.1,                     # 0.05 → 0.1로 증가 (단순화)
-            'max_iter': 2000,             # 3000 → 2000으로 축소
-            'random_state': Config.RANDOM_STATE,
-            'class_weight': 'balanced',
-            'solver': 'liblinear',
-            'penalty': 'l2',
-            'tol': 1e-4,                  # 1e-6 → 1e-4로 완화
-            'fit_intercept': True
-        }
-        if params:
-            default_params.update(params)
-        super().__init__("MemoryOptimizedLogisticRegression", default_params)
-        
-        self.model = LogisticRegression(**self.params)
-        self.prediction_diversity_threshold = 1000
-    
-    def _simplify_for_memory(self):
-        """메모리 부족 시 파라미터 단순화"""
-        self.params.update({
-            'C': 1.0,                     # 정규화 완화
-            'max_iter': 500,              # 2000 → 500으로 축소
-            'tol': 1e-3,                  # 1e-4 → 1e-3으로 완화
-            'solver': 'liblinear'         # 메모리 효율적인 solver 강제
-        })
-        self.model = LogisticRegression(**self.params)
-        logger.info(f"{self.name}: 메모리 절약을 위해 파라미터 단순화")
-    
-    def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
-            X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """메모리 최적화된 로지스틱 회귀 모델 학습"""
-        logger.info(f"{self.name} 모델 학습 시작 (데이터: {len(X_train):,})")
-        
-        def _fit_internal():
-            self.feature_names = list(X_train.columns)
-            
-            # 데이터 전처리
-            X_train_clean = X_train.fillna(0)
-            
-            # 데이터 타입 최적화
-            for col in X_train_clean.columns:
-                if X_train_clean[col].dtype in ['float64']:
-                    X_train_clean[col] = X_train_clean[col].astype('float32')
-            
-            try:
-                self.model.fit(X_train_clean, y_train)
-                self.is_fitted = True
-            except Exception as e:
-                logger.warning(f"로지스틱 회귀 학습 실패: {e}")
-                # 더 단순한 설정으로 재시도
-                self._simplify_for_memory()
-                self.model.fit(X_train_clean, y_train)
-                self.is_fitted = True
-            
-            # 학습 데이터 해제
-            del X_train_clean
-            
-            return self
-        
-        return self._memory_safe_fit(_fit_internal)
-    
-    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """메모리 안전한 원본 예측"""
-        if not self.is_fitted:
-            raise ValueError("모델이 학습되지 않았습니다.")
-        
-        def _predict_internal(batch_X):
-            X_processed = self._ensure_feature_consistency(batch_X)
-            X_processed = X_processed.fillna(0)
-            
-            for col in X_processed.columns:
-                if X_processed[col].dtype in ['float64']:
-                    X_processed[col] = X_processed[col].astype('float32')
-            
-            proba = self.model.predict_proba(X_processed)
-            if proba.ndim == 2:
-                proba = proba[:, 1]
-            
-            proba = np.clip(proba, 1e-15, 1 - 1e-15)
-            return self._enhance_prediction_diversity(proba)
-        
-        return self._memory_safe_predict(_predict_internal, X)
-    
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """메모리 안전한 확률 예측"""
-        raw_pred = self.predict_proba_raw(X)
-        
-        if self.is_calibrated and self.calibrator is not None:
-            try:
-                calibrated_pred = self.calibrator.predict_proba(raw_pred.reshape(-1, 1))[:, 1]
-                return np.clip(calibrated_pred, 1e-15, 1 - 1e-15)
-            except:
-                pass
-        
-        return raw_pred
 
 # PyTorch 보조 클래스들
 if TORCH_AVAILABLE:
@@ -1700,7 +1995,7 @@ if TORCH_AVAILABLE:
     
     class SelfAttentionLayer(nn.Module):
         """셀프 어텐션 레이어"""
-        def __init__(self, dim, num_heads=4):  # 8 → 4로 축소 (메모리 절약)
+        def __init__(self, dim, num_heads=4):
             super().__init__()
             self.attention = nn.MultiheadAttention(dim, num_heads, batch_first=True)
             self.layer_norm = nn.LayerNorm(dim)
@@ -1714,7 +2009,6 @@ if TORCH_AVAILABLE:
                 x = self.layer_norm(x + attn_out)
             except RuntimeError as e:
                 if 'out of memory' in str(e).lower():
-                    # 메모리 부족 시 어텐션 스킵
                     pass
                 else:
                     raise
@@ -1770,7 +2064,6 @@ class ModelFactory:
         """사용 가능한 모델 타입 리스트"""
         available = []
         
-        # 기본적으로 항상 사용 가능
         available.append('logistic')
         
         if LIGHTGBM_AVAILABLE:
@@ -1792,24 +2085,22 @@ class ModelFactory:
     @staticmethod
     def get_memory_optimized_models() -> List[str]:
         """메모리 최적화된 모델 우선순위 리스트"""
-        # 메모리 효율성 순서로 정렬
         memory_efficient_order = []
         
-        # 메모리 효율성이 높은 순서
         if SKLEARN_AVAILABLE:
-            memory_efficient_order.append('logistic')      # 가장 효율적
+            memory_efficient_order.append('logistic')
         
         if LIGHTGBM_AVAILABLE:
-            memory_efficient_order.append('lightgbm')      # 매우 효율적
+            memory_efficient_order.append('lightgbm')
         
         if XGBOOST_AVAILABLE:
-            memory_efficient_order.append('xgboost')       # 보통 효율적
+            memory_efficient_order.append('xgboost')
         
         if CATBOOST_AVAILABLE:
-            memory_efficient_order.append('catboost')      # 보통 효율적
+            memory_efficient_order.append('catboost')
         
         if TORCH_AVAILABLE:
-            memory_efficient_order.append('deepctr')       # 메모리 집약적
+            memory_efficient_order.append('deepctr')
         
         return memory_efficient_order
     
@@ -1820,16 +2111,13 @@ class ModelFactory:
         memory_status = memory_monitor.get_memory_status()
         
         if memory_status['level'] == 'abort':
-            # 극도로 메모리 부족
             return ['logistic']
         elif memory_status['level'] == 'critical':
-            # 심각한 메모리 부족
             models = ['logistic']
             if LIGHTGBM_AVAILABLE:
                 models.append('lightgbm')
             return models
         elif memory_status['level'] == 'warning':
-            # 메모리 압박
             models = ['logistic']
             if LIGHTGBM_AVAILABLE:
                 models.append('lightgbm')
@@ -1837,7 +2125,6 @@ class ModelFactory:
                 models.append('xgboost')
             return models
         else:
-            # 메모리 여유
             return ModelFactory.get_available_models()
 
 # 기존 코드와의 호환성을 위한 별칭
