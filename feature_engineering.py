@@ -28,7 +28,6 @@ def get_safe_logger(name: str):
     """안전한 로거 생성"""
     logger = logging.getLogger(name)
     if not logger.handlers:
-        # 핸들러가 없으면 기본 콘솔 핸들러만 추가
         handler = logging.StreamHandler()
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         handler.setFormatter(formatter)
@@ -38,19 +37,19 @@ def get_safe_logger(name: str):
 
 logger = get_safe_logger(__name__)
 
-class SafeMemoryMonitor:
-    """안전한 메모리 모니터링 클래스"""
+class MemoryMonitor:
+    """메모리 모니터링 클래스"""
     
     def __init__(self):
         self.monitoring_enabled = PSUTIL_AVAILABLE
         self.lock = threading.Lock()
         self._last_check_time = 0
-        self._check_interval = 5.0  # 5초 간격
+        self._check_interval = 10.0
     
     def get_memory_usage(self) -> float:
-        """현재 메모리 사용량 (GB) - 안전한 버전"""
+        """현재 메모리 사용량 (GB)"""
         if not self.monitoring_enabled:
-            return 2.0  # 기본값
+            return 2.0
         
         try:
             with self.lock:
@@ -67,29 +66,28 @@ class SafeMemoryMonitor:
             return 2.0
     
     def get_available_memory(self) -> float:
-        """사용 가능한 메모리 (GB) - 안전한 버전"""
+        """사용 가능한 메모리 (GB)"""
         if not self.monitoring_enabled:
-            return 40.0  # 기본값
+            return 20.0
         
         try:
             with self.lock:
                 return psutil.virtual_memory().available / (1024**3)
         except Exception:
-            return 40.0
+            return 20.0
     
     def check_memory_pressure(self) -> bool:
         """메모리 압박 상태 확인"""
         try:
             available = self.get_available_memory()
-            return available < 8.0
+            return available < 5.0
         except Exception:
             return False
     
     def force_memory_cleanup(self):
-        """강제 메모리 정리 - 안전한 버전"""
+        """강제 메모리 정리"""
         try:
             gc.collect()
-            # Windows 전용 메모리 정리
             try:
                 import ctypes
                 if hasattr(ctypes, 'windll'):
@@ -100,25 +98,23 @@ class SafeMemoryMonitor:
             pass
     
     def log_memory_status(self, context: str = ""):
-        """메모리 상태 로깅 - 안전한 버전"""
+        """메모리 상태 로깅"""
         try:
             usage = self.get_memory_usage()
             available = self.get_available_memory()
             
             if context:
                 logger.info(f"메모리 상태 [{context}]: 사용 {usage:.1f}GB, 가용 {available:.1f}GB")
-            else:
-                logger.debug(f"메모리: 사용 {usage:.1f}GB, 가용 {available:.1f}GB")
                 
         except Exception as e:
             logger.warning(f"메모리 상태 로깅 실패: {e}")
 
 class CTRFeatureEngineer:
-    """CTR 예측에 특화된 피처 엔지니어링 클래스 - 대용량 데이터 최적화"""
+    """CTR 예측에 특화된 피처 엔지니어링 클래스"""
     
     def __init__(self, config: Config = Config):
         self.config = config
-        self.memory_monitor = SafeMemoryMonitor()
+        self.memory_monitor = MemoryMonitor()
         
         # 피처 엔지니어링 상태
         self.target_encoders = {}
@@ -134,7 +130,7 @@ class CTRFeatureEngineer:
         self.original_feature_order = []
         
         # 메모리 효율성 설정
-        self.memory_efficient_mode = False
+        self.memory_efficient_mode = True
         self.freq_encoders = {}
         self.statistical_features = {}
         
@@ -158,15 +154,12 @@ class CTRFeatureEngineer:
                           train_df: pd.DataFrame, 
                           test_df: pd.DataFrame, 
                           target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """CTR 특화 피처 엔지니어링 파이프라인 - 대용량 데이터 최적화"""
+        """CTR 특화 피처 엔지니어링 파이프라인"""
         logger.info("=== CTR 피처 엔지니어링 시작 ===")
         
         try:
             # 초기 설정
             self._initialize_processing(train_df, test_df, target_col)
-            
-            # 메모리 효율 모드 자동 설정
-            self._auto_configure_memory_mode(train_df)
             
             # 1. 기본 데이터 준비
             X_train, X_test, y_train = self._prepare_basic_data(train_df, test_df, target_col)
@@ -177,8 +170,9 @@ class CTRFeatureEngineer:
             # 3. 데이터 타입 통일
             X_train, X_test = self._unify_data_types_safe(X_train, X_test)
             
-            # 4. ID 피처 처리
-            X_train, X_test = self._process_id_features_safe(X_train, X_test)
+            # 4. ID 피처 처리 (메모리 효율 모드에서는 간단하게)
+            if not self.memory_efficient_mode:
+                X_train, X_test = self._process_id_features_safe(X_train, X_test)
             
             # 5. 기본 피처 정리
             X_train, X_test = self._clean_basic_features_safe(X_train, X_test)
@@ -186,29 +180,17 @@ class CTRFeatureEngineer:
             # 6. 범주형 피처 인코딩
             X_train, X_test = self._encode_categorical_features_safe(X_train, X_test, y_train)
             
-            # 7. 수치형 피처 생성
-            X_train, X_test = self._create_numeric_features_safe(X_train, X_test)
+            # 7. 수치형 피처 생성 (메모리 효율 모드에서는 제한적)
+            if not self.memory_efficient_mode:
+                X_train, X_test = self._create_numeric_features_safe(X_train, X_test)
             
             # 8. CTR 특화 피처 생성
             X_train, X_test = self._create_ctr_features_safe(X_train, X_test, y_train)
             
-            # 9. 통계적 피처 생성
-            X_train, X_test = self._create_statistical_features_safe(X_train, X_test)
-            
-            # 10. 상호작용 피처 생성 (메모리 허용 시)
-            if self._should_create_interaction_features():
-                X_train, X_test = self._create_interaction_features_safe(X_train, X_test)
-            
-            # 11. 피처 선택 및 정리
-            X_train, X_test = self._feature_selection_and_cleanup_safe(X_train, X_test, y_train)
-            
-            # 12. 최종 데이터 정리
+            # 9. 최종 데이터 정리
             X_train, X_test = self._final_data_cleanup_safe(X_train, X_test)
             
-            # 13. 피처 순서 일관성 보장
-            X_train, X_test = self._ensure_consistent_feature_order_safe(X_train, X_test)
-            
-            # 14. 처리 완료
+            # 10. 처리 완료
             self._finalize_processing(X_train, X_test)
             
             logger.info(f"=== CTR 피처 엔지니어링 완료: {X_train.shape} ===")
@@ -233,23 +215,6 @@ class CTRFeatureEngineer:
             
         except Exception as e:
             logger.warning(f"초기화 실패: {e}")
-    
-    def _auto_configure_memory_mode(self, train_df: pd.DataFrame):
-        """메모리 모드 자동 설정"""
-        try:
-            available_memory = self.memory_monitor.get_available_memory()
-            data_size = len(train_df)
-            
-            # 메모리 기준으로 효율 모드 결정
-            if available_memory < 15 or data_size > 5000000:
-                self.set_memory_efficient_mode(True)
-                logger.info(f"자동 메모리 효율 모드: 가용메모리 {available_memory:.1f}GB, 데이터 {data_size:,}행")
-            else:
-                self.set_memory_efficient_mode(False)
-                
-        except Exception as e:
-            logger.warning(f"메모리 모드 설정 실패: {e}")
-            self.set_memory_efficient_mode(True)
     
     def _prepare_basic_data(self, train_df: pd.DataFrame, test_df: pd.DataFrame, 
                            target_col: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
@@ -283,7 +248,7 @@ class CTRFeatureEngineer:
             raise
     
     def _classify_columns_safe(self, df: pd.DataFrame):
-        """컬럼 타입 분류 - 안전한 버전"""
+        """컬럼 타입 분류"""
         logger.info("컬럼 타입 분류 시작")
         
         self.numeric_columns = []
@@ -304,7 +269,7 @@ class CTRFeatureEngineer:
                         # 수치형 컬럼 중 고유값 비율로 ID 여부 판단
                         try:
                             unique_ratio = df[col].nunique() / len(df)
-                            if unique_ratio > 0.95:
+                            if unique_ratio > 0.9:
                                 self.id_columns.append(col)
                             else:
                                 self.numeric_columns.append(col)
@@ -315,7 +280,6 @@ class CTRFeatureEngineer:
                         
                 except Exception as e:
                     logger.warning(f"컬럼 {col} 분류 실패: {e}")
-                    # 기본적으로 수치형으로 분류
                     self.numeric_columns.append(col)
             
             logger.info(f"컬럼 분류 완료 - 수치형: {len(self.numeric_columns)}, "
@@ -323,13 +287,12 @@ class CTRFeatureEngineer:
             
         except Exception as e:
             logger.error(f"컬럼 분류 전체 실패: {e}")
-            # 모든 컬럼을 수치형으로 처리
             self.numeric_columns = list(df.columns)
             self.categorical_columns = []
             self.id_columns = []
     
     def _unify_data_types_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """데이터 타입 통일 - 안전한 버전"""
+        """데이터 타입 통일"""
         logger.info("데이터 타입 통일 시작")
         
         try:
@@ -374,12 +337,11 @@ class CTRFeatureEngineer:
                     processed_count += 1
                     
                     # 주기적 메모리 정리
-                    if processed_count % 20 == 0:
+                    if processed_count % 50 == 0:
                         self.memory_monitor.force_memory_cleanup()
                         
                 except Exception as e:
                     logger.warning(f"컬럼 {col} 타입 통일 실패: {e}")
-                    # 안전한 기본값으로 설정
                     try:
                         X_train[col] = 0.0
                         X_test[col] = 0.0
@@ -400,7 +362,7 @@ class CTRFeatureEngineer:
                 try:
                     if pd.isna(x):
                         return 0
-                    str_val = str(x)[:50]  # 길이 제한
+                    str_val = str(x)[:50]
                     return hash(str_val) % 100000
                 except Exception:
                     return 0
@@ -441,14 +403,14 @@ class CTRFeatureEngineer:
             return train_col.astype('float32'), test_col.astype('float32')
     
     def _process_id_features_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """ID 피처 처리 - 안전한 버전"""
+        """ID 피처 처리"""
         if not self.id_columns:
             return X_train, X_test
         
         logger.info(f"ID 피처 처리 시작: {len(self.id_columns)}개")
         
         try:
-            for col in self.id_columns:
+            for col in self.id_columns[:5]:  # 최대 5개만 처리
                 if col not in X_train.columns:
                     continue
                 
@@ -461,20 +423,6 @@ class CTRFeatureEngineer:
                     X_test[f'{col}_hash'] = test_hash
                     self.generated_features.append(f'{col}_hash')
                     
-                    # 빈도 피처 생성 (메모리 효율 모드가 아닐 때)
-                    if not self.memory_efficient_mode:
-                        try:
-                            value_counts = X_train[col].astype(str).value_counts()
-                            train_freq = X_train[col].astype(str).map(value_counts).fillna(0).astype('int16')
-                            test_freq = X_test[col].astype(str).map(value_counts).fillna(0).astype('int16')
-                            
-                            X_train[f'{col}_freq'] = train_freq
-                            X_test[f'{col}_freq'] = test_freq
-                            self.generated_features.append(f'{col}_freq')
-                            
-                        except Exception as e:
-                            logger.warning(f"{col} 빈도 피처 생성 실패: {e}")
-                    
                 except Exception as e:
                     logger.warning(f"ID 피처 {col} 처리 실패: {e}")
             
@@ -485,7 +433,7 @@ class CTRFeatureEngineer:
                 X_test = X_test.drop(columns=existing_id_cols)
                 self.removed_columns.extend(existing_id_cols)
             
-            logger.info(f"ID 피처 처리 완료: {len(self.generated_features)}개 생성")
+            logger.info(f"ID 피처 처리 완료: {len([f for f in self.generated_features if 'hash' in f])}개 생성")
             
         except Exception as e:
             logger.error(f"ID 피처 처리 실패: {e}")
@@ -493,7 +441,7 @@ class CTRFeatureEngineer:
         return X_train, X_test
     
     def _clean_basic_features_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """기본 피처 정리 - 안전한 버전"""
+        """기본 피처 정리"""
         logger.info("기본 피처 정리 시작")
         
         try:
@@ -519,8 +467,7 @@ class CTRFeatureEngineer:
     
     def _encode_categorical_features_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame, 
                                         y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """범주형 피처 인코딩 - 안전한 버전"""
-        # 현재 범주형 컬럼 재식별
+        """범주형 피처 인코딩"""
         current_categorical_cols = []
         for col in X_train.columns:
             try:
@@ -544,7 +491,7 @@ class CTRFeatureEngineer:
                     
                     # 고카디널리티 처리
                     unique_count = len(train_values.unique())
-                    max_categories = 50 if self.memory_efficient_mode else 200
+                    max_categories = 20 if self.memory_efficient_mode else 100
                     
                     if unique_count > max_categories:
                         top_categories = train_values.value_counts().head(max_categories).index
@@ -586,27 +533,6 @@ class CTRFeatureEngineer:
                     except Exception as e:
                         logger.warning(f"{col} 빈도 인코딩 실패: {e}")
                     
-                    # 타겟 인코딩 (조건부)
-                    if (not self.memory_efficient_mode and 
-                        len(X_train) > 10000 and 
-                        unique_count < 1000):
-                        try:
-                            target_encoding = self._safe_target_encoding(train_values, y_train)
-                            X_train[f'{col}_target'] = target_encoding.astype('float32')
-                            
-                            target_map = pd.DataFrame({
-                                'category': train_values,
-                                'target': target_encoding
-                            }).groupby('category')['target'].mean().to_dict()
-                            
-                            global_mean = y_train.mean()
-                            X_test[f'{col}_target'] = test_values.map(target_map).fillna(global_mean).astype('float32')
-                            
-                            self.generated_features.append(f'{col}_target')
-                            
-                        except Exception as e:
-                            logger.warning(f"{col} 타겟 인코딩 실패: {e}")
-                    
                 except Exception as e:
                     logger.warning(f"범주형 피처 {col} 처리 실패: {e}")
                 
@@ -623,46 +549,15 @@ class CTRFeatureEngineer:
             except Exception as e:
                 logger.warning(f"범주형 컬럼 제거 실패: {e}")
             
-            logger.info(f"범주형 피처 인코딩 완료: {len([f for f in self.generated_features if 'encoded' in f or 'freq' in f or 'target' in f])}개 생성")
+            logger.info(f"범주형 피처 인코딩 완료: {len([f for f in self.generated_features if 'encoded' in f or 'freq' in f])}개 생성")
             
         except Exception as e:
             logger.error(f"범주형 피처 인코딩 실패: {e}")
         
         return X_train, X_test
     
-    def _safe_target_encoding(self, series: pd.Series, target: pd.Series, smoothing: int = 100) -> pd.Series:
-        """안전한 타겟 인코딩"""
-        try:
-            from sklearn.model_selection import KFold
-            
-            result = np.zeros(len(series))
-            kf = KFold(n_splits=3, shuffle=True, random_state=42)
-            global_mean = target.mean()
-            
-            for train_idx, val_idx in kf.split(series):
-                try:
-                    train_stats = pd.DataFrame({
-                        'category': series.iloc[train_idx],
-                        'target': target.iloc[train_idx]
-                    }).groupby('category').agg({'target': ['mean', 'count']})
-                    
-                    train_stats.columns = ['mean', 'count']
-                    
-                    smoothed_means = ((train_stats['mean'] * train_stats['count'] + global_mean * smoothing) / 
-                                    (train_stats['count'] + smoothing))
-                    
-                    result[val_idx] = series.iloc[val_idx].map(smoothed_means).fillna(global_mean)
-                    
-                except Exception:
-                    result[val_idx] = global_mean
-            
-            return pd.Series(result, index=series.index)
-            
-        except Exception:
-            return pd.Series([target.mean()] * len(series), index=series.index)
-    
     def _create_numeric_features_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """수치형 피처 생성 - 안전한 버전"""
+        """수치형 피처 생성"""
         logger.info("수치형 피처 생성 시작")
         
         try:
@@ -674,11 +569,10 @@ class CTRFeatureEngineer:
                 return X_train, X_test
             
             feature_count = 0
-            max_features = 15 if self.memory_efficient_mode else 30
+            max_features = 5 if self.memory_efficient_mode else 15
             
-            for col in current_numeric_cols[:max_features]:
+            for col in current_numeric_cols[:10]:
                 try:
-                    # 메모리 압박 확인
                     if self.memory_monitor.check_memory_pressure():
                         logger.warning("메모리 압박으로 수치형 피처 생성 중단")
                         break
@@ -687,7 +581,7 @@ class CTRFeatureEngineer:
                     train_positive = (X_train[col] > 0) & X_train[col].notna()
                     test_positive = (X_test[col] > 0) & X_test[col].notna()
                     
-                    if train_positive.sum() > len(X_train) * 0.7:
+                    if train_positive.sum() > len(X_train) * 0.8:
                         try:
                             X_train[f'{col}_log'] = np.where(train_positive, np.log1p(X_train[col]), 0).astype('float32')
                             X_test[f'{col}_log'] = np.where(test_positive, np.log1p(X_test[col]), 0).astype('float32')
@@ -697,37 +591,8 @@ class CTRFeatureEngineer:
                         except Exception as e:
                             logger.warning(f"{col} 로그 변환 실패: {e}")
                     
-                    # 제곱근 변환
-                    if feature_count < max_features and train_positive.sum() > len(X_train) * 0.8:
-                        try:
-                            X_train[f'{col}_sqrt'] = np.where(train_positive, np.sqrt(X_train[col]), 0).astype('float32')
-                            X_test[f'{col}_sqrt'] = np.where(test_positive, np.sqrt(X_test[col]), 0).astype('float32')
-                            
-                            self.generated_features.append(f'{col}_sqrt')
-                            feature_count += 1
-                        except Exception as e:
-                            logger.warning(f"{col} 제곱근 변환 실패: {e}")
-                    
-                    # 이상치 플래그
-                    if feature_count < max_features:
-                        try:
-                            q1, q3 = X_train[col].quantile([0.25, 0.75])
-                            iqr = q3 - q1
-                            if iqr > 0:
-                                lower_bound = q1 - 1.5 * iqr
-                                upper_bound = q3 + 1.5 * iqr
-                                
-                                X_train[f'{col}_outlier'] = ((X_train[col] < lower_bound) | (X_train[col] > upper_bound)).astype('int8')
-                                X_test[f'{col}_outlier'] = ((X_test[col] < lower_bound) | (X_test[col] > upper_bound)).astype('int8')
-                                
-                                self.generated_features.append(f'{col}_outlier')
-                                feature_count += 1
-                        except Exception as e:
-                            logger.warning(f"{col} 이상치 플래그 생성 실패: {e}")
-                    
-                    # 주기적 메모리 정리
-                    if feature_count % 5 == 0:
-                        self.memory_monitor.force_memory_cleanup()
+                    if feature_count >= max_features:
+                        break
                         
                 except Exception as e:
                     logger.warning(f"수치형 피처 {col} 처리 실패: {e}")
@@ -741,7 +606,7 @@ class CTRFeatureEngineer:
     
     def _create_ctr_features_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame, 
                                 y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """CTR 특화 피처 생성 - 안전한 버전"""
+        """CTR 특화 피처 생성"""
         logger.info("CTR 특화 피처 생성 시작")
         
         try:
@@ -752,12 +617,9 @@ class CTRFeatureEngineer:
             X_train['position_quartile'] = pd.qcut(X_train.index, q=4, labels=[0, 1, 2, 3]).astype('int8')
             X_test['position_quartile'] = pd.qcut(X_test.index, q=4, labels=[0, 1, 2, 3]).astype('int8')
             
-            X_train['session_position'] = (X_train.index % 100).astype('int8')
-            X_test['session_position'] = (X_test.index % 100).astype('int8')
+            self.generated_features.extend(['time_index', 'position_quartile'])
             
-            self.generated_features.extend(['time_index', 'position_quartile', 'session_position'])
-            
-            # 피처 그룹별 통계 (메모리 효율 모드가 아닐 때)
+            # 피처 그룹별 통계 (메모리 효율 모드가 아닐 때만)
             if not self.memory_efficient_mode:
                 try:
                     self._create_feature_group_statistics(X_train, X_test)
@@ -776,8 +638,7 @@ class CTRFeatureEngineer:
         feature_groups = {
             'feat_e': [col for col in X_train.columns if col.startswith('feat_e')],
             'feat_d': [col for col in X_train.columns if col.startswith('feat_d')],
-            'feat_c': [col for col in X_train.columns if col.startswith('feat_c')],
-            'feat_b': [col for col in X_train.columns if col.startswith('feat_b')]
+            'feat_c': [col for col in X_train.columns if col.startswith('feat_c')]
         }
         
         for group_name, group_cols in feature_groups.items():
@@ -791,194 +652,15 @@ class CTRFeatureEngineer:
                     X_train[f'{group_name}_mean'] = X_train[group_cols].mean(axis=1).astype('float32')
                     X_test[f'{group_name}_mean'] = X_test[group_cols].mean(axis=1).astype('float32')
                     
-                    # 그룹 표준편차
-                    X_train[f'{group_name}_std'] = X_train[group_cols].std(axis=1).astype('float32')
-                    X_test[f'{group_name}_std'] = X_test[group_cols].std(axis=1).astype('float32')
-                    
-                    # 0이 아닌 값의 개수
-                    X_train[f'{group_name}_nonzero_count'] = (X_train[group_cols] != 0).sum(axis=1).astype('int8')
-                    X_test[f'{group_name}_nonzero_count'] = (X_test[group_cols] != 0).sum(axis=1).astype('int8')
-                    
                     self.generated_features.extend([
-                        f'{group_name}_sum', f'{group_name}_mean', f'{group_name}_std', f'{group_name}_nonzero_count'
+                        f'{group_name}_sum', f'{group_name}_mean'
                     ])
                     
                 except Exception as e:
                     logger.warning(f"{group_name} 그룹 통계 생성 실패: {e}")
     
-    def _create_statistical_features_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """통계적 피처 생성 - 안전한 버전"""
-        logger.info("통계적 피처 생성 시작")
-        
-        try:
-            numeric_cols = [col for col in X_train.columns 
-                          if X_train[col].dtype in ['float32', 'int32', 'int16', 'int8'] and 
-                          col not in self.generated_features][:15]
-            
-            if len(numeric_cols) >= 2:
-                try:
-                    # 전체 수치형 피처의 통계
-                    X_train['numeric_sum'] = X_train[numeric_cols].sum(axis=1).astype('float32')
-                    X_test['numeric_sum'] = X_test[numeric_cols].sum(axis=1).astype('float32')
-                    
-                    X_train['numeric_mean'] = X_train[numeric_cols].mean(axis=1).astype('float32')
-                    X_test['numeric_mean'] = X_test[numeric_cols].mean(axis=1).astype('float32')
-                    
-                    X_train['numeric_std'] = X_train[numeric_cols].std(axis=1).astype('float32')
-                    X_test['numeric_std'] = X_test[numeric_cols].std(axis=1).astype('float32')
-                    
-                    # 0이 아닌 값들의 비율
-                    X_train['nonzero_ratio'] = ((X_train[numeric_cols] != 0).sum(axis=1) / len(numeric_cols)).astype('float32')
-                    X_test['nonzero_ratio'] = ((X_test[numeric_cols] != 0).sum(axis=1) / len(numeric_cols)).astype('float32')
-                    
-                    self.generated_features.extend(['numeric_sum', 'numeric_mean', 'numeric_std', 'nonzero_ratio'])
-                    
-                    logger.info("통계적 피처 생성 완료")
-                    
-                except Exception as e:
-                    logger.warning(f"통계적 피처 생성 실패: {e}")
-            
-        except Exception as e:
-            logger.error(f"통계적 피처 생성 전체 실패: {e}")
-        
-        return X_train, X_test
-    
-    def _should_create_interaction_features(self) -> bool:
-        """상호작용 피처 생성 여부 결정"""
-        try:
-            available_memory = self.memory_monitor.get_available_memory()
-            return available_memory > 8 and not self.memory_efficient_mode
-        except Exception:
-            return False
-    
-    def _create_interaction_features_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """상호작용 피처 생성 - 안전한 버전"""
-        logger.info("상호작용 피처 생성 시작")
-        
-        try:
-            # 중요한 피처들 선별
-            important_features = self._select_important_features(X_train)
-            
-            interaction_count = 0
-            max_interactions = 10 if self.memory_efficient_mode else 20
-            
-            for i, col1 in enumerate(important_features):
-                for j, col2 in enumerate(important_features[i+1:], i+1):
-                    if interaction_count >= max_interactions:
-                        break
-                    
-                    try:
-                        if self.memory_monitor.check_memory_pressure():
-                            logger.warning("메모리 압박으로 상호작용 피처 생성 중단")
-                            break
-                        
-                        # 곱셈 상호작용
-                        X_train[f'{col1}_x_{col2}'] = (X_train[col1] * X_train[col2]).astype('float32')
-                        X_test[f'{col1}_x_{col2}'] = (X_test[col1] * X_test[col2]).astype('float32')
-                        
-                        self.generated_features.append(f'{col1}_x_{col2}')
-                        interaction_count += 1
-                        
-                    except Exception as e:
-                        logger.warning(f"{col1}, {col2} 상호작용 피처 실패: {e}")
-                        continue
-                
-                if interaction_count >= max_interactions:
-                    break
-            
-            logger.info(f"상호작용 피처 생성 완료: {interaction_count}개")
-            
-        except Exception as e:
-            logger.error(f"상호작용 피처 생성 실패: {e}")
-        
-        return X_train, X_test
-    
-    def _select_important_features(self, df: pd.DataFrame) -> List[str]:
-        """중요한 피처 선별"""
-        try:
-            # 피처 그룹별로 대표 피처 선택
-            feature_groups = {
-                'feat_e': [col for col in df.columns if col.startswith('feat_e')],
-                'feat_d': [col for col in df.columns if col.startswith('feat_d')],
-                'feat_c': [col for col in df.columns if col.startswith('feat_c')],
-                'feat_b': [col for col in df.columns if col.startswith('feat_b')]
-            }
-            
-            important_features = []
-            
-            for group_cols in feature_groups.values():
-                if group_cols:
-                    try:
-                        # 분산이 가장 큰 피처 선택
-                        variances = df[group_cols].var()
-                        top_feature = variances.idxmax()
-                        important_features.append(top_feature)
-                    except Exception:
-                        important_features.append(group_cols[0])
-            
-            # 생성된 피처 중 일부 추가
-            generated_numeric = [col for col in self.generated_features 
-                               if col in df.columns and df[col].dtype in ['float32', 'int16', 'int32']]
-            important_features.extend(generated_numeric[:3])
-            
-            return list(set(important_features))[:8]
-            
-        except Exception:
-            return []
-    
-    def _feature_selection_and_cleanup_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame,
-                                          y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """피처 선택 및 정리 - 안전한 버전"""
-        logger.info("피처 선택 및 정리 시작")
-        
-        try:
-            # 고상관 피처 제거
-            try:
-                numeric_cols = X_train.select_dtypes(include=[np.number]).columns
-                
-                if len(numeric_cols) > 2:
-                    corr_matrix = X_train[numeric_cols].corr().abs()
-                    upper_triangle = corr_matrix.where(
-                        np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
-                    )
-                    
-                    to_drop = [column for column in upper_triangle.columns 
-                              if any(upper_triangle[column] > 0.95)]
-                    
-                    if to_drop:
-                        X_train = X_train.drop(columns=to_drop)
-                        X_test = X_test.drop(columns=to_drop)
-                        logger.info(f"고상관 피처 {len(to_drop)}개 제거")
-                        
-            except Exception as e:
-                logger.warning(f"고상관 피처 제거 실패: {e}")
-            
-            # 저분산 피처 제거
-            try:
-                low_variance_cols = []
-                for col in X_train.select_dtypes(include=[np.number]).columns:
-                    try:
-                        variance = X_train[col].var()
-                        if variance < 1e-8:
-                            low_variance_cols.append(col)
-                    except Exception:
-                        continue
-                
-                if low_variance_cols:
-                    X_train = X_train.drop(columns=low_variance_cols)
-                    X_test = X_test.drop(columns=low_variance_cols)
-                    logger.info(f"저분산 피처 {len(low_variance_cols)}개 제거")
-                    
-            except Exception as e:
-                logger.warning(f"저분산 피처 제거 실패: {e}")
-            
-        except Exception as e:
-            logger.warning(f"피처 선택 및 정리 실패: {e}")
-        
-        return X_train, X_test
-    
     def _final_data_cleanup_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """최종 데이터 정리 - 안전한 버전"""
+        """최종 데이터 정리"""
         logger.info("최종 데이터 정리 시작")
         
         try:
@@ -1029,42 +711,13 @@ class CTRFeatureEngineer:
         
         return X_train, X_test
     
-    def _ensure_consistent_feature_order_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """피처 순서 일관성 보장 - 안전한 버전"""
-        logger.info("피처 순서 일관성 보장 시작")
-        
-        try:
-            current_columns = list(X_train.columns)
-            
-            # 원본 피처 중 남아있는 것들
-            remaining_original = [col for col in self.original_feature_order if col in current_columns]
-            
-            # 생성된 피처들
-            generated_cols = [col for col in current_columns if col not in self.original_feature_order]
-            generated_cols_sorted = sorted(generated_cols)
-            
-            # 최종 순서 결정
-            final_order = remaining_original + generated_cols_sorted
-            
-            X_train = X_train[final_order]
-            X_test = X_test[final_order]
-            
-            self.final_feature_columns = final_order
-            
-            logger.info(f"피처 순서 보장 완료 - 원본 {len(remaining_original)}개 + 생성 {len(generated_cols_sorted)}개")
-            
-        except Exception as e:
-            logger.warning(f"피처 순서 보장 실패: {e}")
-            # 실패 시 현재 순서 유지
-            self.final_feature_columns = list(X_train.columns)
-        
-        return X_train, X_test
-    
     def _finalize_processing(self, X_train: pd.DataFrame, X_test: pd.DataFrame):
         """처리 완료"""
         try:
             processing_time = time.time() - self.processing_stats['start_time']
             memory_usage = self.memory_monitor.get_memory_usage()
+            
+            self.final_feature_columns = list(X_train.columns)
             
             self.processing_stats.update({
                 'total_features_generated': len(self.generated_features),
@@ -1134,6 +787,7 @@ if __name__ == "__main__":
     # 피처 엔지니어링 테스트
     try:
         engineer = CTRFeatureEngineer()
+        engineer.set_memory_efficient_mode(True)
         X_train, X_test = engineer.create_all_features(train_df, test_df)
         
         print(f"원본 데이터: {train_df.shape}, {test_df.shape}")

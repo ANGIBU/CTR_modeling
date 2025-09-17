@@ -45,7 +45,7 @@ class ProgressReporter:
         self.description = description
         self.start_time = time.time()
         self.last_report_time = 0
-        self.report_interval = 3.0  # 3초마다 보고로 조정
+        self.report_interval = 5.0
         
     def update(self, increment: int = 1):
         """진행 상황 업데이트"""
@@ -78,10 +78,10 @@ class ProgressReporter:
         else:
             logger.info(f"{self.description}: {progress_percent:.1f}% ({self.current_items:,}/{self.total_items:,})")
 
-class AggressiveMemoryMonitor:
-    """적극적 메모리 모니터링 및 관리"""
+class MemoryMonitor:
+    """메모리 모니터링 및 관리"""
     
-    def __init__(self, max_memory_gb: float = 35.0):  # 35GB로 제한 축소
+    def __init__(self, max_memory_gb: float = 30.0):
         self.monitoring_enabled = PSUTIL_AVAILABLE
         self.max_memory_gb = max_memory_gb
         self.memory_history = []
@@ -89,10 +89,10 @@ class AggressiveMemoryMonitor:
         self.start_time = time.time()
         self.lock = threading.Lock()
         
-        # 더 엄격한 임계값 설정
-        self.warning_threshold = max_memory_gb * 0.6   # 60% 경고
-        self.critical_threshold = max_memory_gb * 0.75  # 75% 위험
-        self.abort_threshold = max_memory_gb * 0.85     # 85% 중단
+        # 메모리 임계값 설정
+        self.warning_threshold = max_memory_gb * 0.7
+        self.critical_threshold = max_memory_gb * 0.85
+        self.abort_threshold = max_memory_gb * 0.95
         
     def get_process_memory_gb(self) -> float:
         """현재 프로세스 메모리 사용량 (GB)"""
@@ -116,18 +116,18 @@ class AggressiveMemoryMonitor:
             return 30.0
     
     def check_memory_pressure(self) -> Dict[str, Any]:
-        """메모리 압박 상태 확인 - 엄격한 기준"""
+        """메모리 압박 상태 확인"""
         process_memory = self.get_process_memory_gb()
         available_memory = self.get_available_memory_gb()
         
-        # 압박 수준 결정 - 더 엄격하게
-        if process_memory > self.abort_threshold or available_memory < 3:
+        # 압박 수준 결정
+        if process_memory > self.abort_threshold or available_memory < 2:
             pressure_level = "abort"
-        elif process_memory > self.critical_threshold or available_memory < 8:
+        elif process_memory > self.critical_threshold or available_memory < 5:
             pressure_level = "critical"
-        elif process_memory > self.warning_threshold or available_memory < 15:
+        elif process_memory > self.warning_threshold or available_memory < 10:
             pressure_level = "high"
-        elif available_memory < 25:
+        elif available_memory < 20:
             pressure_level = "moderate"
         else:
             pressure_level = "low"
@@ -139,22 +139,8 @@ class AggressiveMemoryMonitor:
             'available_memory_gb': available_memory,
             'should_reduce_chunk_size': pressure_level in ['moderate', 'high', 'critical', 'abort'],
             'should_force_gc': pressure_level in ['high', 'critical', 'abort'],
-            'should_abort': pressure_level == 'abort',
-            'recommendation': self._get_memory_recommendation(pressure_level, process_memory, available_memory)
+            'should_abort': pressure_level == 'abort'
         }
-    
-    def _get_memory_recommendation(self, pressure_level: str, process_gb: float, available_gb: float) -> str:
-        """메모리 상태별 권장 사항"""
-        if pressure_level == "abort":
-            return f"중단: 프로세스 {process_gb:.1f}GB, 가용 {available_gb:.1f}GB - 즉시 중단 필요"
-        elif pressure_level == "critical":
-            return f"위험: 프로세스 {process_gb:.1f}GB, 가용 {available_gb:.1f}GB - 적극적 정리 필요"
-        elif pressure_level == "high":
-            return f"경고: 프로세스 {process_gb:.1f}GB, 가용 {available_gb:.1f}GB - 청크 크기 축소"
-        elif pressure_level == "moderate":
-            return f"주의: 프로세스 {process_gb:.1f}GB, 가용 {available_gb:.1f}GB - 모니터링 강화"
-        else:
-            return f"양호: 프로세스 {process_gb:.1f}GB, 가용 {available_gb:.1f}GB"
     
     def log_memory_status(self, context: str = "", force: bool = False):
         """메모리 상태 로깅"""
@@ -167,13 +153,14 @@ class AggressiveMemoryMonitor:
                            f"{pressure['pressure_level'].upper()}")
             
             if pressure['memory_pressure']:
-                logger.warning(f"메모리 압박: {pressure['recommendation']}")
+                logger.warning(f"메모리 압박: 프로세스 {pressure['process_memory_gb']:.1f}GB, "
+                             f"가용 {pressure['available_memory_gb']:.1f}GB")
                 
         except Exception as e:
             logger.warning(f"메모리 상태 로깅 실패: {e}")
     
-    def aggressive_memory_cleanup(self) -> float:
-        """적극적 메모리 정리"""
+    def force_memory_cleanup(self) -> float:
+        """메모리 정리"""
         try:
             initial_memory = self.get_process_memory_gb()
             pressure = self.check_memory_pressure()
@@ -181,26 +168,22 @@ class AggressiveMemoryMonitor:
             # 압박 수준에 따른 정리 강도
             if pressure['pressure_level'] == 'abort':
                 cleanup_rounds = 10
-                sleep_time = 0.5
+                sleep_time = 0.3
             elif pressure['pressure_level'] == 'critical':
                 cleanup_rounds = 7
-                sleep_time = 0.3
+                sleep_time = 0.2
             elif pressure['pressure_level'] == 'high':
                 cleanup_rounds = 5
-                sleep_time = 0.2
-            elif pressure['pressure_level'] == 'moderate':
-                cleanup_rounds = 3
                 sleep_time = 0.1
             else:
-                cleanup_rounds = 2
+                cleanup_rounds = 3
                 sleep_time = 0.05
             
-            # 강력한 가비지 컬렉션
+            # 가비지 컬렉션
             for i in range(cleanup_rounds):
                 collected = gc.collect()
                 if sleep_time > 0:
                     time.sleep(sleep_time)
-                logger.debug(f"GC 라운드 {i+1}: {collected}개 객체 수집")
             
             # Windows 메모리 정리
             if cleanup_rounds >= 5:
@@ -215,32 +198,31 @@ class AggressiveMemoryMonitor:
             memory_freed = initial_memory - final_memory
             
             if memory_freed > 0.1:
-                logger.info(f"적극적 메모리 정리: {memory_freed:.2f}GB 해제 ({cleanup_rounds}라운드)")
+                logger.info(f"메모리 정리: {memory_freed:.2f}GB 해제 ({cleanup_rounds}라운드)")
             
             return memory_freed
             
         except Exception as e:
-            logger.warning(f"적극적 메모리 정리 실패: {e}")
+            logger.warning(f"메모리 정리 실패: {e}")
             return 0.0
 
-class MemoryOptimizedChunkReader:
-    """메모리 최적화 청크 리더"""
+class DataChunkProcessor:
+    """데이터 청크 처리기"""
     
-    def __init__(self, file_path: str, initial_chunk_size: int = 200000):  # 20만행으로 축소
+    def __init__(self, file_path: str, chunk_size: int = 100000):
         self.file_path = file_path
-        self.initial_chunk_size = initial_chunk_size
-        self.current_chunk_size = initial_chunk_size
+        self.chunk_size = chunk_size
         self.total_rows = 0
-        self.memory_monitor = AggressiveMemoryMonitor()
+        self.memory_monitor = MemoryMonitor()
         self.progress_reporter = None
         
-        # 더 보수적인 청크 크기 설정
-        self.min_chunk_size = 50000   # 5만행 최소
-        self.max_chunk_size = 500000  # 50만행 최대
+        # 청크 크기 범위
+        self.min_chunk_size = 10000
+        self.max_chunk_size = 500000
         
     def __enter__(self):
         """초기화"""
-        logger.info(f"메모리 최적화 청크 리더 초기화: {self.file_path}")
+        logger.info(f"데이터 청크 처리기 초기화: {self.file_path}")
         
         try:
             if not os.path.exists(self.file_path):
@@ -249,8 +231,8 @@ class MemoryOptimizedChunkReader:
             file_size_mb = os.path.getsize(self.file_path) / (1024**2)
             logger.info(f"파일 크기: {file_size_mb:.1f}MB")
             
-            # 메타데이터 읽기
-            self.total_rows = self._get_total_rows()
+            # 총 행 수 확인
+            self.total_rows = self._estimate_total_rows()
             
             # 진행 상황 리포터 초기화
             self.progress_reporter = ProgressReporter(
@@ -258,11 +240,11 @@ class MemoryOptimizedChunkReader:
                 f"데이터 로딩 ({file_size_mb:.0f}MB)"
             )
             
-            logger.info(f"청크 리더 준비 완료: {self.total_rows:,}행")
+            logger.info(f"처리 준비 완료: {self.total_rows:,}행")
             return self
             
         except Exception as e:
-            logger.error(f"청크 리더 초기화 실패: {e}")
+            logger.error(f"청크 처리기 초기화 실패: {e}")
             raise
     
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -271,16 +253,16 @@ class MemoryOptimizedChunkReader:
             if self.progress_reporter:
                 self.progress_reporter.report_progress()
             
-            # 강력한 메모리 정리
-            self.memory_monitor.aggressive_memory_cleanup()
+            # 메모리 정리
+            self.memory_monitor.force_memory_cleanup()
             
-            logger.info("청크 리더 정리 완료")
+            logger.info("청크 처리기 정리 완료")
             
         except Exception as e:
-            logger.warning(f"청크 리더 정리 실패: {e}")
+            logger.warning(f"청크 처리기 정리 실패: {e}")
     
-    def _get_total_rows(self) -> int:
-        """총 행 수 확인"""
+    def _estimate_total_rows(self) -> int:
+        """총 행 수 추정"""
         try:
             if PYARROW_AVAILABLE:
                 try:
@@ -291,13 +273,13 @@ class MemoryOptimizedChunkReader:
                 except Exception as e:
                     logger.warning(f"PyArrow 메타데이터 실패: {e}")
             
-            # 추정 방식
+            # pandas를 이용한 추정
             logger.info("행 수 추정 시작")
-            sample_df = pd.read_parquet(self.file_path, nrows=10000)
+            sample_df = pd.read_parquet(self.file_path, nrows=5000)
             file_size = os.path.getsize(self.file_path)
             sample_memory = sample_df.memory_usage(deep=True).sum()
             
-            estimated_rows = int((file_size / sample_memory) * 10000 * 0.5)  # 더 보수적 추정
+            estimated_rows = int((file_size / sample_memory) * 5000 * 0.7)
             
             del sample_df
             gc.collect()
@@ -307,175 +289,144 @@ class MemoryOptimizedChunkReader:
             
         except Exception as e:
             logger.warning(f"행 수 확인 실패: {e}. 기본값 사용")
-            return 5000000  # 기본값 축소
+            return 1000000
     
-    def read_data_in_chunks(self) -> pd.DataFrame:
-        """메모리 효율적 청크별 데이터 읽기"""
-        logger.info(f"메모리 효율적 데이터 읽기 시작: {self.total_rows:,}행")
+    def process_in_chunks(self) -> pd.DataFrame:
+        """청크별 데이터 처리"""
+        logger.info(f"청크별 데이터 처리 시작: {self.total_rows:,}행")
         
-        final_chunks = []
-        total_processed = 0
-        chunk_count = 0
-        start_time = time.time()
+        all_chunks = []
+        processed_rows = 0
+        chunk_number = 0
         
         try:
             # 초기 메모리 상태 확인
-            self.memory_monitor.log_memory_status("읽기 시작", force=True)
+            self.memory_monitor.log_memory_status("처리 시작", force=True)
             
-            while total_processed < self.total_rows:
+            while processed_rows < self.total_rows:
                 # 메모리 압박 확인
                 pressure = self.memory_monitor.check_memory_pressure()
                 
                 if pressure['should_abort']:
-                    logger.error(f"메모리 한계 도달. 처리된 데이터: {total_processed:,}행")
+                    logger.error(f"메모리 한계 도달. 처리된 데이터: {processed_rows:,}행")
                     break
                 
-                # 적응형 청크 크기 조정
-                self._adjust_chunk_size_conservative(pressure)
+                # 청크 크기 조정
+                self._adjust_chunk_size(pressure)
                 
                 # 청크 읽기
-                remaining_rows = self.total_rows - total_processed
-                current_chunk_size = min(self.current_chunk_size, remaining_rows)
+                remaining_rows = self.total_rows - processed_rows
+                current_chunk_size = min(self.chunk_size, remaining_rows)
                 
                 try:
-                    chunk_start_time = time.time()
+                    # 단일 청크 처리
+                    chunk_df = self._read_chunk_safe(processed_rows, current_chunk_size)
                     
-                    # 청크 데이터 읽기
-                    chunk_df = self._read_single_chunk(total_processed, current_chunk_size)
-                    
-                    if chunk_df is None or chunk_df.empty:
-                        logger.warning(f"빈 청크: {total_processed:,} 위치")
-                        total_processed += current_chunk_size
+                    if chunk_df is None or len(chunk_df) == 0:
+                        logger.warning(f"빈 청크: {processed_rows:,} 위치")
+                        processed_rows += current_chunk_size
                         continue
                     
-                    # 즉시 메모리 최적화
-                    chunk_df = self._aggressive_chunk_optimization(chunk_df)
+                    # 데이터 타입 최적화
+                    chunk_df = self._optimize_chunk_memory(chunk_df)
                     
-                    # 청크 저장 (메모리 효율적)
-                    final_chunks.append(chunk_df)
-                    
-                    chunk_time = time.time() - chunk_start_time
-                    chunk_count += 1
-                    total_processed += len(chunk_df)
+                    # 청크 저장
+                    all_chunks.append(chunk_df)
+                    chunk_number += 1
+                    processed_rows += len(chunk_df)
                     
                     # 진행 상황 업데이트
                     if self.progress_reporter:
                         self.progress_reporter.update(len(chunk_df))
                     
-                    # 주기적 메모리 정리 및 상태 확인
-                    if chunk_count % 3 == 0:  # 3청크마다 정리
-                        self.memory_monitor.aggressive_memory_cleanup()
-                        self.memory_monitor.log_memory_status(f"청크{chunk_count}")
+                    logger.info(f"청크 {chunk_number} 처리 완료: {len(chunk_df):,}행")
                     
-                    # 메모리 압박 시 중간 결합
-                    if (len(final_chunks) >= 5 and 
+                    # 주기적 메모리 정리
+                    if chunk_number % 3 == 0:
+                        self.memory_monitor.force_memory_cleanup()
+                        self.memory_monitor.log_memory_status(f"청크{chunk_number}")
+                    
+                    # 중간 결합 (메모리 압박 시)
+                    if (len(all_chunks) >= 10 and 
                         pressure['pressure_level'] in ['high', 'critical']):
-                        logger.info(f"메모리 압박으로 중간 결합 수행: {len(final_chunks)}개 청크")
-                        final_chunks = self._combine_chunks_memory_efficient(final_chunks)
-                        self.memory_monitor.aggressive_memory_cleanup()
+                        logger.info(f"중간 결합 수행: {len(all_chunks)}개 청크")
+                        all_chunks = self._combine_chunks_safe(all_chunks)
+                        self.memory_monitor.force_memory_cleanup()
                     
                 except Exception as e:
-                    logger.error(f"청크 {chunk_count + 1} 처리 실패 (위치: {total_processed:,}): {e}")
+                    logger.error(f"청크 {chunk_number + 1} 처리 실패: {e}")
                     
                     # 에러 복구 시도
-                    if self._attempt_chunk_recovery(total_processed, current_chunk_size):
+                    if self._try_recover_chunk(processed_rows, current_chunk_size):
                         continue
                     else:
                         logger.error("복구 실패. 처리 중단")
                         break
             
             # 최종 데이터 결합
-            if final_chunks:
-                logger.info(f"최종 데이터 결합: {len(final_chunks)}개 청크")
-                combined_df = self._combine_chunks_memory_efficient(final_chunks)
+            if all_chunks:
+                logger.info(f"최종 데이터 결합: {len(all_chunks)}개 청크")
+                final_df = self._combine_chunks_safe(all_chunks)
                 
-                total_time = time.time() - start_time
-                throughput = len(combined_df) / total_time if total_time > 0 else 0
-                
-                logger.info(f"청크 읽기 완료: {combined_df.shape}, "
-                           f"{total_time:.2f}초, {throughput:,.0f}행/초")
-                
-                return combined_df
+                if final_df is not None and not final_df.empty:
+                    logger.info(f"청크 처리 완료: {final_df.shape}")
+                    return final_df
+                else:
+                    raise ValueError("최종 데이터 결합 결과가 비어있습니다")
             else:
-                logger.error("읽기 가능한 청크가 없습니다")
-                return pd.DataFrame()
+                raise ValueError("처리된 청크가 없습니다")
                 
         except Exception as e:
-            logger.error(f"청크 데이터 읽기 실패: {e}")
-            return pd.DataFrame()
+            logger.error(f"청크 처리 실패: {e}")
+            raise
     
-    def _adjust_chunk_size_conservative(self, pressure: Dict[str, Any]):
-        """보수적 청크 크기 조정"""
-        old_size = self.current_chunk_size
+    def _adjust_chunk_size(self, pressure: Dict[str, Any]):
+        """청크 크기 조정"""
+        old_size = self.chunk_size
         
         if pressure['pressure_level'] == 'abort':
-            self.current_chunk_size = self.min_chunk_size
+            self.chunk_size = self.min_chunk_size
         elif pressure['pressure_level'] == 'critical':
-            self.current_chunk_size = max(self.min_chunk_size, self.current_chunk_size // 4)
+            self.chunk_size = max(self.min_chunk_size, self.chunk_size // 4)
         elif pressure['pressure_level'] == 'high':
-            self.current_chunk_size = max(self.min_chunk_size, self.current_chunk_size // 2)
+            self.chunk_size = max(self.min_chunk_size, self.chunk_size // 2)
         elif pressure['pressure_level'] == 'moderate':
-            self.current_chunk_size = max(self.min_chunk_size, int(self.current_chunk_size * 0.7))
+            self.chunk_size = max(self.min_chunk_size, int(self.chunk_size * 0.8))
         elif pressure['pressure_level'] == 'low':
-            # 조심스럽게 증가
-            self.current_chunk_size = min(self.max_chunk_size, int(self.current_chunk_size * 1.1))
+            self.chunk_size = min(self.max_chunk_size, int(self.chunk_size * 1.1))
         
-        if old_size != self.current_chunk_size:
-            logger.info(f"청크 크기 조정: {old_size:,} → {self.current_chunk_size:,} "
-                       f"({pressure['pressure_level']})")
+        if old_size != self.chunk_size:
+            logger.info(f"청크 크기 조정: {old_size:,} → {self.chunk_size:,}")
     
-    def _read_single_chunk(self, start_row: int, num_rows: int) -> Optional[pd.DataFrame]:
-        """단일 청크 읽기"""
+    def _read_chunk_safe(self, start_row: int, num_rows: int) -> Optional[pd.DataFrame]:
+        """안전한 청크 읽기"""
         try:
-            # PyArrow 시도
-            if PYARROW_AVAILABLE:
-                try:
-                    df = pd.read_parquet(
-                        self.file_path,
-                        engine='pyarrow'
-                    )
-                    
-                    end_row = min(start_row + num_rows, len(df))
-                    if start_row >= len(df):
-                        return None
-                    
-                    chunk_df = df.iloc[start_row:end_row].copy()
-                    
-                    # 즉시 원본 해제
-                    del df
-                    gc.collect()
-                    
-                    return chunk_df
-                    
-                except Exception as e:
-                    logger.warning(f"PyArrow 청크 읽기 실패: {e}")
-            
-            # pandas 대안
+            # 전체 데이터를 읽고 슬라이싱
             df = pd.read_parquet(self.file_path)
-            end_row = min(start_row + num_rows, len(df))
             
+            end_row = min(start_row + num_rows, len(df))
             if start_row >= len(df):
                 return None
             
             chunk_df = df.iloc[start_row:end_row].copy()
+            
+            # 원본 데이터 해제
             del df
             gc.collect()
             
             return chunk_df
             
         except Exception as e:
-            logger.warning(f"청크 읽기 실패: {e}")
+            logger.error(f"청크 읽기 실패 (위치: {start_row:,}, 크기: {num_rows:,}): {e}")
             return None
     
-    def _aggressive_chunk_optimization(self, df: pd.DataFrame) -> pd.DataFrame:
-        """적극적 청크 메모리 최적화"""
-        if df.empty:
+    def _optimize_chunk_memory(self, df: pd.DataFrame) -> pd.DataFrame:
+        """청크 메모리 최적화"""
+        if df is None or df.empty:
             return df
         
         try:
-            original_memory = df.memory_usage(deep=True).sum() / (1024**2)
-            
-            # 정수형 대폭 최적화
+            # 정수형 최적화
             for col in df.select_dtypes(include=['int64', 'int32']).columns:
                 try:
                     col_min, col_max = df[col].min(), df[col].max()
@@ -510,23 +461,16 @@ class MemoryOptimizedChunkReader:
                 except Exception:
                     pass
             
-            # 범주형 최적화 (매우 선택적)
+            # 범주형 최적화
             for col in df.select_dtypes(include=['object']).columns:
                 try:
                     unique_count = df[col].nunique()
                     total_count = len(df)
                     
-                    if unique_count < total_count * 0.3:  # 30% 미만만 범주형으로
+                    if unique_count < total_count * 0.5:
                         df[col] = df[col].astype('category')
                 except Exception:
                     pass
-            
-            optimized_memory = df.memory_usage(deep=True).sum() / (1024**2)
-            reduction = (original_memory - optimized_memory) / original_memory * 100
-            
-            if reduction > 10:
-                logger.debug(f"청크 최적화: {original_memory:.1f}MB → {optimized_memory:.1f}MB "
-                           f"({reduction:.1f}% 감소)")
             
             return df
             
@@ -534,8 +478,8 @@ class MemoryOptimizedChunkReader:
             logger.warning(f"청크 최적화 실패: {e}")
             return df
     
-    def _combine_chunks_memory_efficient(self, chunks: List[pd.DataFrame]) -> List[pd.DataFrame]:
-        """메모리 효율적 청크 결합"""
+    def _combine_chunks_safe(self, chunks: List[pd.DataFrame]) -> List[pd.DataFrame]:
+        """안전한 청크 결합"""
         if not chunks:
             return []
         
@@ -543,60 +487,65 @@ class MemoryOptimizedChunkReader:
             return chunks
         
         try:
-            # 작은 배치로 결합
-            combined_chunks = []
-            batch_size = 3  # 3개씩 배치
+            # 유효한 DataFrame만 필터링
+            valid_chunks = []
+            for chunk in chunks:
+                if isinstance(chunk, pd.DataFrame) and not chunk.empty:
+                    valid_chunks.append(chunk)
             
-            for i in range(0, len(chunks), batch_size):
+            if not valid_chunks:
+                logger.warning("유효한 청크가 없습니다")
+                return []
+            
+            # 배치별 결합
+            combined_chunks = []
+            batch_size = 5
+            
+            for i in range(0, len(valid_chunks), batch_size):
                 try:
-                    batch = chunks[i:i + batch_size]
+                    batch = valid_chunks[i:i + batch_size]
                     
                     if len(batch) == 1:
                         combined_chunks.append(batch[0])
                     else:
                         # 배치 결합
                         batch_combined = pd.concat(batch, ignore_index=True)
-                        # 즉시 최적화
-                        batch_combined = self._aggressive_chunk_optimization(batch_combined)
+                        batch_combined = self._optimize_chunk_memory(batch_combined)
                         combined_chunks.append(batch_combined)
                     
                     # 원본 청크 해제
                     for chunk in batch:
                         del chunk
                     
-                    # 메모리 정리
                     gc.collect()
                     
-                    logger.debug(f"배치 {i//batch_size + 1} 결합 완료")
-                    
                 except Exception as e:
-                    logger.warning(f"배치 {i//batch_size + 1} 결합 실패: {e}")
-                    continue
+                    logger.warning(f"배치 결합 실패: {e}")
+                    # 실패한 배치는 개별 청크로 유지
+                    for chunk in batch:
+                        if isinstance(chunk, pd.DataFrame) and not chunk.empty:
+                            combined_chunks.append(chunk)
             
-            # 원본 청크 리스트 정리
-            chunks.clear()
-            gc.collect()
-            
-            logger.info(f"중간 결합 완료: {len(combined_chunks)}개 청크")
+            logger.info(f"청크 결합 완료: {len(combined_chunks)}개")
             return combined_chunks
             
         except Exception as e:
-            logger.error(f"메모리 효율적 결합 실패: {e}")
+            logger.error(f"청크 결합 실패: {e}")
             return chunks
     
-    def _attempt_chunk_recovery(self, failed_position: int, failed_chunk_size: int) -> bool:
-        """청크 에러 복구 시도"""
+    def _try_recover_chunk(self, failed_position: int, failed_chunk_size: int) -> bool:
+        """청크 복구 시도"""
         try:
             logger.info(f"청크 복구 시도: 위치 {failed_position:,}")
             
-            # 청크 크기를 1/4로 축소하여 재시도
-            recovery_chunk_size = max(self.min_chunk_size, failed_chunk_size // 4)
+            # 청크 크기를 절반으로 줄여서 재시도
+            recovery_chunk_size = max(self.min_chunk_size, failed_chunk_size // 2)
             
-            recovery_df = self._read_single_chunk(failed_position, recovery_chunk_size)
+            recovery_df = self._read_chunk_safe(failed_position, recovery_chunk_size)
             
             if recovery_df is not None and not recovery_df.empty:
                 logger.info(f"청크 복구 성공: {len(recovery_df):,}행")
-                self.current_chunk_size = recovery_chunk_size
+                self.chunk_size = recovery_chunk_size
                 return True
             
             return False
@@ -606,11 +555,11 @@ class MemoryOptimizedChunkReader:
             return False
 
 class LargeDataLoader:
-    """메모리 효율성 극대화 데이터 로더"""
+    """대용량 데이터 로더"""
     
     def __init__(self, config: Config = Config):
         self.config = config
-        self.memory_monitor = AggressiveMemoryMonitor()
+        self.memory_monitor = MemoryMonitor()
         self.target_column = 'clicked'
         
         # 성능 통계
@@ -623,11 +572,11 @@ class LargeDataLoader:
             'memory_usage': 0.0
         }
         
-        logger.info("메모리 효율성 극대화 데이터 로더 초기화 완료")
+        logger.info("대용량 데이터 로더 초기화 완료")
     
     def load_large_data_optimized(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """메모리 효율성 극대화 데이터 로딩"""
-        logger.info("=== 메모리 효율성 극대화 데이터 로딩 시작 ===")
+        """메모리 효율적 데이터 로딩"""
+        logger.info("=== 대용량 데이터 로딩 시작 ===")
         
         try:
             # 1. 초기 메모리 상태
@@ -635,21 +584,21 @@ class LargeDataLoader:
             
             # 2. 데이터 파일 검증
             if not self._validate_data_files():
-                logger.warning("실제 데이터 파일 검증 실패, 샘플 데이터로 대체")
-                return self._create_optimized_sample_data()
+                logger.warning("데이터 파일 검증 실패, 샘플 데이터로 대체")
+                return self._create_sample_data()
             
-            # 3. 학습 데이터 로딩 (보수적 접근)
-            train_df = self._load_train_data_conservative()
+            # 3. 학습 데이터 로딩
+            train_df = self._load_train_data()
             
             if train_df is None or train_df.empty:
                 raise ValueError("학습 데이터 로딩 실패")
             
             # 중간 메모리 정리
-            self.memory_monitor.aggressive_memory_cleanup()
+            self.memory_monitor.force_memory_cleanup()
             self.memory_monitor.log_memory_status("학습 데이터 로딩 후", force=True)
             
-            # 4. 테스트 데이터 로딩 (메모리 상태 고려)
-            test_df = self._load_test_data_conservative()
+            # 4. 테스트 데이터 로딩
+            test_df = self._load_test_data()
             
             if test_df is None or test_df.empty:
                 raise ValueError("테스트 데이터 로딩 실패")
@@ -671,8 +620,8 @@ class LargeDataLoader:
             return train_df, test_df
             
         except Exception as e:
-            logger.error(f"메모리 효율성 극대화 데이터 로딩 실패: {e}")
-            self.memory_monitor.aggressive_memory_cleanup()
+            logger.error(f"대용량 데이터 로딩 실패: {e}")
+            self.memory_monitor.force_memory_cleanup()
             raise
     
     def _validate_data_files(self) -> bool:
@@ -692,30 +641,29 @@ class LargeDataLoader:
             logger.error(f"파일 검증 실패: {e}")
             return False
     
-    def _load_train_data_conservative(self) -> pd.DataFrame:
-        """보수적 학습 데이터 로딩"""
-        logger.info("보수적 학습 데이터 로딩 시작")
+    def _load_train_data(self) -> pd.DataFrame:
+        """학습 데이터 로딩"""
+        logger.info("학습 데이터 로딩 시작")
         
         try:
-            # 메모리 상태에 따른 초기 청크 크기 결정 (매우 보수적)
+            # 메모리 상태에 따른 청크 크기 결정
             memory_info = self.memory_monitor.check_memory_pressure()
             
-            if memory_info['available_memory_gb'] > 30:
-                initial_chunk_size = 200000  # 20만행
-            elif memory_info['available_memory_gb'] > 20:
-                initial_chunk_size = 150000  # 15만행
+            if memory_info['available_memory_gb'] > 25:
+                chunk_size = 150000
+            elif memory_info['available_memory_gb'] > 15:
+                chunk_size = 100000
             else:
-                initial_chunk_size = 100000  # 10만행
+                chunk_size = 50000
             
-            logger.info(f"초기 청크 크기: {initial_chunk_size:,}행 "
-                       f"(가용메모리: {memory_info['available_memory_gb']:.1f}GB)")
+            logger.info(f"학습 데이터 청크 크기: {chunk_size:,}행")
             
-            # 청크 리더로 데이터 로딩
-            with MemoryOptimizedChunkReader(str(self.config.TRAIN_PATH), initial_chunk_size) as reader:
-                df = reader.read_data_in_chunks()
+            # 청크 처리기로 데이터 로딩
+            with DataChunkProcessor(str(self.config.TRAIN_PATH), chunk_size) as processor:
+                df = processor.process_in_chunks()
                 
-                if df.empty:
-                    raise ValueError("청크 읽기 결과가 비어있습니다")
+                if df is None or df.empty:
+                    raise ValueError("학습 데이터 처리 결과가 비어있습니다")
                 
                 # 타겟 컬럼 확인
                 if self.target_column not in df.columns:
@@ -726,116 +674,126 @@ class LargeDataLoader:
                     else:
                         raise ValueError(f"타겟 컬럼 '{self.target_column}'을 찾을 수 없습니다")
                 
-                # 최종 최적화
-                df = self._final_dataframe_optimization(df)
+                # 데이터 최적화
+                df = self._optimize_dataframe(df)
                 
                 # 통계 확인
                 target_ctr = df[self.target_column].mean()
-                logger.info(f"보수적 학습 데이터 로딩 완료: {df.shape}, CTR: {target_ctr:.4f}")
+                logger.info(f"학습 데이터 로딩 완료: {df.shape}, CTR: {target_ctr:.4f}")
                 
                 return df
                 
         except Exception as e:
-            logger.error(f"보수적 학습 데이터 로딩 실패: {e}")
+            logger.error(f"학습 데이터 로딩 실패: {e}")
             raise
     
-    def _load_test_data_conservative(self) -> pd.DataFrame:
-        """보수적 테스트 데이터 로딩"""
-        logger.info("보수적 테스트 데이터 로딩 시작")
+    def _load_test_data(self) -> pd.DataFrame:
+        """테스트 데이터 로딩"""
+        logger.info("테스트 데이터 로딩 시작")
         
         try:
             # 현재 메모리 압박 상태 확인
             pressure = self.memory_monitor.check_memory_pressure()
             
-            # 더 보수적인 청크 크기
+            # 메모리 상태에 따른 청크 크기
             if pressure['pressure_level'] in ['abort', 'critical']:
-                initial_chunk_size = 50000   # 5만행
+                chunk_size = 30000
             elif pressure['pressure_level'] == 'high':
-                initial_chunk_size = 100000  # 10만행
+                chunk_size = 60000
             elif pressure['pressure_level'] == 'moderate':
-                initial_chunk_size = 150000  # 15만행
+                chunk_size = 100000
             else:
-                initial_chunk_size = 200000  # 20만행
+                chunk_size = 150000
             
-            logger.info(f"테스트 데이터 청크 크기: {initial_chunk_size:,}행 "
-                       f"(메모리 상태: {pressure['pressure_level']})")
+            logger.info(f"테스트 데이터 청크 크기: {chunk_size:,}행")
             
-            # 청크 리더로 데이터 로딩
-            with MemoryOptimizedChunkReader(str(self.config.TEST_PATH), initial_chunk_size) as reader:
-                df = reader.read_data_in_chunks()
+            # 청크 처리기로 데이터 로딩
+            with DataChunkProcessor(str(self.config.TEST_PATH), chunk_size) as processor:
+                df = processor.process_in_chunks()
                 
-                if df.empty:
-                    raise ValueError("테스트 데이터 청크 읽기 결과가 비어있습니다")
+                if df is None or df.empty:
+                    raise ValueError("테스트 데이터 처리 결과가 비어있습니다")
                 
-                # 최종 최적화
-                df = self._final_dataframe_optimization(df)
+                # 데이터 최적화
+                df = self._optimize_dataframe(df)
                 
-                logger.info(f"보수적 테스트 데이터 로딩 완료: {df.shape}")
+                logger.info(f"테스트 데이터 로딩 완료: {df.shape}")
                 
                 return df
                 
         except Exception as e:
-            logger.error(f"보수적 테스트 데이터 로딩 실패: {e}")
+            logger.error(f"테스트 데이터 로딩 실패: {e}")
             raise
     
-    def _final_dataframe_optimization(self, df: pd.DataFrame) -> pd.DataFrame:
-        """최종 DataFrame 최적화"""
-        if df.empty:
+    def _optimize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """DataFrame 최적화"""
+        if df is None or df.empty:
             return df
         
         try:
-            logger.info("최종 DataFrame 최적화 시작")
+            logger.info("DataFrame 최적화 시작")
             original_memory = df.memory_usage(deep=True).sum() / (1024**2)
             
-            # 매우 적극적인 타입 최적화
-            for col in df.columns:
+            # 정수형 최적화
+            for col in df.select_dtypes(include=['int64', 'int32']).columns:
                 try:
-                    dtype = df[col].dtype
+                    col_min, col_max = df[col].min(), df[col].max()
+                    if pd.isna(col_min) or pd.isna(col_max):
+                        continue
                     
-                    if dtype == 'int64':
-                        col_min, col_max = df[col].min(), df[col].max()
-                        if not pd.isna(col_min) and not pd.isna(col_max):
-                            if col_min >= 0:
-                                if col_max <= 255:
-                                    df[col] = df[col].astype('uint8')
-                                elif col_max <= 65535:
-                                    df[col] = df[col].astype('uint16')
-                                else:
-                                    df[col] = df[col].astype('uint32')
-                            else:
-                                if col_min >= -128 and col_max <= 127:
-                                    df[col] = df[col].astype('int8')
-                                elif col_min >= -32768 and col_max <= 32767:
-                                    df[col] = df[col].astype('int16')
-                                else:
-                                    df[col] = df[col].astype('int32')
-                    
-                    elif dtype == 'float64':
-                        df[col] = df[col].astype('float32')
-                    
-                    elif dtype == 'object':
-                        unique_ratio = df[col].nunique() / len(df)
-                        if unique_ratio < 0.5:
-                            df[col] = df[col].astype('category')
+                    if col_min >= 0:
+                        if col_max <= 255:
+                            df[col] = df[col].astype('uint8')
+                        elif col_max <= 65535:
+                            df[col] = df[col].astype('uint16')
+                        else:
+                            df[col] = df[col].astype('uint32')
+                    else:
+                        if col_min >= -128 and col_max <= 127:
+                            df[col] = df[col].astype('int8')
+                        elif col_min >= -32768 and col_max <= 32767:
+                            df[col] = df[col].astype('int16')
+                        else:
+                            df[col] = df[col].astype('int32')
                             
-                except Exception as e:
-                    logger.warning(f"컬럼 {col} 최적화 실패: {e}")
-                    continue
+                except Exception:
+                    try:
+                        df[col] = df[col].astype('int32')
+                    except Exception:
+                        pass
             
-            # 결측치 처리
+            # 실수형 최적화
+            for col in df.select_dtypes(include=['float64']).columns:
+                try:
+                    df[col] = df[col].astype('float32')
+                except Exception:
+                    pass
+            
+            # 범주형 최적화
+            for col in df.select_dtypes(include=['object']).columns:
+                try:
+                    unique_count = df[col].nunique()
+                    total_count = len(df)
+                    
+                    if unique_count < total_count * 0.5:
+                        df[col] = df[col].astype('category')
+                except Exception:
+                    pass
+            
+            # 결측치 및 무한값 처리
             df = df.fillna(0)
             df = df.replace([np.inf, -np.inf], [1e6, -1e6])
             
             optimized_memory = df.memory_usage(deep=True).sum() / (1024**2)
             reduction = (original_memory - optimized_memory) / original_memory * 100
             
-            logger.info(f"최종 최적화 완료: {original_memory:.1f}MB → {optimized_memory:.1f}MB "
+            logger.info(f"DataFrame 최적화 완료: {original_memory:.1f}MB → {optimized_memory:.1f}MB "
                        f"({reduction:.1f}% 감소)")
             
             return df
             
         except Exception as e:
-            logger.warning(f"최종 최적화 실패: {e}")
+            logger.warning(f"DataFrame 최적화 실패: {e}")
             return df
     
     def _validate_loaded_data(self, train_df: pd.DataFrame, test_df: pd.DataFrame):
@@ -846,9 +804,9 @@ class LargeDataLoader:
             if train_df.empty or test_df.empty:
                 raise ValueError("로딩된 데이터가 비어있습니다")
             
-            # 관대한 최소 크기 검증
-            min_train_threshold = 500000   # 50만행
-            min_test_threshold = 100000    # 10만행
+            # 최소 크기 검증
+            min_train_threshold = 100000
+            min_test_threshold = 50000
             
             if len(train_df) < min_train_threshold:
                 logger.warning(f"학습 데이터 크기: {len(train_df):,} < {min_train_threshold:,}")
@@ -873,21 +831,21 @@ class LargeDataLoader:
             logger.error(f"데이터 검증 실패: {e}")
             raise
     
-    def _create_optimized_sample_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """메모리 최적화 샘플 데이터 생성"""
-        logger.warning("최적화된 샘플 데이터를 생성합니다")
+    def _create_sample_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """샘플 데이터 생성"""
+        logger.warning("샘플 데이터를 생성합니다")
         
         try:
             np.random.seed(42)
-            n_train = 1000000  # 100만행으로 축소
-            n_test = 500000    # 50만행으로 축소
+            n_train = 500000
+            n_test = 200000
             
             # 학습 데이터
             train_data = {
                 self.target_column: np.random.binomial(1, 0.0201, n_train).astype('uint8'),
             }
             
-            # 간소화된 피처
+            # 피처 생성
             for i in range(1, 6):
                 train_data[f'feat_e_{i}'] = np.random.normal(0, 100, n_train).astype('float32')
             
@@ -907,7 +865,7 @@ class LargeDataLoader:
             
             test_df = pd.DataFrame(test_data)
             
-            logger.warning(f"최적화 샘플 데이터 생성 완료 - 학습: {train_df.shape}, 테스트: {test_df.shape}")
+            logger.warning(f"샘플 데이터 생성 완료 - 학습: {train_df.shape}, 테스트: {test_df.shape}")
             
             return train_df, test_df
             
@@ -920,7 +878,7 @@ class LargeDataLoader:
         try:
             stats = self.loading_stats
             
-            logger.info("=== 메모리 효율성 극대화 데이터 로딩 완료 ===")
+            logger.info("=== 대용량 데이터 로딩 완료 ===")
             logger.info(f"학습 데이터: {train_df.shape}")
             logger.info(f"테스트 데이터: {test_df.shape}")
             logger.info(f"로딩 시간: {stats['loading_time']:.2f}초")
@@ -935,8 +893,6 @@ class LargeDataLoader:
             # 최종 메모리 상태
             self.memory_monitor.log_memory_status("로딩 완료", force=True)
             
-            logger.info("=== 메모리 효율적 로딩 완료 ===")
-            
         except Exception as e:
             logger.warning(f"완료 로깅 실패: {e}")
     
@@ -944,9 +900,10 @@ class LargeDataLoader:
         """로딩 통계 반환"""
         return self.loading_stats.copy()
 
-# 호환성 별칭
+# 기존 코드와의 호환성을 위한 별칭
 DataLoader = LargeDataLoader
-MemoryMonitor = AggressiveMemoryMonitor
+MemoryOptimizedChunkReader = DataChunkProcessor
+AggressiveMemoryMonitor = MemoryMonitor
 
 class DataValidator:
     """데이터 품질 검증 클래스"""
