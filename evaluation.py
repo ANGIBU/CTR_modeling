@@ -1132,6 +1132,30 @@ class EvaluationReporter:
             logger.error(f"요약 테이블 생성 실패: {e}")
             return pd.DataFrame()
 
-# 하위 호환성을 위한 alias들
+# 하위 호환성을 위한 alias들 - main.py에서 import할 수 있도록 보장
 CTRMetrics = CTRAdvancedMetrics
 ModelComparator = UltraModelComparator
+
+# 추가 하위 호환성 보장
+def create_ctr_metrics():
+    """CTR 지표 생성기"""
+    return CTRAdvancedMetrics()
+
+def create_model_comparator():
+    """모델 비교기 생성기"""
+    return UltraModelComparator()
+
+def create_evaluation_reporter():
+    """평가 리포터 생성기"""
+    return EvaluationReporter()
+
+# 모듈 수준에서 직접 접근 가능한 주요 함수들
+def evaluate_model_performance(y_true, y_pred_proba):
+    """단일 모델 성능 평가"""
+    metrics_calc = CTRAdvancedMetrics()
+    return metrics_calc.comprehensive_evaluation_ultra(y_true, y_pred_proba)
+
+def compare_multiple_models(models_predictions, y_true):
+    """다중 모델 비교"""
+    comparator = UltraModelComparator()
+    return comparator.compare_models_ultra(models_predictions, y_true)
