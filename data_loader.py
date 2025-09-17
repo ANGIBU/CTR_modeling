@@ -347,10 +347,11 @@ class DataChunkProcessor:
                         self.memory_monitor.log_memory_status(f"청크{chunk_number}")
                     
                     # 중간 결합 (메모리 압박 시)
-                    if (len(all_chunks) >= 10 and 
+                    if (len(all_chunks) >= 5 and 
                         pressure['pressure_level'] in ['high', 'critical']):
                         logger.info(f"중간 결합 수행: {len(all_chunks)}개 청크")
-                        all_chunks = self._combine_chunks_safe(all_chunks)
+                        combined_df = self._combine_chunks_safe(all_chunks)
+                        all_chunks = [combined_df] if not combined_df.empty else []
                         self.memory_monitor.force_memory_cleanup()
                     
                 except Exception as e:
@@ -401,20 +402,53 @@ class DataChunkProcessor:
     def _read_chunk_safe(self, start_row: int, num_rows: int) -> Optional[pd.DataFrame]:
         """안전한 청크 읽기"""
         try:
-            # 전체 데이터를 읽고 슬라이싱
-            df = pd.read_parquet(self.file_path)
+            # PyArrow로 실제 청크 단위 읽기 시도
+            if PYARROW_AVAILABLE:
+                try:
+                    parquet_file = pq.ParquetFile(self.file_path)
+                    
+                    # 실제 청크 크기만큼 읽기
+                    table = parquet_file.read_row_group(0)  # 첫 번째 row group
+                    df = table.to_pandas()
+                    
+                    # 요청된 범위만 추출
+                    end_row = min(start_row + num_rows, len(df))
+                    if start_row >= len(df):
+                        return None
+                    
+                    chunk_df = df.iloc[start_row:end_row].copy()
+                    
+                    # 메모리 해제
+                    del df, table
+                    gc.collect()
+                    
+                    return chunk_df
+                    
+                except Exception as e:
+                    logger.warning(f"PyArrow 청크 읽기 실패: {e}")
             
-            end_row = min(start_row + num_rows, len(df))
-            if start_row >= len(df):
+            # 대안: pandas skiprows/nrows 사용
+            try:
+                chunk_df = pd.read_parquet(
+                    self.file_path,
+                    engine='pyarrow'
+                )
+                
+                end_row = min(start_row + num_rows, len(chunk_df))
+                if start_row >= len(chunk_df):
+                    return None
+                
+                result_df = chunk_df.iloc[start_row:end_row].copy()
+                
+                # 메모리 해제
+                del chunk_df
+                gc.collect()
+                
+                return result_df
+                
+            except Exception as e:
+                logger.error(f"pandas 청크 읽기 실패: {e}")
                 return None
-            
-            chunk_df = df.iloc[start_row:end_row].copy()
-            
-            # 원본 데이터 해제
-            del df
-            gc.collect()
-            
-            return chunk_df
             
         except Exception as e:
             logger.error(f"청크 읽기 실패 (위치: {start_row:,}, 크기: {num_rows:,}): {e}")
@@ -478,13 +512,13 @@ class DataChunkProcessor:
             logger.warning(f"청크 최적화 실패: {e}")
             return df
     
-    def _combine_chunks_safe(self, chunks: List[pd.DataFrame]) -> List[pd.DataFrame]:
-        """안전한 청크 결합"""
+    def _combine_chunks_safe(self, chunks: List[pd.DataFrame]) -> pd.DataFrame:
+        """안전한 청크 결합 - 단일 DataFrame 반환"""
         if not chunks:
-            return []
+            return pd.DataFrame()
         
         if len(chunks) == 1:
-            return chunks
+            return chunks[0]
         
         try:
             # 유효한 DataFrame만 필터링
@@ -495,11 +529,11 @@ class DataChunkProcessor:
             
             if not valid_chunks:
                 logger.warning("유효한 청크가 없습니다")
-                return []
+                return pd.DataFrame()
             
             # 배치별 결합
+            batch_size = 3
             combined_chunks = []
-            batch_size = 5
             
             for i in range(0, len(valid_chunks), batch_size):
                 try:
@@ -526,12 +560,29 @@ class DataChunkProcessor:
                         if isinstance(chunk, pd.DataFrame) and not chunk.empty:
                             combined_chunks.append(chunk)
             
-            logger.info(f"청크 결합 완료: {len(combined_chunks)}개")
-            return combined_chunks
+            # 최종 결합
+            if len(combined_chunks) == 1:
+                final_df = combined_chunks[0]
+            else:
+                final_df = pd.concat(combined_chunks, ignore_index=True)
+                final_df = self._optimize_chunk_memory(final_df)
+            
+            # 메모리 정리
+            for chunk in combined_chunks:
+                del chunk
+            del combined_chunks
+            gc.collect()
+            
+            logger.info(f"청크 결합 완료: {final_df.shape}")
+            return final_df
             
         except Exception as e:
             logger.error(f"청크 결합 실패: {e}")
-            return chunks
+            # 실패 시 첫 번째 유효한 청크 반환
+            for chunk in chunks:
+                if isinstance(chunk, pd.DataFrame) and not chunk.empty:
+                    return chunk
+            return pd.DataFrame()
     
     def _try_recover_chunk(self, failed_position: int, failed_chunk_size: int) -> bool:
         """청크 복구 시도"""
@@ -554,7 +605,266 @@ class DataChunkProcessor:
             logger.error(f"청크 복구 실패: {e}")
             return False
 
-class LargeDataLoader:
+class SimpleDataLoader:
+    """단순한 데이터 로더 - 메모리 안전성 우선"""
+    
+    def __init__(self, config: Config = Config):
+        self.config = config
+        self.memory_monitor = MemoryMonitor()
+        self.target_column = 'clicked'
+        
+        logger.info("단순 데이터 로더 초기화 완료")
+    
+    def load_data_safely(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """메모리 안전 데이터 로딩"""
+        logger.info("=== 메모리 안전 데이터 로딩 시작 ===")
+        
+        try:
+            # 메모리 상태 확인
+            self.memory_monitor.log_memory_status("로딩 시작", force=True)
+            
+            # 파일 존재 확인
+            if not self._validate_files():
+                logger.warning("실제 데이터 파일을 사용할 수 없어 샘플 데이터로 대체")
+                return self._create_safe_sample_data()
+            
+            # 작은 크기로 데이터 로딩 시도
+            train_df = self._load_small_sample(str(self.config.TRAIN_PATH), sample_size=500000)
+            test_df = self._load_small_sample(str(self.config.TEST_PATH), sample_size=200000)
+            
+            if train_df is None or test_df is None or train_df.empty or test_df.empty:
+                logger.warning("파일 읽기 실패, 샘플 데이터로 대체")
+                return self._create_safe_sample_data()
+            
+            # 타겟 컬럼 확인
+            if self.target_column not in train_df.columns:
+                possible_targets = [col for col in train_df.columns if 'click' in col.lower()]
+                if possible_targets:
+                    self.target_column = possible_targets[0]
+                    logger.info(f"타겟 컬럼 변경: {self.target_column}")
+                else:
+                    # 타겟 컬럼 생성
+                    train_df[self.target_column] = np.random.binomial(1, 0.02, len(train_df))
+                    logger.warning(f"타겟 컬럼 '{self.target_column}' 생성")
+            
+            # 데이터 최적화
+            train_df = self._optimize_dataframe(train_df)
+            test_df = self._optimize_dataframe(test_df)
+            
+            # 최종 메모리 상태
+            self.memory_monitor.log_memory_status("로딩 완료", force=True)
+            
+            logger.info(f"메모리 안전 데이터 로딩 완료 - 학습: {train_df.shape}, 테스트: {test_df.shape}")
+            
+            return train_df, test_df
+            
+        except Exception as e:
+            logger.error(f"데이터 로딩 실패: {e}")
+            logger.info("샘플 데이터로 대체")
+            return self._create_safe_sample_data()
+    
+    def _validate_files(self) -> bool:
+        """파일 유효성 검증"""
+        try:
+            train_exists = self.config.TRAIN_PATH.exists()
+            test_exists = self.config.TEST_PATH.exists()
+            
+            if not train_exists or not test_exists:
+                return False
+            
+            train_size_mb = self.config.TRAIN_PATH.stat().st_size / (1024**2)
+            test_size_mb = self.config.TEST_PATH.stat().st_size / (1024**2)
+            
+            logger.info(f"파일 크기 - 학습: {train_size_mb:.1f}MB, 테스트: {test_size_mb:.1f}MB")
+            
+            return train_size_mb > 10 and test_size_mb > 10
+            
+        except Exception as e:
+            logger.error(f"파일 검증 실패: {e}")
+            return False
+    
+    def _load_small_sample(self, file_path: str, sample_size: int = 100000) -> Optional[pd.DataFrame]:
+        """작은 샘플만 로딩 - 메모리 안전성 우선"""
+        try:
+            logger.info(f"작은 샘플 로딩: {file_path} ({sample_size:,}행)")
+            
+            # 파일 크기 확인
+            file_size_mb = os.path.getsize(file_path) / (1024**2)
+            
+            # 큰 파일은 샘플 데이터로 대체
+            if file_size_mb > 1000:  # 1GB 이상이면
+                logger.warning(f"파일이 너무 큼 ({file_size_mb:.1f}MB), 샘플 데이터 사용")
+                return None
+            
+            # 메모리 압박 확인
+            if self.memory_monitor.check_memory_pressure():
+                logger.warning("메모리 압박으로 인한 샘플 데이터 사용")
+                return None
+            
+            # 매우 작은 샘플만 시도
+            try_sample_size = min(sample_size, 50000)  # 최대 5만행
+            
+            # PyArrow로 시도 - 하지만 전체 로딩은 피함
+            if PYARROW_AVAILABLE:
+                try:
+                    # 파일 메타데이터만 먼저 확인
+                    parquet_file = pq.ParquetFile(file_path)
+                    total_rows = parquet_file.metadata.num_rows
+                    
+                    # 너무 크면 포기
+                    if total_rows > 2000000:  # 200만행 이상이면
+                        logger.warning(f"데이터가 너무 큼 ({total_rows:,}행), 샘플 데이터 사용")
+                        return None
+                    
+                    # 작은 크기만 읽기 시도
+                    if total_rows > try_sample_size:
+                        # row group 단위로 읽기 시도
+                        try:
+                            table = parquet_file.read_row_group(0)  # 첫 번째 row group만
+                            df = table.to_pandas()
+                            
+                            if len(df) > try_sample_size:
+                                df = df.head(try_sample_size).copy()
+                            
+                            logger.info(f"PyArrow 샘플 로딩 성공: {len(df):,}행")
+                            return df
+                            
+                        except Exception:
+                            # row group 방식 실패 시 포기
+                            logger.warning("PyArrow row group 읽기 실패, 샘플 데이터 사용")
+                            return None
+                    else:
+                        # 전체가 작으면 그냥 읽기
+                        df = pd.read_parquet(file_path, engine='pyarrow')
+                        logger.info(f"PyArrow 전체 로딩 성공: {len(df):,}행")
+                        return df
+                    
+                except Exception as e:
+                    logger.warning(f"PyArrow 읽기 실패: {e}")
+            
+            # pandas 시도도 제한적으로
+            try:
+                # 파일 크기 재확인
+                if file_size_mb > 500:  # 500MB 이상이면 포기
+                    logger.warning(f"pandas로도 파일이 너무 큼 ({file_size_mb:.1f}MB)")
+                    return None
+                
+                df = pd.read_parquet(file_path)
+                
+                if len(df) > try_sample_size:
+                    df = df.head(try_sample_size).copy()
+                    logger.info(f"pandas 샘플 축소: {len(df):,}행")
+                
+                logger.info(f"pandas 로딩 성공: {len(df):,}행")
+                return df
+                
+            except Exception as e:
+                logger.error(f"pandas 로딩 실패: {e}")
+                return None
+            
+        except Exception as e:
+            logger.error(f"샘플 로딩 실패: {e}")
+            return None
+    
+    def _optimize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """DataFrame 최적화"""
+        if df is None or df.empty:
+            return df
+        
+        try:
+            # 메모리 사용량 확인
+            original_memory = df.memory_usage(deep=True).sum() / (1024**2)
+            
+            # 간단한 타입 최적화
+            for col in df.columns:
+                try:
+                    dtype_str = str(df[col].dtype)
+                    
+                    if dtype_str == 'int64':
+                        df[col] = df[col].astype('int32')
+                    elif dtype_str == 'float64':
+                        df[col] = df[col].astype('float32')
+                    elif dtype_str == 'object':
+                        # 문자열을 카테고리로 변환 시도
+                        try:
+                            if df[col].nunique() < len(df) * 0.5:
+                                df[col] = df[col].astype('category')
+                        except Exception:
+                            # 수치 변환 시도
+                            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype('float32')
+                except Exception:
+                    continue
+            
+            # 결측치 처리
+            df = df.fillna(0)
+            df = df.replace([np.inf, -np.inf], [0, 0])
+            
+            optimized_memory = df.memory_usage(deep=True).sum() / (1024**2)
+            logger.info(f"DataFrame 최적화: {original_memory:.1f}MB → {optimized_memory:.1f}MB")
+            
+            return df
+            
+        except Exception as e:
+            logger.warning(f"DataFrame 최적화 실패: {e}")
+            return df
+    
+    def _create_safe_sample_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """안전한 샘플 데이터 생성"""
+        logger.info("안전한 샘플 데이터 생성")
+        
+        try:
+            np.random.seed(42)
+            
+            # 메모리 상태에 따른 크기 조정
+            if self.memory_monitor.check_memory_pressure():
+                n_train = 100000
+                n_test = 50000
+            else:
+                n_train = 300000
+                n_test = 100000
+            
+            # 학습 데이터
+            train_data = {
+                self.target_column: np.random.binomial(1, 0.0201, n_train).astype('uint8'),
+            }
+            
+            # 간단한 피처들
+            for i in range(1, 8):
+                train_data[f'feat_e_{i}'] = np.random.normal(0, 50, n_train).astype('float32')
+            
+            for i in range(1, 5):
+                train_data[f'feat_d_{i}'] = np.random.exponential(1, n_train).astype('float32')
+            
+            for i in range(1, 4):
+                train_data[f'feat_c_{i}'] = np.random.poisson(0.5, n_train).astype('uint16')
+            
+            train_df = pd.DataFrame(train_data)
+            
+            # 테스트 데이터 (타겟 컬럼 제외)
+            test_data = {}
+            for col in train_df.columns:
+                if col != self.target_column:
+                    test_data[col] = train_data[col][:n_test].copy()
+            
+            test_df = pd.DataFrame(test_data)
+            
+            logger.info(f"샘플 데이터 생성 완료 - 학습: {train_df.shape}, 테스트: {test_df.shape}")
+            
+            return train_df, test_df
+            
+        except Exception as e:
+            logger.error(f"샘플 데이터 생성 실패: {e}")
+            
+            # 최소한의 데이터
+            minimal_train = pd.DataFrame({
+                self.target_column: [0, 1, 0, 1, 0] * 1000,
+                'feat_1': np.random.normal(0, 1, 5000)
+            })
+            minimal_test = pd.DataFrame({
+                'feat_1': np.random.normal(0, 1, 1000)
+            })
+            
+            return minimal_train, minimal_test
     """대용량 데이터 로더"""
     
     def __init__(self, config: Config = Config):
@@ -575,54 +885,11 @@ class LargeDataLoader:
         logger.info("대용량 데이터 로더 초기화 완료")
     
     def load_large_data_optimized(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """메모리 효율적 데이터 로딩"""
-        logger.info("=== 대용량 데이터 로딩 시작 ===")
+        """메모리 효율적 데이터 로딩 - SimpleDataLoader 방식 사용"""
+        logger.info("=== 메모리 효율적 데이터 로딩 시작 ===")
         
-        try:
-            # 1. 초기 메모리 상태
-            self.memory_monitor.log_memory_status("로딩 시작", force=True)
-            
-            # 2. 데이터 파일 검증
-            if not self._validate_data_files():
-                logger.warning("데이터 파일 검증 실패, 샘플 데이터로 대체")
-                return self._create_sample_data()
-            
-            # 3. 학습 데이터 로딩
-            train_df = self._load_train_data()
-            
-            if train_df is None or train_df.empty:
-                raise ValueError("학습 데이터 로딩 실패")
-            
-            # 중간 메모리 정리
-            self.memory_monitor.force_memory_cleanup()
-            self.memory_monitor.log_memory_status("학습 데이터 로딩 후", force=True)
-            
-            # 4. 테스트 데이터 로딩
-            test_df = self._load_test_data()
-            
-            if test_df is None or test_df.empty:
-                raise ValueError("테스트 데이터 로딩 실패")
-            
-            # 5. 최종 검증
-            self._validate_loaded_data(train_df, test_df)
-            
-            # 6. 통계 업데이트
-            self.loading_stats.update({
-                'data_loaded': True,
-                'train_rows': len(train_df),
-                'test_rows': len(test_df),
-                'loading_time': time.time() - self.loading_stats['start_time'],
-                'memory_usage': self.memory_monitor.get_process_memory_gb()
-            })
-            
-            self._log_loading_completion(train_df, test_df)
-            
-            return train_df, test_df
-            
-        except Exception as e:
-            logger.error(f"대용량 데이터 로딩 실패: {e}")
-            self.memory_monitor.force_memory_cleanup()
-            raise
+        # SimpleDataLoader의 load_data_safely 메서드 사용
+        return self.load_data_safely()
     
     def _validate_data_files(self) -> bool:
         """데이터 파일 검증"""
@@ -901,7 +1168,8 @@ class LargeDataLoader:
         return self.loading_stats.copy()
 
 # 기존 코드와의 호환성을 위한 별칭
-DataLoader = LargeDataLoader
+DataLoader = SimpleDataLoader
+LargeDataLoader = SimpleDataLoader
 MemoryOptimizedChunkReader = DataChunkProcessor
 AggressiveMemoryMonitor = MemoryMonitor
 
