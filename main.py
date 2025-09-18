@@ -38,7 +38,7 @@ except ImportError:
 
 # 로깅 설정
 def setup_logging(log_level=logging.INFO):
-    """강화된 로깅 시스템 초기화"""
+    """로깅 시스템 초기화"""
     logger = logging.getLogger()
     logger.setLevel(log_level)
     
@@ -87,7 +87,7 @@ def signal_handler(signum, frame):
     logger.info("프로그램 중단 요청을 받았습니다")
     cleanup_required = True
     
-    # 강화된 정리 작업
+    # 메모리 정리 작업
     try:
         gc.collect()
         if PSUTIL_AVAILABLE:
@@ -98,7 +98,7 @@ def signal_handler(signum, frame):
         pass
 
 def validate_environment():
-    """개선된 환경 검증"""
+    """환경 검증"""
     logger.info("=== 환경 검증 시작 ===")
     
     # Python 버전 확인
@@ -124,7 +124,7 @@ def validate_environment():
         size_mb = path.stat().st_size / (1024**2) if exists else 0
         logger.info(f"{name} 파일: {exists} ({size_mb:.1f}MB)")
     
-    # 개선된 메모리 정보
+    # 메모리 정보
     if PSUTIL_AVAILABLE:
         vm = psutil.virtual_memory()
         logger.info(f"시스템 메모리: {vm.total/(1024**3):.1f}GB (사용가능: {vm.available/(1024**3):.1f}GB)")
@@ -195,8 +195,8 @@ def safe_import_modules():
         
         # 앙상블 모듈 시도
         try:
-            from ensemble import CTREnsembleManager
-            imported_modules['CTREnsembleManager'] = CTREnsembleManager
+            from ensemble import CTRSuperEnsembleManager
+            imported_modules['CTRSuperEnsembleManager'] = CTRSuperEnsembleManager
             logger.info("앙상블 모듈 import 성공")
         except ImportError as e:
             logger.warning(f"앙상블 모듈 import 실패: {e}")
@@ -232,7 +232,7 @@ def safe_import_modules():
         raise
 
 def force_memory_cleanup(intensive: bool = False):
-    """강화된 메모리 정리"""
+    """메모리 정리"""
     try:
         initial_time = time.time()
         
@@ -277,8 +277,8 @@ def force_memory_cleanup(intensive: bool = False):
         return 0
 
 def execute_full_pipeline(config, quick_mode=False):
-    """개선된 전체 파이프라인 실행"""
-    logger.info("=== 전체 파이프라인 실행 시작 ===")
+    """전체 파이프라인 실행 - 앙상블 시스템 활성화"""
+    logger.info("=== 전체 파이프라인 실행 시작 (앙상블 모드) ===")
     
     start_time = time.time()
     
@@ -295,7 +295,7 @@ def execute_full_pipeline(config, quick_mode=False):
             if hasattr(config, 'setup_gpu_environment'):
                 config.setup_gpu_environment()
         
-        # 1. 대용량 데이터 로딩 (개선된 방식)
+        # 1. 대용량 데이터 로딩
         logger.info("1. 대용량 데이터 로딩")
         data_loader = modules['LargeDataLoader'](config)
         
@@ -319,15 +319,15 @@ def execute_full_pipeline(config, quick_mode=False):
         except Exception as e:
             logger.error(f"데이터 로딩 실패: {e}")
             
-            # 강화된 메모리 정리 후 재시도
-            logger.info("강화된 메모리 정리 후 재시도")
+            # 메모리 정리 후 재시도
+            logger.info("메모리 정리 후 재시도")
             force_memory_cleanup(intensive=True)
-            time.sleep(2)  # 정리 시간 확보
+            time.sleep(2)
             
             try:
                 # 더 보수적인 설정으로 재시도
-                config.CHUNK_SIZE = min(config.CHUNK_SIZE, 15000)  # 청크 크기 더 축소
-                config.MAX_MEMORY_GB = min(config.MAX_MEMORY_GB, 35)  # 메모리 제한 축소
+                config.CHUNK_SIZE = min(config.CHUNK_SIZE, 15000)
+                config.MAX_MEMORY_GB = min(config.MAX_MEMORY_GB, 35)
                 
                 train_df, test_df = data_loader.load_large_data_optimized()
                 logger.info(f"재시도 성공 - 학습: {train_df.shape}, 테스트: {test_df.shape}")
@@ -339,8 +339,8 @@ def execute_full_pipeline(config, quick_mode=False):
             logger.info("사용자 요청으로 파이프라인 중단")
             return None
         
-        # 2. 피처 엔지니어링 (메모리 효율적)
-        logger.info("2. 피처 엔지니어링")
+        # 2. 피처 엔지니어링 (성능 우선 모드)
+        logger.info("2. 피처 엔지니어링 (성능 우선 모드)")
         feature_engineer = modules['CTRFeatureEngineer'](config)
         
         # 타겟 컬럼 확인
@@ -357,18 +357,17 @@ def execute_full_pipeline(config, quick_mode=False):
                 logger.warning(f"임시 타겟 컬럼 '{target_col}' 생성")
         
         try:
-            # 메모리 효율 모드 활성화
-            feature_engineer.set_memory_efficient_mode(True)
+            # 성능 우선 모드 설정 (메모리 효율 모드 해제)
+            feature_engineer.set_memory_efficient_mode(False)
             
             # 메모리 상태 확인 후 피처 엔지니어링 수행
             if PSUTIL_AVAILABLE:
                 vm = psutil.virtual_memory()
-                if vm.available / (1024**3) < 15:  # 15GB 미만이면
+                if vm.available / (1024**3) < 12:  # 12GB 미만이면 단순화
                     logger.warning("메모리 부족으로 단순화된 피처 엔지니어링 수행")
-                    # 단순화된 피처만 생성
                     feature_cols = [col for col in train_df.columns if col != target_col]
-                    X_train = train_df[feature_cols[:50]].copy()  # 최대 50개 피처만
-                    X_test = test_df[feature_cols[:50]].copy() if set(feature_cols[:50]).issubset(test_df.columns) else test_df.iloc[:, :50].copy()
+                    X_train = train_df[feature_cols[:100]].copy()  # 최대 100개 피처만
+                    X_test = test_df[feature_cols[:100]].copy() if set(feature_cols[:100]).issubset(test_df.columns) else test_df.iloc[:, :100].copy()
                 else:
                     X_train, X_test = feature_engineer.create_all_features(
                         train_df, test_df, target_col=target_col
@@ -408,13 +407,13 @@ def execute_full_pipeline(config, quick_mode=False):
             feature_cols = [col for col in train_df.columns if col != target_col]
             
             # 메모리 상태에 따라 피처 수 조정
-            max_features = 100
+            max_features = 118
             if PSUTIL_AVAILABLE:
                 vm = psutil.virtual_memory()
                 if vm.available / (1024**3) < 10:
-                    max_features = 50
-                elif vm.available / (1024**3) < 20:
-                    max_features = 75
+                    max_features = 80
+                elif vm.available / (1024**3) < 15:
+                    max_features = 100
             
             selected_features = feature_cols[:max_features]
             X_train = train_df[selected_features].copy()
@@ -441,8 +440,8 @@ def execute_full_pipeline(config, quick_mode=False):
             logger.info("사용자 요청으로 파이프라인 중단")
             return None
         
-        # 3. 모델 학습 (안정성 강화)
-        logger.info("3. 모델 학습")
+        # 3. 앙상블 모델 학습 (성능 우선 파라미터)
+        logger.info("3. 앙상블 모델 학습 (성능 우선 파라미터)")
         successful_models = 0
         trained_models = {}
         
@@ -451,7 +450,7 @@ def execute_full_pipeline(config, quick_mode=False):
         
         if PSUTIL_AVAILABLE:
             vm = psutil.virtual_memory()
-            if vm.available / (1024**3) > 20:  # 20GB 이상 여유가 있으면
+            if vm.available / (1024**3) > 18:  # 18GB 이상 여유가 있으면
                 available_models.append('xgboost')
                 if TORCH_AVAILABLE and torch.cuda.is_available() and vm.available / (1024**3) > 25:
                     if not quick_mode:
@@ -459,7 +458,16 @@ def execute_full_pipeline(config, quick_mode=False):
         
         logger.info(f"사용 가능한 모델: {available_models}")
         
-        # 기본 모델 학습
+        # 앙상블 매니저 초기화
+        ensemble_manager = None
+        if 'CTRSuperEnsembleManager' in modules:
+            try:
+                ensemble_manager = modules['CTRSuperEnsembleManager'](config)
+                logger.info("앙상블 매니저 초기화 완료")
+            except Exception as e:
+                logger.warning(f"앙상블 매니저 초기화 실패: {e}")
+        
+        # 기본 모델 학습 (최적화된 파라미터)
         if 'ModelTrainer' in modules and modules['ModelTrainer'] is not None:
             try:
                 trainer = modules['ModelTrainer'](config)
@@ -480,19 +488,19 @@ def execute_full_pipeline(config, quick_mode=False):
                 
                 logger.info(f"데이터 분할 완료 - 학습: {X_train_split.shape}, 검증: {X_val_split.shape}")
                 
-                # 각 모델 학습
+                # 각 모델 학습 (최적화된 파라미터)
                 for model_type in available_models:
                     if cleanup_required:
                         break
                     
                     try:
-                        logger.info(f"=== {model_type} 모델 학습 시작 ===")
+                        logger.info(f"=== {model_type} 모델 학습 시작 (최적화된 파라미터) ===")
                         
                         # 메모리 정리
                         force_memory_cleanup()
                         
-                        # 모델 학습
-                        model = train_simple_model(
+                        # 최적화된 파라미터로 모델 학습
+                        model = train_optimized_model(
                             model_type, X_train_split, y_train_split, 
                             X_val_split, y_val_split, config
                         )
@@ -504,6 +512,12 @@ def execute_full_pipeline(config, quick_mode=False):
                                 'training_time': 0.0,
                                 'model_type': model_type
                             }
+                            
+                            # 앙상블 매니저에 모델 추가
+                            if ensemble_manager is not None:
+                                ensemble_manager.add_base_model(model_type, model)
+                                logger.info(f"{model_type} 모델을 앙상블 매니저에 추가")
+                            
                             successful_models += 1
                             logger.info(f"=== {model_type} 모델 학습 완료 ===")
                         else:
@@ -540,13 +554,41 @@ def execute_full_pipeline(config, quick_mode=False):
             logger.info("사용자 요청으로 파이프라인 중단")
             return None
         
-        # 4. 제출 파일 생성 (안정성 강화)
-        logger.info("4. 제출 파일 생성")
+        # 4. 앙상블 시스템 생성 및 학습
+        logger.info("4. 앙상블 시스템 생성 및 학습")
+        if ensemble_manager is not None and successful_models > 1:
+            try:
+                # Super Optimal 앙상블 생성
+                ensemble_manager.create_ensemble('super_optimal', target_ctr=0.0201, optimization_method='ultra_combined')
+                logger.info("Super Optimal 앙상블 생성 완료")
+                
+                # 앙상블 학습 (검증 데이터 사용)
+                if 'X_val_split' in locals() and 'y_val_split' in locals():
+                    ensemble_manager.train_all_ensembles(X_val_split, y_val_split)
+                    logger.info("앙상블 학습 완료")
+                
+                # 앙상블 평가
+                if 'X_val_split' in locals() and 'y_val_split' in locals():
+                    ensemble_results = ensemble_manager.evaluate_ensembles(X_val_split, y_val_split)
+                    logger.info("앙상블 평가 완료")
+                    
+                    # 최고 점수 확인
+                    best_scores = [v for k, v in ensemble_results.items() if k.startswith('ensemble_') and not k.endswith('_ctr_optimized')]
+                    if best_scores:
+                        best_score = max(best_scores)
+                        logger.info(f"최고 앙상블 점수: {best_score:.4f}")
+                
+            except Exception as e:
+                logger.error(f"앙상블 시스템 생성/학습 실패: {e}")
+                ensemble_manager = None
+        
+        # 5. 제출 파일 생성 (앙상블 우선)
+        logger.info("5. 제출 파일 생성 (앙상블 우선)")
         try:
             # 메모리 정리 후 제출 파일 생성
             force_memory_cleanup()
             
-            submission = generate_submission_safe(trained_models, X_test, config)
+            submission = generate_ensemble_submission(trained_models, X_test, config, ensemble_manager)
             logger.info(f"제출 파일 생성 완료: {len(submission):,}행")
             
         except Exception as e:
@@ -554,11 +596,12 @@ def execute_full_pipeline(config, quick_mode=False):
             # 기본 제출 파일 생성
             submission = create_default_submission(X_test, config)
         
-        # 5. 결과 요약 및 최종 정리
+        # 6. 결과 요약 및 최종 정리
         total_time = time.time() - start_time
-        logger.info(f"=== 전체 파이프라인 완료 ===")
+        logger.info(f"=== 전체 파이프라인 완료 (앙상블 모드) ===")
         logger.info(f"실행 시간: {total_time:.2f}초")
         logger.info(f"성공한 모델: {successful_models}개")
+        logger.info(f"앙상블 매니저 활성화: {'Yes' if ensemble_manager else 'No'}")
         logger.info(f"제출 파일: {len(submission):,}행")
         
         # 최종 메모리 상태
@@ -571,10 +614,11 @@ def execute_full_pipeline(config, quick_mode=False):
         
         return {
             'trained_models': trained_models,
+            'ensemble_manager': ensemble_manager,
             'submission': submission,
             'execution_time': total_time,
             'successful_models': successful_models,
-            'memory_efficient': True
+            'ensemble_enabled': ensemble_manager is not None
         }
         
     except Exception as e:
@@ -585,8 +629,8 @@ def execute_full_pipeline(config, quick_mode=False):
         force_memory_cleanup(intensive=True)
         raise
 
-def train_simple_model(model_type, X_train, y_train, X_val, y_val, config):
-    """개선된 간단한 모델 학습"""
+def train_optimized_model(model_type, X_train, y_train, X_val, y_val, config):
+    """최적화된 파라미터로 단일 모델 학습"""
     try:
         # 메모리 상태 체크
         if PSUTIL_AVAILABLE:
@@ -599,21 +643,27 @@ def train_simple_model(model_type, X_train, y_train, X_val, y_val, config):
             try:
                 import lightgbm as lgb
                 
-                # 메모리 효율적인 LightGBM 파라미터
+                # 최적화된 LightGBM 파라미터 (1단계 개선)
                 params = {
                     'objective': 'binary',
                     'metric': 'binary_logloss',
                     'boosting_type': 'gbdt',
-                    'num_leaves': 63,        # 31 → 63으로 증가
-                    'learning_rate': 0.05,   # 0.1 → 0.05로 감소
-                    'feature_fraction': 0.8,
+                    'num_leaves': 1023,      # 255 → 1023으로 증가
+                    'learning_rate': 0.015,  # 0.03 → 0.015로 감소
+                    'feature_fraction': 0.9, # 0.8 → 0.9로 증가
                     'bagging_fraction': 0.8,
                     'bagging_freq': 5,
+                    'min_child_samples': 200,
+                    'min_child_weight': 10,
+                    'lambda_l1': 2.0,
+                    'lambda_l2': 2.0,
+                    'max_depth': 15,         # 12 → 15로 증가
                     'verbose': -1,
                     'random_state': 42,
-                    'num_threads': min(config.NUM_WORKERS, 4),  # 스레드 수 제한
+                    'num_threads': min(config.NUM_WORKERS if hasattr(config, 'NUM_WORKERS') else 8, 8),
                     'force_row_wise': True,
-                    'max_bin': 255
+                    'max_bin': 255,
+                    'scale_pos_weight': 49.0
                 }
                 
                 train_data = lgb.Dataset(X_train, label=y_train)
@@ -622,10 +672,10 @@ def train_simple_model(model_type, X_train, y_train, X_val, y_val, config):
                 model = lgb.train(
                     params,
                     train_data,
-                    num_boost_round=200,     # 100 → 200으로 증가
+                    num_boost_round=300,     # 200 → 300으로 증가
                     valid_sets=[valid_data],
                     callbacks=[
-                        lgb.early_stopping(stopping_rounds=20),  # 10 → 20으로 증가
+                        lgb.early_stopping(stopping_rounds=50), # 20 → 50으로 증가
                         lgb.log_evaluation(0)
                     ]
                 )
@@ -640,18 +690,22 @@ def train_simple_model(model_type, X_train, y_train, X_val, y_val, config):
             try:
                 import xgboost as xgb
                 
-                # 메모리 효율적인 XGBoost 파라미터
+                # 최적화된 XGBoost 파라미터 (1단계 개선)
                 params = {
                     'objective': 'binary:logistic',
                     'eval_metric': 'logloss',
-                    'max_depth': 6,
-                    'learning_rate': 0.05,   # 0.1 → 0.05로 감소
+                    'max_depth': 8,          # 6 → 8로 증가
+                    'learning_rate': 0.015,  # 0.05 → 0.015로 감소
                     'subsample': 0.8,
-                    'colsample_bytree': 0.8,
+                    'colsample_bytree': 0.9, # 0.8 → 0.9로 증가
+                    'min_child_weight': 15,
+                    'reg_alpha': 2.0,
+                    'reg_lambda': 2.0,
                     'random_state': 42,
-                    'nthread': min(config.NUM_WORKERS, 4),
+                    'nthread': min(config.NUM_WORKERS if hasattr(config, 'NUM_WORKERS') else 8, 8),
                     'verbosity': 0,
-                    'tree_method': 'hist'    # GPU 대신 CPU 사용
+                    'tree_method': 'hist',
+                    'scale_pos_weight': 49.0
                 }
                 
                 dtrain = xgb.DMatrix(X_train, label=y_train)
@@ -660,9 +714,9 @@ def train_simple_model(model_type, X_train, y_train, X_val, y_val, config):
                 model = xgb.train(
                     params,
                     dtrain,
-                    num_boost_round=200,     # 100 → 200으로 증가
+                    num_boost_round=300,     # 200 → 300으로 증가
                     evals=[(dval, 'eval')],
-                    early_stopping_rounds=20, # 10 → 20으로 증가
+                    early_stopping_rounds=50, # 20 → 50으로 증가
                     verbose_eval=False
                 )
                 
@@ -676,22 +730,23 @@ def train_simple_model(model_type, X_train, y_train, X_val, y_val, config):
             try:
                 from catboost import CatBoostClassifier
                 
-                # 메모리 효율적인 CatBoost 설정
+                # 최적화된 CatBoost 설정
                 model = CatBoostClassifier(
-                    iterations=200,          # 100 → 200으로 증가
-                    depth=6,
-                    learning_rate=0.05,      # 0.1 → 0.05로 감소
+                    iterations=300,          # 200 → 300으로 증가
+                    depth=8,                 # 6 → 8로 증가
+                    learning_rate=0.015,     # 0.05 → 0.015로 감소
                     loss_function='Logloss',
                     random_seed=42,
                     verbose=False,
-                    thread_count=min(config.NUM_WORKERS, 4),
-                    task_type='CPU'          # GPU 대신 CPU 사용
+                    thread_count=min(config.NUM_WORKERS if hasattr(config, 'NUM_WORKERS') else 8, 8),
+                    task_type='CPU',
+                    auto_class_weights='Balanced'
                 )
                 
                 model.fit(
                     X_train, y_train,
                     eval_set=(X_val, y_val),
-                    early_stopping_rounds=20,  # 10 → 20으로 증가
+                    early_stopping_rounds=50,  # 20 → 50으로 증가
                     verbose=False
                 )
                 
@@ -707,10 +762,10 @@ def train_simple_model(model_type, X_train, y_train, X_val, y_val, config):
                 
                 model = LogisticRegression(
                     random_state=42, 
-                    max_iter=200,            # 100 → 200으로 증가
+                    max_iter=500,            # 200 → 500으로 증가
                     class_weight='balanced',
-                    C=1.0,
-                    solver='liblinear'       # 메모리 효율적인 solver
+                    C=0.5,                   # 1.0 → 0.5로 조정
+                    solver='liblinear'
                 )
                 model.fit(X_train, y_train)
                 return model
@@ -737,7 +792,7 @@ def create_dummy_models(X_train, y_train):
         try:
             lr_model = LogisticRegression(
                 random_state=42, 
-                max_iter=200,
+                max_iter=300,
                 class_weight='balanced',
                 solver='liblinear'
             )
@@ -752,13 +807,13 @@ def create_dummy_models(X_train, y_train):
         except Exception as e:
             logger.warning(f"Logistic Regression 생성 실패: {e}")
         
-        # Random Forest (메모리 효율적 설정)
+        # Random Forest (최적화된 설정)
         try:
             rf_model = RandomForestClassifier(
-                n_estimators=50,         # 메모리 절약
-                max_depth=10,
+                n_estimators=100,        # 50 → 100으로 증가
+                max_depth=12,            # 10 → 12로 증가
                 random_state=42,
-                n_jobs=1,                # 단일 스레드 사용
+                n_jobs=1,
                 class_weight='balanced'
             )
             rf_model.fit(X_train, y_train)
@@ -778,9 +833,9 @@ def create_dummy_models(X_train, y_train):
         logger.error(f"기본 모델 생성 실패: {e}")
         return {}
 
-def generate_submission_safe(trained_models, X_test, config):
-    """안전한 제출 파일 생성"""
-    logger.info("제출 파일 생성 시작")
+def generate_ensemble_submission(trained_models, X_test, config, ensemble_manager=None):
+    """앙상블 기반 제출 파일 생성"""
+    logger.info("앙상블 기반 제출 파일 생성 시작")
     
     test_size = len(X_test)
     logger.info(f"테스트 데이터 크기: {test_size:,}행")
@@ -799,7 +854,7 @@ def generate_submission_safe(trained_models, X_test, config):
         
         # 제출 템플릿 로딩
         try:
-            submission_path = config.SUBMISSION_TEMPLATE_PATH
+            submission_path = getattr(config, 'SUBMISSION_TEMPLATE_PATH', Path('data/sample_submission.csv'))
             if submission_path.exists():
                 submission = pd.read_csv(submission_path, encoding='utf-8')
                 logger.info(f"제출 템플릿 로딩 완료: {len(submission):,}행")
@@ -824,11 +879,23 @@ def generate_submission_safe(trained_models, X_test, config):
                 'clicked': 0.0201
             })
         
-        # 예측 수행 (배치 처리)
+        # 예측 수행 (앙상블 우선)
         predictions = None
         prediction_method = ""
         
-        if trained_models:
+        # 앙상블 매니저가 있으면 앙상블 예측 우선 사용
+        if ensemble_manager is not None:
+            try:
+                logger.info("앙상블 매니저로 예측 수행")
+                predictions = ensemble_manager.predict_with_best_ensemble(X_test)
+                prediction_method = "Ensemble"
+                logger.info("앙상블 예측 완료")
+            except Exception as e:
+                logger.warning(f"앙상블 예측 실패: {e}")
+                predictions = None
+        
+        # 앙상블 예측이 실패하면 단일 모델 사용
+        if predictions is None and trained_models:
             # 우선순위: lightgbm > xgboost > catboost > logistic > random_forest
             model_priority = ['lightgbm', 'xgboost', 'catboost', 'logistic', 'random_forest']
             
@@ -874,7 +941,7 @@ def generate_submission_safe(trained_models, X_test, config):
                         
                         predictions = np.array(batch_predictions)
                         predictions = np.clip(predictions, 0.001, 0.999)
-                        prediction_method = model_name
+                        prediction_method = f"Single_{model_name}"
                         break
                         
                     except Exception as e:
@@ -912,7 +979,7 @@ def generate_submission_safe(trained_models, X_test, config):
         final_min = submission['clicked'].min()
         final_max = submission['clicked'].max()
         
-        logger.info(f"=== 제출 파일 생성 결과 ===")
+        logger.info(f"=== 제출 파일 생성 결과 (앙상블) ===")
         logger.info(f"예측 방법: {prediction_method}")
         logger.info(f"처리된 데이터: {test_size:,}행")
         logger.info(f"평균 CTR: {final_ctr:.4f}")
@@ -1046,7 +1113,7 @@ def reproduce_score():
                 return False
             
             # 제출 파일 생성
-            submission = generate_submission_safe(models, test_df, config)
+            submission = generate_ensemble_submission(models, test_df, config)
             
             # 제출 파일 저장
             output_path = Path("submission_reproduced.csv")
@@ -1076,7 +1143,7 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     # 명령행 인수 파싱
-    parser = argparse.ArgumentParser(description="CTR 모델링 최종 제출 시스템 - 메모리 최적화")
+    parser = argparse.ArgumentParser(description="CTR 모델링 앙상블 시스템 - 1단계 최적화")
     parser.add_argument("--mode", choices=["train", "inference", "reproduce"], 
                        default="train", help="실행 모드")
     parser.add_argument("--quick", action="store_true",
@@ -1085,7 +1152,7 @@ def main():
     args = parser.parse_args()
     
     try:
-        logger.info("=== CTR 모델링 최종 제출 시스템 시작 ===")
+        logger.info("=== CTR 모델링 앙상블 시스템 시작 ===")
         
         # 환경 검증
         if not validate_environment():
@@ -1094,7 +1161,7 @@ def main():
         
         # 모드별 실행
         if args.mode == "train":
-            logger.info("학습 모드 시작")
+            logger.info("학습 모드 시작 (앙상블 활성화)")
             
             # 설정 초기화
             from config import Config
@@ -1108,7 +1175,7 @@ def main():
                 logger.info("학습 모드 완료")
                 logger.info(f"실행 시간: {results['execution_time']:.2f}초")
                 logger.info(f"성공 모델: {results['successful_models']}개")
-                logger.info(f"메모리 효율 모드: {results.get('memory_efficient', True)}")
+                logger.info(f"앙상블 활성화: {results.get('ensemble_enabled', False)}")
             else:
                 logger.error("학습 모드 실패")
                 sys.exit(1)
@@ -1133,7 +1200,7 @@ def main():
                 logger.error("Private Score 복원 실패")
                 sys.exit(1)
         
-        logger.info("=== CTR 모델링 최종 제출 시스템 종료 ===")
+        logger.info("=== CTR 모델링 앙상블 시스템 종료 ===")
         
     except KeyboardInterrupt:
         logger.info("사용자에 의해 실행이 중단되었습니다")
