@@ -4,54 +4,54 @@ import os
 from pathlib import Path
 import logging
 
-# PyTorch import 안전 처리
+# PyTorch import safe handling
 try:
     import torch
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-    logging.warning("PyTorch가 설치되지 않았습니다. GPU 기능이 비활성화됩니다.")
+    logging.warning("PyTorch not installed. GPU functions will be disabled.")
 
 class Config:
-    """프로젝트 전체 설정 관리"""
+    """Project-wide configuration management"""
     
-    # 기본 경로 설정
+    # Basic path settings
     BASE_DIR = Path(__file__).parent
     DATA_DIR = BASE_DIR / "data"
     MODEL_DIR = BASE_DIR / "models"
     LOG_DIR = BASE_DIR / "logs"
     OUTPUT_DIR = BASE_DIR / "output"
     
-    # 데이터 파일 경로
+    # Data file paths
     TRAIN_PATH = DATA_DIR / "train.parquet"
     TEST_PATH = DATA_DIR / "test.parquet"
     SUBMISSION_PATH = DATA_DIR / "sample_submission.csv"
     SUBMISSION_TEMPLATE_PATH = DATA_DIR / "sample_submission.csv"
     
-    # 타겟 컬럼 설정
+    # Target column settings
     TARGET_COLUMN_CANDIDATES = [
-        'clicked',      # 가장 일반적인 CTR 타겟 컬럼명
-        'click',        # 축약형
-        'target',       # 일반적인 타겟명
-        'label',        # 라벨
-        'y',            # 수학적 표현
-        'is_click',     # boolean 형태
-        'ctr',          # CTR 직접 표현
-        'response',     # 응답
-        'conversion',   # 전환
-        'action'        # 액션
+        'clicked',      # Most common CTR target column name
+        'click',        # Abbreviated form
+        'target',       # General target name
+        'label',        # Label
+        'y',            # Mathematical expression
+        'is_click',     # Boolean form
+        'ctr',          # Direct CTR expression
+        'response',     # Response
+        'conversion',   # Conversion
+        'action'        # Action
     ]
     
-    # 타겟 컬럼 감지 설정
+    # Target column detection settings
     TARGET_DETECTION_CONFIG = {
-        'binary_values': {0, 1},           # 이진 분류 값
-        'min_ctr': 0.001,                  # 최소 CTR (0.1%)
-        'max_ctr': 0.1,                    # 최대 CTR (10%)
-        'prefer_low_ctr': True,            # 낮은 CTR 선호 (CTR 특성)
-        'typical_ctr_range': (0.005, 0.05) # 일반적인 CTR 범위 (0.5%-5%)
+        'binary_values': {0, 1},           # Binary classification values
+        'min_ctr': 0.001,                  # Minimum CTR (0.1%)
+        'max_ctr': 0.1,                    # Maximum CTR (10%)
+        'prefer_low_ctr': True,            # Prefer low CTR (CTR characteristic)
+        'typical_ctr_range': (0.005, 0.05) # Typical CTR range (0.5%-5%)
     }
     
-    # GPU 및 하드웨어 설정
+    # GPU and hardware settings
     if TORCH_AVAILABLE:
         DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         GPU_AVAILABLE = torch.cuda.is_available()
@@ -64,7 +64,7 @@ class Config:
     USE_MIXED_PRECISION = True
     GPU_OPTIMIZATION_LEVEL = 1
     
-    # 메모리 설정
+    # Memory settings
     MAX_MEMORY_GB = 45
     CHUNK_SIZE = 25000
     BATCH_SIZE_GPU = 4096
@@ -72,7 +72,7 @@ class Config:
     PREFETCH_FACTOR = 2
     NUM_WORKERS = 6
     
-    # 데이터 처리 전략
+    # Data processing strategy
     TARGET_DATA_USAGE_RATIO = 1.0
     MIN_TRAIN_SIZE = 100000
     MAX_TRAIN_SIZE = 12000000
@@ -81,19 +81,19 @@ class Config:
     FORCE_FULL_TEST_PREDICTION = True
     FORCE_FULL_DATA_PROCESSING = True
     
-    # 대용량 데이터 검증 설정
+    # Large data validation settings
     EXPECTED_TRAIN_SIZE = 10000000
     EXPECTED_TEST_SIZE = 1500000
     DATA_SIZE_TOLERANCE = 0.3
     REQUIRE_REAL_DATA = True
     SAMPLE_DATA_FALLBACK = False
     
-    # 모델 하이퍼파라미터
+    # Model hyperparameters
     RANDOM_STATE = 42
     N_SPLITS = 3
     TEST_SIZE = 0.2
     
-    # LightGBM 파라미터
+    # LightGBM parameters
     LGBM_PARAMS = {
         'objective': 'binary',
         'metric': 'binary_logloss',
@@ -121,7 +121,7 @@ class Config:
         'feature_fraction_bynode': 0.8
     }
     
-    # XGBoost 파라미터
+    # XGBoost parameters
     XGB_PARAMS = {
         'objective': 'binary:logistic',
         'eval_metric': 'logloss',
@@ -147,7 +147,7 @@ class Config:
         'gamma': 0.1
     }
     
-    # CatBoost 파라미터
+    # CatBoost parameters
     CAT_PARAMS = {
         'loss_function': 'Logloss',
         'eval_metric': 'Logloss',
@@ -173,7 +173,7 @@ class Config:
         'rsm': 0.8
     }
     
-    # 딥러닝 모델 파라미터
+    # Deep learning model parameters
     NN_PARAMS = {
         'hidden_dims': [512, 256, 128, 64],
         'dropout_rate': 0.3,
@@ -194,7 +194,7 @@ class Config:
         'min_lr': 1e-6
     }
     
-    # 피처 엔지니어링 설정
+    # Feature engineering settings
     FEATURE_CONFIG = {
         'target_encoding_smoothing': 150,
         'frequency_threshold': 100,
@@ -220,14 +220,14 @@ class Config:
         'memory_efficient_mode_threshold': 5000000,
         'chunked_feature_engineering': True,
         'feature_importance_threshold': 0.001,
-        # 타겟 컬럼 관련 설정
+        # Target column related settings
         'target_column_candidates': TARGET_COLUMN_CANDIDATES,
         'target_detection': TARGET_DETECTION_CONFIG,
         'auto_detect_target': True,
         'strict_target_validation': True
     }
     
-    # 평가 설정
+    # Evaluation settings
     EVALUATION_CONFIG = {
         'ap_weight': 0.5,
         'wll_weight': 0.5,
@@ -246,7 +246,7 @@ class Config:
         'evaluation_sample_size': 500000
     }
     
-    # 앙상블 설정
+    # Ensemble settings
     ENSEMBLE_CONFIG = {
         'use_optimal_ensemble': True,
         'use_stabilized_ensemble': True,
@@ -274,7 +274,7 @@ class Config:
         'ensemble_memory_limit': 8.0
     }
     
-    # 로깅 설정
+    # Logging settings
     LOGGING_CONFIG = {
         'level': logging.INFO,
         'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -287,7 +287,7 @@ class Config:
         'data_processing_logging': True
     }
     
-    # 실시간 추론 설정
+    # Real-time inference settings
     INFERENCE_CONFIG = {
         'batch_size': 2000,
         'single_prediction_batch_size': 1,
@@ -324,7 +324,7 @@ class Config:
         'relative_path_only': True
     }
     
-    # 하이퍼파라미터 튜닝 설정
+    # Hyperparameter tuning settings
     TUNING_CONFIG = {
         'n_trials': 50,
         'timeout': 7200,
@@ -347,7 +347,7 @@ class Config:
         'large_data_tuning': True
     }
     
-    # 메모리 관리 설정
+    # Memory management settings
     MEMORY_CONFIG = {
         'max_memory_gb': MAX_MEMORY_GB,
         'auto_gc': True,
@@ -371,7 +371,7 @@ class Config:
         'large_data_memory_strategy': True
     }
     
-    # GPU 설정
+    # GPU settings
     GPU_CONFIG = {
         'gpu_memory_fraction': 0.8,
         'allow_growth': True,
@@ -395,7 +395,7 @@ class Config:
         'activation_checkpointing': True
     }
     
-    # 병렬 처리 설정
+    # Parallel processing settings
     PARALLEL_CONFIG = {
         'num_workers': NUM_WORKERS,
         'max_workers': NUM_WORKERS,
@@ -419,7 +419,7 @@ class Config:
         'async_processing': True
     }
     
-    # 데이터 처리 설정
+    # Data processing settings
     DATA_CONFIG = {
         'use_pyarrow': True,
         'compression': 'snappy',
@@ -447,13 +447,13 @@ class Config:
         'chunk_size': CHUNK_SIZE,
         'max_memory_usage': MAX_MEMORY_GB,
         'large_data_optimization': True,
-        # 타겟 컬럼 처리 관련
+        # Target column processing related
         'target_column_detection': True,
         'validate_target_column': True,
         'target_column_fallback': 'clicked'
     }
     
-    # 모델 저장/로딩 설정
+    # Model save/load settings
     MODEL_IO_CONFIG = {
         'compression_level': 6,
         'pickle_protocol': 5,
@@ -477,7 +477,7 @@ class Config:
     
     @classmethod
     def get_target_column_config(cls):
-        """타겟 컬럼 설정 반환"""
+        """Return target column configuration"""
         return {
             'candidates': cls.TARGET_COLUMN_CANDIDATES,
             'detection_config': cls.TARGET_DETECTION_CONFIG,
@@ -494,8 +494,8 @@ class Config:
     
     @classmethod
     def verify_data_requirements(cls):
-        """데이터 요구사항 검증"""
-        print("=== 대용량 데이터 요구사항 검증 ===")
+        """Verify data requirements"""
+        print("=== Large data requirements verification ===")
         
         requirements = {
             'train_file_exists': cls.TRAIN_PATH.exists(),
@@ -508,7 +508,7 @@ class Config:
             'expected_test_size': cls.EXPECTED_TEST_SIZE
         }
         
-        # 실제 파일 크기에 맞춘 검증 기준
+        # Verification criteria based on actual file sizes
         min_train_size_mb = 5000
         min_test_size_mb = 800
         
@@ -520,7 +520,7 @@ class Config:
             status = "✓" if (isinstance(value, bool) and value) or (isinstance(value, (int, float)) and value > 0) else "✗"
             print(f"{status} {key}: {value}")
         
-        # 전체 요구사항 충족 여부
+        # Check if all requirements are met
         critical_checks = [
             requirements['train_file_exists'],
             requirements['test_file_exists'],
@@ -530,20 +530,20 @@ class Config:
         ]
         
         all_requirements_met = all(critical_checks)
-        print(f"\n전체 요구사항 충족: {'✓' if all_requirements_met else '✗'}")
+        print(f"\nAll requirements met: {'✓' if all_requirements_met else '✗'}")
         
         if all_requirements_met:
-            print("대용량 데이터 처리 준비 완료!")
+            print("Large data processing ready!")
         else:
-            print("일부 요구사항이 충족되지 않았습니다.")
+            print("Some requirements not met.")
             
-        print("=== 검증 완료 ===\n")
+        print("=== Verification completed ===\n")
         
         return requirements
     
     @classmethod
     def setup_directories(cls):
-        """필요한 디렉터리 생성"""
+        """Create necessary directories"""
         directories = [cls.DATA_DIR, cls.MODEL_DIR, cls.LOG_DIR, cls.OUTPUT_DIR]
         
         created_dirs = []
@@ -560,27 +560,27 @@ class Config:
                     failed_dirs.append(str(dir_path))
                     
             except Exception as e:
-                print(f"디렉터리 생성 실패 {dir_path}: {e}")
+                print(f"Directory creation failed {dir_path}: {e}")
                 failed_dirs.append(str(dir_path))
         
         if created_dirs:
-            print(f"생성된 디렉터리: {created_dirs}")
+            print(f"Created directories: {created_dirs}")
         
         if failed_dirs:
-            print(f"생성 실패한 디렉터리: {failed_dirs}")
+            print(f"Failed to create directories: {failed_dirs}")
             
-        # 데이터 디렉터리 강제 생성
+        # Force create data directory
         if not cls.DATA_DIR.exists():
             try:
                 os.makedirs(cls.DATA_DIR, exist_ok=True)
-                print(f"강제 생성된 데이터 디렉터리: {cls.DATA_DIR}")
+                print(f"Force created data directory: {cls.DATA_DIR}")
             except Exception as e:
-                raise RuntimeError(f"데이터 디렉터리 생성 실패: {cls.DATA_DIR}, 오류: {e}")
+                raise RuntimeError(f"Data directory creation failed: {cls.DATA_DIR}, error: {e}")
     
     @classmethod
     def verify_paths(cls):
-        """경로 유효성 검증"""
-        print("=== 경로 유효성 검증 ===")
+        """Verify path validity"""
+        print("=== Path validity verification ===")
         
         paths_to_check = {
             'BASE_DIR': cls.BASE_DIR,
@@ -600,21 +600,21 @@ class Config:
             
             if name in ['TRAIN_PATH', 'TEST_PATH'] and exists:
                 file_size_mb = abs_path.stat().st_size / (1024**2)
-                print(f"{name}: {abs_path} (존재: {exists}, 크기: {file_size_mb:.1f}MB)")
+                print(f"{name}: {abs_path} (exists: {exists}, size: {file_size_mb:.1f}MB)")
             else:
-                print(f"{name}: {abs_path} (존재: {exists})")
+                print(f"{name}: {abs_path} (exists: {exists})")
         
-        print("=== 검증 완료 ===")
+        print("=== Verification completed ===")
     
     @classmethod
     def setup_logging(cls):
-        """로깅 설정 초기화"""
+        """Initialize logging configuration"""
         cls.setup_directories()
         
         logger = logging.getLogger()
         logger.setLevel(cls.LOGGING_CONFIG['level'])
         
-        # 기존 핸들러 제거
+        # Remove existing handlers
         for handler in logger.handlers[:]:
             logger.removeHandler(handler)
         
@@ -631,15 +631,15 @@ class Config:
                 file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
                 file_handler.setFormatter(formatter)
                 logger.addHandler(file_handler)
-                print(f"로그 파일 생성: {log_file_path}")
+                print(f"Log file created: {log_file_path}")
             except Exception as e:
-                print(f"파일 핸들러 설정 실패: {e}")
+                print(f"File handler setup failed: {e}")
         
         return logger
     
     @classmethod
     def get_memory_config(cls):
-        """메모리 설정 반환"""
+        """Return memory configuration"""
         try:
             import psutil
             
@@ -674,7 +674,7 @@ class Config:
     
     @classmethod
     def get_data_config(cls):
-        """대용량 데이터 처리 설정 반환"""
+        """Return large data processing configuration"""
         memory_config = cls.get_memory_config()
         
         return {
@@ -704,7 +704,7 @@ class Config:
     
     @classmethod
     def get_safe_memory_limits(cls):
-        """안전한 메모리 한계 설정"""
+        """Set safe memory limits"""
         try:
             import psutil
             
@@ -760,9 +760,9 @@ class Config:
 
     @classmethod
     def setup_gpu_environment(cls):
-        """GPU 환경 설정"""
+        """Set up GPU environment"""
         if not cls.GPU_AVAILABLE:
-            print("GPU를 사용할 수 없습니다. CPU 모드로 실행됩니다.")
+            print("GPU unavailable. Running in CPU mode.")
             return False
             
         try:
@@ -772,30 +772,30 @@ class Config:
                 torch.backends.cudnn.benchmark = cls.GPU_CONFIG['cudnn_benchmark']
                 torch.backends.cudnn.deterministic = cls.GPU_CONFIG['cudnn_deterministic']
                 
-                # Mixed Precision 설정
+                # Mixed Precision settings
                 if cls.GPU_CONFIG['mixed_precision']:
                     torch.backends.cuda.matmul.allow_tf32 = True
                     torch.backends.cudnn.allow_tf32 = True
                 
-                # 메모리 최적화
+                # Memory optimization
                 torch.cuda.set_per_process_memory_fraction(cls.GPU_CONFIG['gpu_memory_fraction'])
                 
-                # GPU 정보 출력
+                # Display GPU information
                 gpu_name = torch.cuda.get_device_name(0)
                 gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
                 
-                print(f"GPU 환경 설정 완료: {gpu_name} ({gpu_memory:.1f}GB)")
-                print(f"GPU 메모리 사용률 제한: {cls.GPU_CONFIG['gpu_memory_fraction']*100}%")
+                print(f"GPU environment setup completed: {gpu_name} ({gpu_memory:.1f}GB)")
+                print(f"GPU memory usage limit: {cls.GPU_CONFIG['gpu_memory_fraction']*100}%")
                 print(f"Mixed Precision: {cls.GPU_CONFIG['mixed_precision']}")
                 
                 return True
                 
         except Exception as e:
-            print(f"GPU 환경 설정 실패: {e}")
+            print(f"GPU environment setup failed: {e}")
             
         return False
 
-# 환경변수 설정
+# Environment variable settings
 try:
     os.environ['PYTHONHASHSEED'] = str(Config.RANDOM_STATE)
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
@@ -804,11 +804,11 @@ try:
     os.environ['NUMEXPR_NUM_THREADS'] = str(Config.NUM_WORKERS)
     os.environ['NUMBA_NUM_THREADS'] = str(Config.NUM_WORKERS)
     
-    # 대용량 데이터 처리용 환경변수
+    # Environment variables for large data processing
     os.environ['PANDAS_MAX_COLUMNS'] = '2000'
     os.environ['PANDAS_MAX_ROWS'] = '15000000'
     
-    # CUDA 환경 변수
+    # CUDA environment variables
     if Config.GPU_AVAILABLE:
         os.environ['CUDA_VISIBLE_DEVICES'] = Config.CUDA_VISIBLE_DEVICES
         os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
@@ -816,40 +816,40 @@ try:
         os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:1024'
         os.environ['CUDA_MEMORY_FRACTION'] = '0.8'
     
-    # 메모리 관리 환경 변수
+    # Memory management environment variables
     os.environ['MALLOC_TRIM_THRESHOLD_'] = '200000'
     os.environ['MALLOC_MMAP_THRESHOLD_'] = '262144'
     os.environ['MALLOC_MMAP_MAX_'] = '65536'
     
-    # 규칙 준수 환경 변수
+    # Rule compliance environment variables
     os.environ['PYTHONIOENCODING'] = 'utf-8'
     os.environ['LC_ALL'] = 'C.UTF-8'
     os.environ['LANG'] = 'C.UTF-8'
     
-    # PyArrow 최적화
+    # PyArrow optimization
     os.environ['ARROW_USER_SIMD_LEVEL'] = 'AVX2'
     os.environ['ARROW_DEFAULT_MEMORY_POOL'] = 'system'
     
-    # LightGBM/XGBoost 최적화
+    # LightGBM/XGBoost optimization
     os.environ['LIGHTGBM_EXEC_PREFER'] = 'disk'
     os.environ['XGBOOST_CACHE_PREFERENCE'] = 'memory'
     
 except Exception as e:
-    print(f"환경 변수 설정 실패: {e}")
+    print(f"Environment variable setup failed: {e}")
 
-# 시작 시 검증
+# Initialization validation
 try:
-    print("=== CTR 모델링 시스템 초기화 ===")
+    print("=== CTR modeling system initialization ===")
     Config.setup_directories()
     Config.verify_paths()
     Config.verify_data_requirements()
     
-    # GPU 환경 설정
+    # GPU environment setup
     if Config.setup_gpu_environment():
-        print("GPU 환경 설정 성공")
+        print("GPU environment setup successful")
     else:
-        print("CPU 모드로 실행됩니다")
+        print("Running in CPU mode")
         
-    print("=== 초기화 완료 ===")
+    print("=== Initialization completed ===")
 except Exception as e:
-    print(f"초기화 실패: {e}")
+    print(f"Initialization failed: {e}")

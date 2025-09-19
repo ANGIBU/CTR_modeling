@@ -26,7 +26,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 class CTRInferenceEngine:
-    """CTR 예측 전용 실시간 추론 엔진 - 최종 완성 버전"""
+    """CTR prediction dedicated real-time inference engine - final complete version"""
     
     def __init__(self, model_dir: str = "models"):
         self.model_dir = Path(model_dir)
@@ -69,7 +69,7 @@ class CTRInferenceEngine:
         self.postprocessor = CTRPostProcessor()
     
     def _initialize_default_features(self) -> Dict[str, float]:
-        """기본 피처 값 초기화"""
+        """Initialize default feature values"""
         return {
             'feat_e_1': 65.0, 'feat_e_3': 5.0, 'feat_e_4': -0.05, 'feat_e_5': -0.02,
             'feat_e_6': -0.04, 'feat_e_7': 21.0, 'feat_e_8': -172.0, 'feat_e_9': -10.0,
@@ -82,18 +82,18 @@ class CTRInferenceEngine:
         }
     
     def load_models(self) -> bool:
-        """저장된 모델들 로딩 - 앙상블 지원"""
-        logger.info(f"모델 로딩 시작: {self.model_dir}")
+        """Load saved models - ensemble support"""
+        logger.info(f"Model loading started: {self.model_dir}")
         
         if not self.model_dir.exists():
-            logger.error(f"모델 디렉터리가 존재하지 않습니다: {self.model_dir}")
+            logger.error(f"Model directory does not exist: {self.model_dir}")
             return False
         
         try:
             model_files = list(self.model_dir.glob("*_model.pkl"))
             
             if not model_files:
-                logger.error("로딩할 모델 파일이 없습니다")
+                logger.error("No model files to load")
                 return False
             
             calibrated_count = 0
@@ -114,14 +114,14 @@ class CTRInferenceEngine:
                             calibration_method = getattr(model.calibrator, 'best_method', 'Unknown')
                         calibration_status = f"Yes ({calibration_method})"
                     
-                    logger.info(f"{model_name} 모델 로딩 완료 - Calibration: {calibration_status}")
+                    logger.info(f"{model_name} model loading completed - Calibration: {calibration_status}")
                     
                     if self.expected_feature_columns is None and hasattr(model, 'feature_names'):
                         self.expected_feature_columns = model.feature_names
-                        logger.info(f"피처 순서 설정: {len(self.expected_feature_columns)}개")
+                        logger.info(f"Feature order set: {len(self.expected_feature_columns)} features")
                         
                 except Exception as e:
-                    logger.error(f"{model_name} 모델 로딩 실패: {e}")
+                    logger.error(f"{model_name} model loading failed: {e}")
                     continue
             
             feature_engineer_path = self.model_dir / "feature_engineer.pkl"
@@ -129,37 +129,37 @@ class CTRInferenceEngine:
                 try:
                     with open(feature_engineer_path, 'rb') as f:
                         self.feature_engineer = pickle.load(f)
-                    logger.info("피처 엔지니어 로딩 완료")
+                    logger.info("Feature engineer loading completed")
                     
                     if hasattr(self.feature_engineer, 'final_feature_columns'):
                         if self.expected_feature_columns is None:
                             self.expected_feature_columns = self.feature_engineer.final_feature_columns
-                            logger.info(f"피처 엔지니어에서 피처 순서 설정: {len(self.expected_feature_columns)}개")
+                            logger.info(f"Feature order set from feature engineer: {len(self.expected_feature_columns)} features")
                             
                 except Exception as e:
-                    logger.warning(f"피처 엔지니어 로딩 실패: {e}")
+                    logger.warning(f"Feature engineer loading failed: {e}")
             
             ensemble_manager_path = self.model_dir / "ensemble_manager.pkl"
             if ensemble_manager_path.exists():
                 try:
                     with open(ensemble_manager_path, 'rb') as f:
                         self.ensemble_manager = pickle.load(f)
-                    logger.info("앙상블 매니저 로딩 완료")
+                    logger.info("Ensemble manager loading completed")
                 except Exception as e:
-                    logger.warning(f"앙상블 매니저 로딩 실패: {e}")
+                    logger.warning(f"Ensemble manager loading failed: {e}")
             
             self.is_loaded = len(self.models) > 0
-            logger.info(f"총 {len(self.models)}개 모델 로딩 완료 (캘리브레이션 적용: {calibrated_count}개)")
-            logger.info(f"앙상블 매니저: {'로딩됨' if self.ensemble_manager else '없음'}")
+            logger.info(f"Total {len(self.models)} models loaded (calibration applied: {calibrated_count})")
+            logger.info(f"Ensemble manager: {'Loaded' if self.ensemble_manager else 'None'}")
             
             return self.is_loaded
             
         except Exception as e:
-            logger.error(f"모델 로딩 실패: {e}")
+            logger.error(f"Model loading failed: {e}")
             return False
     
     def _create_features(self, input_data: Dict[str, Any]) -> pd.DataFrame:
-        """입력 데이터로부터 피처 생성"""
+        """Create features from input data"""
         try:
             features = self.default_features.copy()
             
@@ -220,12 +220,12 @@ class CTRInferenceEngine:
             return df
             
         except Exception as e:
-            logger.error(f"피처 생성 실패: {e}")
+            logger.error(f"Feature creation failed: {e}")
             df = pd.DataFrame([self.default_features])
             return df.astype('float32')
     
     def _ensure_feature_consistency(self, df: pd.DataFrame) -> pd.DataFrame:
-        """모델 학습 시와 동일한 피처 순서 보장"""
+        """Ensure same feature order as model training"""
         try:
             if self.expected_feature_columns is None:
                 return df
@@ -239,7 +239,7 @@ class CTRInferenceEngine:
             return df
             
         except Exception as e:
-            logger.error(f"피처 일관성 보장 실패: {e}")
+            logger.error(f"Feature consistency check failed: {e}")
             return df
     
     def predict_single(self, input_data: Dict[str, Any], 
@@ -247,7 +247,7 @@ class CTRInferenceEngine:
                       use_calibration: bool = True,
                       use_ensemble: bool = True,
                       use_postprocessing: bool = True) -> Dict[str, Any]:
-        """단일 CTR 예측 - 최종 완성 버전"""
+        """Single CTR prediction - final complete version"""
         start_time = time.time()
         
         try:
@@ -255,7 +255,7 @@ class CTRInferenceEngine:
                 self.inference_stats['total_requests'] += 1
             
             if not self.is_loaded:
-                raise ValueError("모델이 로딩되지 않았습니다")
+                raise ValueError("Models not loaded")
             
             df = self._create_features(input_data)
             df = self._ensure_feature_consistency(df)
@@ -275,9 +275,9 @@ class CTRInferenceEngine:
                         with self.lock:
                             self.inference_stats['ensemble_stats']['ensemble_predictions'] += 1
                         
-                        logger.debug("앙상블 예측 사용")
+                        logger.debug("Using ensemble prediction")
                     except Exception as e:
-                        logger.warning(f"앙상블 예측 실패, 단일 모델 사용: {e}")
+                        logger.warning(f"Ensemble prediction failed, using single model: {e}")
                         use_ensemble = False
                 
                 if not use_ensemble:
@@ -285,7 +285,7 @@ class CTRInferenceEngine:
                         model_name = list(self.models.keys())[0]
                     
                     if model_name not in self.models:
-                        raise ValueError(f"모델 '{model_name}'을 찾을 수 없습니다")
+                        raise ValueError(f"Model '{model_name}' not found")
                     
                     model = self.models[model_name]
                     
@@ -328,7 +328,7 @@ class CTRInferenceEngine:
                 prediction_proba = max(0.0001, min(0.9999, prediction_proba))
                 
             except Exception as e:
-                logger.warning(f"모델 예측 실패, 기본값 사용: {e}")
+                logger.warning(f"Model prediction failed, using default value: {e}")
                 prediction_proba = self.ctr_baseline
                 raw_prediction = self.ctr_baseline
                 calibration_applied = False
@@ -387,7 +387,7 @@ class CTRInferenceEngine:
             with self.lock:
                 self.inference_stats['failed_predictions'] += 1
             
-            logger.error(f"CTR 예측 실패: {e}")
+            logger.error(f"CTR prediction failed: {e}")
             
             return {
                 'ctr_prediction': self.ctr_baseline,
@@ -410,12 +410,12 @@ class CTRInferenceEngine:
                      use_calibration: bool = True,
                      use_ensemble: bool = True,
                      use_postprocessing: bool = True) -> List[Dict[str, Any]]:
-        """배치 CTR 예측 - 최종 완성 버전"""
+        """Batch CTR prediction - final complete version"""
         batch_size = 15000
         results = []
         
-        logger.info(f"배치 CTR 예측 시작: {len(input_data)}개 샘플")
-        logger.info(f"설정 - Calibration: {'On' if use_calibration else 'Off'}, "
+        logger.info(f"Batch CTR prediction started: {len(input_data)} samples")
+        logger.info(f"Settings - Calibration: {'On' if use_calibration else 'Off'}, "
                    f"Ensemble: {'On' if use_ensemble else 'Off'}, "
                    f"Postprocessing: {'On' if use_postprocessing else 'Off'}")
         
@@ -446,7 +446,7 @@ class CTRInferenceEngine:
                             with self.lock:
                                 self.inference_stats['ensemble_stats']['ensemble_predictions'] += len(batch)
                         except Exception as e:
-                            logger.warning(f"배치 앙상블 예측 실패: {e}")
+                            logger.warning(f"Batch ensemble prediction failed: {e}")
                             use_ensemble = False
                     
                     if not use_ensemble:
@@ -491,7 +491,7 @@ class CTRInferenceEngine:
                     raw_predictions = np.clip(raw_predictions, 0.0001, 0.9999)
                     
                 except Exception as e:
-                    logger.warning(f"배치 모델 예측 실패: {e}")
+                    logger.warning(f"Batch model prediction failed: {e}")
                     predictions_proba = np.full(len(batch), self.ctr_baseline)
                     raw_predictions = np.full(len(batch), self.ctr_baseline)
                     prediction_method = "default"
@@ -551,7 +551,7 @@ class CTRInferenceEngine:
                     results.append(result)
                 
             except Exception as e:
-                logger.error(f"배치 {i//batch_size + 1} 예측 실패: {e}")
+                logger.error(f"Batch {i//batch_size + 1} prediction failed: {e}")
                 
                 for j in range(len(batch)):
                     result = {
@@ -575,7 +575,7 @@ class CTRInferenceEngine:
             if i % (batch_size * 10) == 0:
                 gc.collect()
         
-        logger.info(f"배치 CTR 예측 완료: {len(results)}개 결과")
+        logger.info(f"Batch CTR prediction completed: {len(results)} results")
         return results
     
     def predict_test_data(self, test_df: pd.DataFrame, 
@@ -583,14 +583,14 @@ class CTRInferenceEngine:
                          use_calibration: bool = True,
                          use_ensemble: bool = True,
                          use_postprocessing: bool = True) -> np.ndarray:
-        """테스트 데이터 전체 예측 (submission용) - 최종 완성 버전"""
-        logger.info(f"테스트 데이터 예측 시작: {len(test_df):,}행")
-        logger.info(f"설정 - Calibration: {'On' if use_calibration else 'Off'}, "
+        """Full test data prediction (for submission) - final complete version"""
+        logger.info(f"Test data prediction started: {len(test_df):,} rows")
+        logger.info(f"Settings - Calibration: {'On' if use_calibration else 'Off'}, "
                    f"Ensemble: {'On' if use_ensemble else 'Off'}, "
                    f"Postprocessing: {'On' if use_postprocessing else 'Off'}")
         
         if not self.is_loaded:
-            raise ValueError("모델이 로딩되지 않았습니다")
+            raise ValueError("Models not loaded")
         
         ensemble_available = use_ensemble and self.ensemble_manager is not None
         
@@ -598,9 +598,9 @@ class CTRInferenceEngine:
             model_name = list(self.models.keys())[0]
         
         if not ensemble_available and model_name not in self.models:
-            raise ValueError(f"모델 '{model_name}'을 찾을 수 없습니다")
+            raise ValueError(f"Model '{model_name}' not found")
         
-        logger.info(f"사용 방법: {'Ensemble' if ensemble_available else f'Single Model ({model_name})'}")
+        logger.info(f"Method used: {'Ensemble' if ensemble_available else f'Single Model ({model_name})'}")
         
         processed_df = test_df.copy()
         
@@ -628,7 +628,7 @@ class CTRInferenceEngine:
         
         processed_df = self._ensure_feature_consistency(processed_df)
         
-        logger.info(f"전처리 완료: {processed_df.shape}")
+        logger.info(f"Preprocessing completed: {processed_df.shape}")
         
         memory_status = self.memory_monitor.get_memory_status()
         if memory_status['level'] in ['warning', 'critical']:
@@ -652,9 +652,9 @@ class CTRInferenceEngine:
                         batch_pred = self.ensemble_manager.predict_with_best_ensemble(batch_df)
                         batch_raw_pred = batch_pred.copy()
                         ensemble_used = True
-                        logger.debug(f"배치 {i//batch_size + 1}: 앙상블 예측 사용")
+                        logger.debug(f"Batch {i//batch_size + 1}: Using ensemble prediction")
                     except Exception as e:
-                        logger.warning(f"배치 앙상블 예측 실패: {e}")
+                        logger.warning(f"Batch ensemble prediction failed: {e}")
                         ensemble_available = False
                 
                 if not ensemble_available:
@@ -681,7 +681,7 @@ class CTRInferenceEngine:
                     )
                     
                     if not np.allclose(batch_pred, original_batch_pred, atol=1e-6):
-                        logger.debug(f"배치 {i//batch_size + 1}: 후처리 적용됨")
+                        logger.debug(f"Batch {i//batch_size + 1}: Postprocessing applied")
                 
                 batch_pred = np.clip(batch_pred, 0.0001, 0.9999)
                 batch_raw_pred = np.clip(batch_raw_pred, 0.0001, 0.9999)
@@ -689,12 +689,12 @@ class CTRInferenceEngine:
                 predictions.extend(batch_pred)
                 raw_predictions.extend(batch_raw_pred)
                 
-                logger.info(f"배치 {i//batch_size + 1} 완료 ({i:,}~{end_idx:,}) - "
+                logger.info(f"Batch {i//batch_size + 1} completed ({i:,}~{end_idx:,}) - "
                           f"Ensemble: {'Yes' if ensemble_used else 'No'}, "
                           f"Calibration: {'Yes' if calibration_applied else 'No'}")
                 
             except Exception as e:
-                logger.warning(f"배치 예측 실패: {e}")
+                logger.warning(f"Batch prediction failed: {e}")
                 batch_pred = np.full(len(batch_df), self.ctr_baseline)
                 batch_raw_pred = np.full(len(batch_df), self.ctr_baseline)
                 predictions.extend(batch_pred)
@@ -710,7 +710,7 @@ class CTRInferenceEngine:
         target_ctr = self.ctr_baseline
         
         if abs(current_ctr - target_ctr) > 0.002:
-            logger.info(f"CTR 보정: {current_ctr:.4f} → {target_ctr:.4f}")
+            logger.info(f"CTR correction: {current_ctr:.4f} → {target_ctr:.4f}")
             correction_factor = target_ctr / current_ctr if current_ctr > 0 else 1.0
             predictions = predictions * correction_factor
             predictions = np.clip(predictions, 0.0001, 0.9999)
@@ -720,26 +720,26 @@ class CTRInferenceEngine:
                 raw_ctr = raw_predictions.mean()
                 final_ctr = predictions.mean()
                 
-                logger.info(f"최종 예측 분석:")
-                logger.info(f"  - 원본 CTR: {raw_ctr:.4f}")
-                logger.info(f"  - 최종 CTR: {final_ctr:.4f}")
-                logger.info(f"  - 목표 CTR: {target_ctr:.4f}")
-                logger.info(f"  - 사용 방법: {'Ensemble' if ensemble_used else 'Single Model'}")
+                logger.info(f"Final prediction analysis:")
+                logger.info(f"  - Raw CTR: {raw_ctr:.4f}")
+                logger.info(f"  - Final CTR: {final_ctr:.4f}")
+                logger.info(f"  - Target CTR: {target_ctr:.4f}")
+                logger.info(f"  - Method used: {'Ensemble' if ensemble_used else 'Single Model'}")
                 
                 if use_calibration and calibration_applied:
-                    logger.info(f"  - 캘리브레이션: 적용됨")
+                    logger.info(f"  - Calibration: Applied")
                     
                 if use_postprocessing:
-                    logger.info(f"  - 후처리: 적용됨")
+                    logger.info(f"  - Postprocessing: Applied")
                 
             except Exception as e:
-                logger.warning(f"예측 분석 실패: {e}")
+                logger.warning(f"Prediction analysis failed: {e}")
         
-        logger.info(f"테스트 데이터 예측 완료: {len(predictions):,}개")
+        logger.info(f"Test data prediction completed: {len(predictions):,}")
         return predictions
     
     def _update_average_latency(self, new_latency: float):
-        """평균 지연시간 업데이트"""
+        """Update average latency"""
         current_count = self.inference_stats['successful_predictions']
         current_avg = self.inference_stats['average_latency_ms']
         
@@ -747,7 +747,7 @@ class CTRInferenceEngine:
         self.inference_stats['average_latency_ms'] = new_avg
     
     def get_inference_stats(self) -> Dict[str, Any]:
-        """추론 통계 반환 - 최종 완성 버전"""
+        """Return inference statistics - final complete version"""
         stats = self.inference_stats.copy()
         
         total = stats['total_requests']
@@ -809,7 +809,7 @@ class CTRInferenceEngine:
         return stats
     
     def health_check(self) -> Dict[str, Any]:
-        """시스템 상태 확인 - 최종 완성 버전"""
+        """System status check - final complete version"""
         calibrated_models = 0
         calibration_methods = {}
         
@@ -848,7 +848,7 @@ class CTRInferenceEngine:
         }
 
 class CTRPostProcessor:
-    """CTR 예측 후처리 클래스"""
+    """CTR prediction post-processing class"""
     
     def __init__(self):
         self.outlier_threshold_low = 0.0001
@@ -860,7 +860,7 @@ class CTRPostProcessor:
                            apply_outlier_clipping: bool = True,
                            apply_diversity_enhancement: bool = True,
                            apply_ctr_alignment: bool = True) -> np.ndarray:
-        """전체 후처리 적용"""
+        """Apply complete post-processing"""
         
         processed = predictions.copy()
         
@@ -878,7 +878,7 @@ class CTRPostProcessor:
         return processed
     
     def _clip_outliers(self, predictions: np.ndarray) -> np.ndarray:
-        """이상값 제거"""
+        """Remove outliers"""
         try:
             q1 = np.percentile(predictions, 1)
             q99 = np.percentile(predictions, 99)
@@ -891,11 +891,11 @@ class CTRPostProcessor:
             return clipped
             
         except Exception as e:
-            logger.warning(f"이상값 제거 실패: {e}")
+            logger.warning(f"Outlier removal failed: {e}")
             return predictions
     
     def _enhance_diversity(self, predictions: np.ndarray) -> np.ndarray:
-        """예측 다양성 향상"""
+        """Enhance prediction diversity"""
         try:
             unique_count = len(np.unique(predictions))
             
@@ -911,11 +911,11 @@ class CTRPostProcessor:
             return predictions
             
         except Exception as e:
-            logger.warning(f"다양성 향상 실패: {e}")
+            logger.warning(f"Diversity enhancement failed: {e}")
             return predictions
     
     def _align_ctr(self, predictions: np.ndarray, target_ctr: float) -> np.ndarray:
-        """CTR 정렬"""
+        """CTR alignment"""
         try:
             current_ctr = predictions.mean()
             
@@ -931,17 +931,17 @@ class CTRPostProcessor:
             return predictions
             
         except Exception as e:
-            logger.warning(f"CTR 정렬 실패: {e}")
+            logger.warning(f"CTR alignment failed: {e}")
             return predictions
 
 class MemoryMonitor:
-    """메모리 모니터링 클래스"""
+    """Memory monitoring class"""
     
     def __init__(self):
         self.monitoring_enabled = PSUTIL_AVAILABLE
     
     def get_memory_status(self) -> Dict[str, Any]:
-        """메모리 상태 반환"""
+        """Return memory status"""
         if not self.monitoring_enabled:
             return {
                 'usage_gb': 2.0,
@@ -977,7 +977,7 @@ class MemoryMonitor:
             }
 
 class CTRPredictionAPI:
-    """CTR 예측 API - 최종 완성 버전"""
+    """CTR prediction API - final complete version"""
     
     def __init__(self, model_dir: str = "models"):
         self.engine = CTRInferenceEngine(model_dir)
@@ -994,21 +994,21 @@ class CTRPredictionAPI:
         }
     
     def initialize(self) -> bool:
-        """CTR 예측 API 초기화"""
-        logger.info("CTR 예측 API 초기화 시작 (최종 완성 버전)")
+        """Initialize CTR prediction API"""
+        logger.info("CTR prediction API initialization started (final complete version)")
         
         success = self.engine.load_models()
         
         if success:
             health_check = self.engine.health_check()
-            logger.info(f"CTR 예측 API 초기화 완료")
-            logger.info(f"총 모델 수: {health_check['models_count']}")
-            logger.info(f"캘리브레이션 적용 모델: {health_check['calibrated_models_count']}")
-            logger.info(f"캘리브레이션 비율: {health_check['calibration_rate']:.2%}")
-            logger.info(f"앙상블 사용 가능: {health_check['ensemble_status']['available']}")
-            logger.info(f"후처리 사용 가능: {health_check['postprocessor_available']}")
+            logger.info(f"CTR prediction API initialization completed")
+            logger.info(f"Total models: {health_check['models_count']}")
+            logger.info(f"Calibrated models: {health_check['calibrated_models_count']}")
+            logger.info(f"Calibration rate: {health_check['calibration_rate']:.2%}")
+            logger.info(f"Ensemble available: {health_check['ensemble_status']['available']}")
+            logger.info(f"Postprocessor available: {health_check['postprocessor_available']}")
         else:
-            logger.error("CTR 예측 API 초기화 실패")
+            logger.error("CTR prediction API initialization failed")
         
         return success
     
@@ -1017,7 +1017,7 @@ class CTRPredictionAPI:
                    use_calibration: bool = True,
                    use_ensemble: bool = True,
                    use_postprocessing: bool = True) -> Dict[str, Any]:
-        """CTR 예측 메인 API - 최종 완성 버전"""
+        """Main CTR prediction API - final complete version"""
         self.api_stats['api_calls'] += 1
         
         if use_calibration and use_ensemble and use_postprocessing:
@@ -1080,7 +1080,7 @@ class CTRPredictionAPI:
             
         except Exception as e:
             self.api_stats['api_errors'] += 1
-            logger.error(f"CTR 예측 API 오류: {e}")
+            logger.error(f"CTR prediction API error: {e}")
             
             return {
                 'user_id': user_id,
@@ -1119,9 +1119,9 @@ class CTRPredictionAPI:
                           use_calibration: bool = True,
                           use_ensemble: bool = True,
                           use_postprocessing: bool = True) -> pd.DataFrame:
-        """제출용 예측 생성 - 최종 완성 버전"""
-        logger.info(f"제출용 예측 생성 시작 (최종 완성 버전)")
-        logger.info(f"파이프라인 설정 - Calibration: {'On' if use_calibration else 'Off'}, "
+        """Generate submission predictions - final complete version"""
+        logger.info(f"Submission prediction generation started (final complete version)")
+        logger.info(f"Pipeline settings - Calibration: {'On' if use_calibration else 'Off'}, "
                    f"Ensemble: {'On' if use_ensemble else 'Off'}, "
                    f"Postprocessing: {'On' if use_postprocessing else 'Off'}")
         
@@ -1138,17 +1138,17 @@ class CTRPredictionAPI:
             'clicked': predictions
         })
         
-        logger.info(f"제출용 예측 생성 완료: {len(submission):,}행")
+        logger.info(f"Submission prediction generation completed: {len(submission):,} rows")
         
         avg_prediction = predictions.mean()
-        logger.info(f"평균 예측 CTR: {avg_prediction:.4f}")
-        logger.info(f"목표 CTR과의 차이: {abs(avg_prediction - self.engine.ctr_baseline):.4f}")
-        logger.info(f"예측 범위: {predictions.min():.4f} ~ {predictions.max():.4f}")
+        logger.info(f"Average predicted CTR: {avg_prediction:.4f}")
+        logger.info(f"Difference from target CTR: {abs(avg_prediction - self.engine.ctr_baseline):.4f}")
+        logger.info(f"Prediction range: {predictions.min():.4f} ~ {predictions.max():.4f}")
         
         return submission
     
     def get_api_status(self) -> Dict[str, Any]:
-        """API 상태 정보 - 최종 완성 버전"""
+        """API status information - final complete version"""
         uptime = time.time() - self.api_stats['start_time']
         
         total_feature_requests = sum(self.api_stats['feature_usage'].values())
@@ -1176,16 +1176,16 @@ class CTRPredictionAPI:
         return status
 
 def create_ctr_prediction_service(model_dir: str = "models") -> CTRPredictionAPI:
-    """CTR 예측 서비스 생성 - 최종 완성 버전"""
-    logger.info("CTR 예측 서비스 생성 (최종 완성 버전)")
+    """Create CTR prediction service - final complete version"""
+    logger.info("CTR prediction service creation (final complete version)")
     
     api = CTRPredictionAPI(model_dir)
     
     if not api.initialize():
-        logger.error("CTR 예측 서비스 초기화 실패")
+        logger.error("CTR prediction service initialization failed")
         return None
     
-    logger.info("CTR 예측 서비스 생성 완료")
+    logger.info("CTR prediction service creation completed")
     return api
 
 if __name__ == "__main__":
@@ -1195,7 +1195,7 @@ if __name__ == "__main__":
     
     if service:
         status = service.get_api_status()
-        print("API 상태:", json.dumps(status, indent=2, default=str))
+        print("API status:", json.dumps(status, indent=2, default=str))
         
         test_prediction = service.predict_ctr(
             user_id="test_user_123",
@@ -1213,12 +1213,12 @@ if __name__ == "__main__":
             use_postprocessing=True
         )
         
-        print("CTR 예측 결과 (완전 파이프라인):", json.dumps(test_prediction, indent=2, default=str))
+        print("CTR prediction result (full pipeline):", json.dumps(test_prediction, indent=2, default=str))
         
-        print(f"\n최종 완성 시스템 상태:")
-        print(f"앙상블 사용: {test_prediction['processing_pipeline']['ensemble_used']}")
-        print(f"캘리브레이션 적용: {test_prediction['processing_pipeline']['calibration_applied']}")
-        print(f"후처리 적용: {test_prediction['processing_pipeline']['postprocessing_applied']}")
-        print(f"예측 CTR: {test_prediction['ctr_prediction']:.4f}")
-        print(f"신뢰도: {test_prediction['confidence']:.3f}")
-        print(f"응답 시간: {test_prediction['performance']['latency_ms']:.2f}ms")
+        print(f"\nFinal complete system status:")
+        print(f"Ensemble used: {test_prediction['processing_pipeline']['ensemble_used']}")
+        print(f"Calibration applied: {test_prediction['processing_pipeline']['calibration_applied']}")
+        print(f"Postprocessing applied: {test_prediction['processing_pipeline']['postprocessing_applied']}")
+        print(f"Predicted CTR: {test_prediction['ctr_prediction']:.4f}")
+        print(f"Confidence: {test_prediction['confidence']:.3f}")
+        print(f"Response time: {test_prediction['performance']['latency_ms']:.2f}ms")
