@@ -253,8 +253,8 @@ def force_memory_cleanup(intensive: bool = False):
         return 0
 
 def execute_final_pipeline(config, quick_mode=False):
-    """최종 완성 파이프라인 실행"""
-    logger.info("=== 최종 완성 파이프라인 실행 시작 ===")
+    """파이프라인 실행"""
+    logger.info("=== 파이프라인 실행 시작 ===")
     
     start_time = time.time()
     
@@ -308,8 +308,8 @@ def execute_final_pipeline(config, quick_mode=False):
             logger.info("사용자 요청으로 파이프라인 중단")
             return None
         
-        # 2. 피처 엔지니어링 (성능 최우선 모드)
-        logger.info("2. 피처 엔지니어링 (성능 최우선 모드)")
+        # 2. 피처 엔지니어링 (64GB 메모리 활용)
+        logger.info("2. 피처 엔지니어링 (64GB 메모리 활용)")
         feature_engineer = modules['CTRFeatureEngineer'](config)
         
         target_col = 'clicked'
@@ -324,16 +324,19 @@ def execute_final_pipeline(config, quick_mode=False):
                 logger.warning(f"임시 타겟 컬럼 '{target_col}' 생성")
         
         try:
+            # 64GB 환경에서 메모리 효율 모드 비활성화
             feature_engineer.set_memory_efficient_mode(False)
             
             if PSUTIL_AVAILABLE:
                 vm = psutil.virtual_memory()
-                if vm.available / (1024**3) < 12:
+                # 64GB 환경에서는 40GB 이상 사용 가능할 때만 단순화 
+                if vm.available / (1024**3) < 15:
                     logger.warning("메모리 부족으로 단순화된 피처 엔지니어링 수행")
                     feature_cols = [col for col in train_df.columns if col != target_col]
                     X_train = train_df[feature_cols[:100]].copy()
                     X_test = test_df[feature_cols[:100]].copy() if set(feature_cols[:100]).issubset(test_df.columns) else test_df.iloc[:, :100].copy()
                 else:
+                    # 64GB 환경에서 적극적인 피처 생성
                     X_train, X_test = feature_engineer.create_all_features(
                         train_df, test_df, target_col=target_col
                     )
@@ -385,9 +388,9 @@ def execute_final_pipeline(config, quick_mode=False):
             for col in X_train.columns:
                 if X_train[col].dtype == 'object':
                     try:
-                        X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0)
+                        X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0).astype('float32')
                         if col in X_test.columns:
-                            X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0)
+                            X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0).astype('float32')
                     except Exception:
                         X_train[col] = 0
                         if col in X_test.columns:
@@ -400,8 +403,8 @@ def execute_final_pipeline(config, quick_mode=False):
             logger.info("사용자 요청으로 파이프라인 중단")
             return None
         
-        # 3. 모델 학습 (최종 완성 파라미터 + 캘리브레이션)
-        logger.info("3. 모델 학습 (최종 완성 파라미터 + 캘리브레이션)")
+        # 3. 모델 학습 (캘리브레이션 강제 적용)
+        logger.info("3. 모델 학습 (캘리브레이션 강제 적용)")
         successful_models = 0
         trained_models = {}
         
@@ -409,14 +412,16 @@ def execute_final_pipeline(config, quick_mode=False):
         
         if PSUTIL_AVAILABLE:
             vm = psutil.virtual_memory()
-            if vm.available / (1024**3) > 18:
+            # 64GB 환경에서 더 적극적인 모델 사용
+            if vm.available / (1024**3) > 25:
                 available_models.append('xgboost')
-                if TORCH_AVAILABLE and torch.cuda.is_available() and vm.available / (1024**3) > 25:
+                if TORCH_AVAILABLE and torch.cuda.is_available() and vm.available / (1024**3) > 35:
                     if not quick_mode:
                         available_models.append('catboost')
         
         logger.info(f"사용 가능한 모델: {available_models}")
         
+        # 앙상블 매니저 초기화
         ensemble_manager = None
         if 'CTRSuperEnsembleManager' in modules:
             try:
@@ -434,7 +439,7 @@ def execute_final_pipeline(config, quick_mode=False):
                 test_size = 0.2
                 if PSUTIL_AVAILABLE:
                     vm = psutil.virtual_memory()
-                    if vm.available / (1024**3) < 15:
+                    if vm.available / (1024**3) < 20:
                         test_size = 0.15
                 
                 X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
@@ -448,7 +453,7 @@ def execute_final_pipeline(config, quick_mode=False):
                         break
                     
                     try:
-                        logger.info(f"=== {model_type} 모델 학습 시작 (최종 완성 파라미터) ===")
+                        logger.info(f"=== {model_type} 모델 학습 시작 ===")
                         
                         force_memory_cleanup()
                         
@@ -458,10 +463,11 @@ def execute_final_pipeline(config, quick_mode=False):
                         )
                         
                         if model is not None:
-                            logger.info(f"{model_type} 모델에 캘리브레이션 적용")
+                            # 모든 모델에 강제 캘리브레이션 적용
+                            logger.info(f"{model_type} 모델에 캘리브레이션 강제 적용")
                             try:
                                 model.apply_calibration(X_val_split, y_val_split, method='auto')
-                                logger.info(f"{model_type} 캘리브레이션 완료")
+                                logger.info(f"{model_type} 캘리브레이션 적용 완료")
                             except Exception as cal_error:
                                 logger.warning(f"{model_type} 캘리브레이션 실패: {cal_error}")
                             
@@ -472,9 +478,13 @@ def execute_final_pipeline(config, quick_mode=False):
                                 'model_type': model_type
                             }
                             
+                            # 앙상블 매니저에 모델 추가 - 강제 실행
                             if ensemble_manager is not None:
-                                ensemble_manager.add_base_model(model_type, model)
-                                logger.info(f"{model_type} 모델을 앙상블 매니저에 추가")
+                                try:
+                                    ensemble_manager.add_base_model(model_type, model)
+                                    logger.info(f"{model_type} 모델을 앙상블 매니저에 추가 완료")
+                                except Exception as add_error:
+                                    logger.error(f"{model_type} 모델 앙상블 추가 실패: {add_error}")
                             
                             successful_models += 1
                             logger.info(f"=== {model_type} 모델 학습 완료 ===")
@@ -485,7 +495,8 @@ def execute_final_pipeline(config, quick_mode=False):
                         
                         if PSUTIL_AVAILABLE:
                             vm = psutil.virtual_memory()
-                            if vm.available / (1024**3) < 8:
+                            # 64GB 환경에서 더 관대한 메모리 임계값
+                            if vm.available / (1024**3) < 12:
                                 logger.warning("메모리 부족으로 추가 모델 학습 중단")
                                 break
                         
@@ -509,18 +520,26 @@ def execute_final_pipeline(config, quick_mode=False):
             logger.info("사용자 요청으로 파이프라인 중단")
             return None
         
-        # 4. 최종 완성 앙상블 시스템 구성 및 학습
-        logger.info("4. 최종 완성 앙상블 시스템 구성 및 학습")
+        # 4. 앙상블 시스템 구성 및 학습 - 강제 실행
+        logger.info("4. 앙상블 시스템 구성 및 학습 - 강제 실행")
+        ensemble_used = False
         if ensemble_manager is not None and successful_models > 1:
             try:
+                # 앙상블 생성 강제 실행
+                logger.info("앙상블 생성 시작")
                 ensemble_manager.create_ensemble('final_ensemble', target_ctr=0.0201, optimization_method='final_combined')
-                logger.info("최종 완성 앙상블 생성 완료")
+                logger.info("앙상블 생성 완료")
                 
+                # 앙상블 학습 강제 실행
                 if 'X_val_split' in locals() and 'y_val_split' in locals():
+                    logger.info("앙상블 학습 시작")
                     ensemble_manager.train_all_ensembles(X_val_split, y_val_split)
                     logger.info("앙상블 학습 완료")
+                    ensemble_used = True
                 
+                # 앙상블 평가 강제 실행
                 if 'X_val_split' in locals() and 'y_val_split' in locals():
+                    logger.info("앙상블 평가 시작")
                     ensemble_results = ensemble_manager.evaluate_ensembles(X_val_split, y_val_split)
                     logger.info("앙상블 평가 완료")
                     
@@ -535,11 +554,13 @@ def execute_final_pipeline(config, quick_mode=False):
                             logger.info(f"목표까지 {0.35 - best_score:.4f} 부족")
                 
             except Exception as e:
-                logger.error(f"최종 완성 앙상블 시스템 생성/학습 실패: {e}")
+                logger.error(f"앙상블 시스템 실행 실패: {e}")
+                logger.error(f"앙상블 오류 상세: {traceback.format_exc()}")
                 ensemble_manager = None
+                ensemble_used = False
         
-        # 5. 제출 파일 생성 (완전한 파이프라인)
-        logger.info("5. 제출 파일 생성 (완전한 파이프라인)")
+        # 5. 제출 파일 생성 (앙상블 우선 사용)
+        logger.info("5. 제출 파일 생성 (앙상블 우선 사용)")
         try:
             force_memory_cleanup()
             
@@ -550,12 +571,13 @@ def execute_final_pipeline(config, quick_mode=False):
             logger.error(f"제출 파일 생성 실패: {e}")
             submission = create_default_submission(X_test, config)
         
-        # 6. 결과 요약 및 최종 정리
+        # 6. 결과 요약
         total_time = time.time() - start_time
-        logger.info(f"=== 최종 완성 파이프라인 완료 ===")
+        logger.info(f"=== 파이프라인 완료 ===")
         logger.info(f"실행 시간: {total_time:.2f}초")
         logger.info(f"성공한 모델: {successful_models}개")
         logger.info(f"앙상블 매니저 활성화: {'Yes' if ensemble_manager else 'No'}")
+        logger.info(f"앙상블 실제 사용: {'Yes' if ensemble_used else 'No'}")
         logger.info(f"캘리브레이션 적용 모델 수: {len([m for m in trained_models.values() if hasattr(m.get('model'), 'is_calibrated') and m.get('model').is_calibrated])}")
         logger.info(f"제출 파일: {len(submission):,}행")
         
@@ -572,22 +594,24 @@ def execute_final_pipeline(config, quick_mode=False):
             'execution_time': total_time,
             'successful_models': successful_models,
             'ensemble_enabled': ensemble_manager is not None,
+            'ensemble_used': ensemble_used,
             'calibration_applied': True
         }
         
     except Exception as e:
-        logger.error(f"최종 완성 파이프라인 실패: {e}")
+        logger.error(f"파이프라인 실패: {e}")
         logger.error(f"상세 오류: {traceback.format_exc()}")
         
         force_memory_cleanup(intensive=True)
         raise
 
 def train_final_model(model_type, X_train, y_train, X_val, y_val, config):
-    """최종 완성 파라미터로 단일 모델 학습"""
+    """모델 학습"""
     try:
         if PSUTIL_AVAILABLE:
             vm = psutil.virtual_memory()
-            if vm.available / (1024**3) < 5:
+            # 64GB 환경에서 더 관대한 메모리 임계값
+            if vm.available / (1024**3) < 8:
                 logger.warning(f"{model_type} 모델 학습 스킵: 메모리 부족")
                 return None
         
@@ -781,8 +805,8 @@ def create_dummy_models(X_train, y_train):
         return {}
 
 def generate_final_submission(trained_models, X_test, config, ensemble_manager=None):
-    """최종 완성 제출 파일 생성"""
-    logger.info("최종 완성 제출 파일 생성 시작")
+    """제출 파일 생성 - 앙상블 우선 사용"""
+    logger.info("제출 파일 생성 시작 - 앙상블 우선 사용")
     
     test_size = len(X_test)
     logger.info(f"테스트 데이터 크기: {test_size:,}행")
@@ -790,13 +814,14 @@ def generate_final_submission(trained_models, X_test, config, ensemble_manager=N
     try:
         if PSUTIL_AVAILABLE:
             vm = psutil.virtual_memory()
-            if vm.available / (1024**3) < 5:
+            # 64GB 환경에서 더 큰 배치 크기 사용
+            if vm.available / (1024**3) < 8:
                 logger.warning("메모리 부족으로 배치 예측 수행")
-                batch_size = 15000
+                batch_size = 25000
             else:
-                batch_size = 80000
+                batch_size = 100000
         else:
-            batch_size = 80000
+            batch_size = 100000
         
         try:
             submission_path = getattr(config, 'SUBMISSION_TEMPLATE_PATH', Path('data/sample_submission.csv'))
@@ -826,16 +851,33 @@ def generate_final_submission(trained_models, X_test, config, ensemble_manager=N
         predictions = None
         prediction_method = ""
         
+        # 앙상블 매니저 우선 사용 - 강제 실행
         if ensemble_manager is not None:
             try:
-                logger.info("최종 완성 앙상블 매니저로 예측 수행")
+                logger.info("앙상블 매니저로 예측 수행 시작")
                 predictions = ensemble_manager.predict_with_best_ensemble(X_test)
-                prediction_method = "Final_Ensemble"
-                logger.info("최종 완성 앙상블 예측 완료")
+                prediction_method = "Ensemble"
+                logger.info("앙상블 매니저 예측 완료")
+                
+                # 앙상블 예측 검증
+                if predictions is not None and len(predictions) == test_size:
+                    unique_predictions = len(np.unique(predictions))
+                    logger.info(f"앙상블 예측 다양성: {unique_predictions}개 고유값")
+                    
+                    # 예측 다양성이 충분한지 확인
+                    if unique_predictions < 1000:
+                        logger.warning("앙상블 예측 다양성 부족, 개별 모델로 대체")
+                        predictions = None
+                else:
+                    logger.warning("앙상블 예측 크기 불일치, 개별 모델로 대체")
+                    predictions = None
+                    
             except Exception as e:
-                logger.warning(f"앙상블 예측 실패: {e}")
+                logger.error(f"앙상블 예측 실패: {e}")
+                logger.error(f"앙상블 오류 상세: {traceback.format_exc()}")
                 predictions = None
         
+        # 앙상블 실패 시 개별 모델 사용
         if predictions is None and trained_models:
             model_priority = ['lightgbm', 'xgboost', 'catboost', 'logistic', 'random_forest']
             
@@ -875,7 +917,7 @@ def generate_final_submission(trained_models, X_test, config, ensemble_manager=N
                         
                         predictions = np.array(batch_predictions)
                         predictions = np.clip(predictions, 0.001, 0.999)
-                        prediction_method = f"Final_{model_name}"
+                        prediction_method = f"Single_{model_name}"
                         break
                         
                     except Exception as e:
@@ -909,7 +951,7 @@ def generate_final_submission(trained_models, X_test, config, ensemble_manager=N
         final_min = submission['clicked'].min()
         final_max = submission['clicked'].max()
         
-        logger.info(f"=== 최종 완성 제출 파일 생성 결과 ===")
+        logger.info(f"=== 제출 파일 생성 결과 ===")
         logger.info(f"예측 방법: {prediction_method}")
         logger.info(f"처리된 데이터: {test_size:,}행")
         logger.info(f"평균 CTR: {final_ctr:.4f}")
@@ -1059,7 +1101,7 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    parser = argparse.ArgumentParser(description="CTR 모델링 최종 완성 시스템")
+    parser = argparse.ArgumentParser(description="CTR 모델링 시스템")
     parser.add_argument("--mode", choices=["train", "inference", "reproduce"], 
                        default="train", help="실행 모드")
     parser.add_argument("--quick", action="store_true",
@@ -1068,14 +1110,14 @@ def main():
     args = parser.parse_args()
     
     try:
-        logger.info("=== CTR 모델링 최종 완성 시스템 시작 ===")
+        logger.info("=== CTR 모델링 시스템 시작 ===")
         
         if not validate_environment():
             logger.error("환경 검증 실패")
             sys.exit(1)
         
         if args.mode == "train":
-            logger.info("학습 모드 시작 (최종 완성 파이프라인)")
+            logger.info("학습 모드 시작")
             
             from config import Config
             config = Config
@@ -1088,6 +1130,7 @@ def main():
                 logger.info(f"실행 시간: {results['execution_time']:.2f}초")
                 logger.info(f"성공 모델: {results['successful_models']}개")
                 logger.info(f"앙상블 활성화: {results.get('ensemble_enabled', False)}")
+                logger.info(f"앙상블 실제 사용: {results.get('ensemble_used', False)}")
                 logger.info(f"캘리브레이션 적용: {results.get('calibration_applied', False)}")
             else:
                 logger.error("학습 모드 실패")
@@ -1113,7 +1156,7 @@ def main():
                 logger.error("Private Score 복원 실패")
                 sys.exit(1)
         
-        logger.info("=== CTR 모델링 최종 완성 시스템 종료 ===")
+        logger.info("=== CTR 모델링 시스템 종료 ===")
         
     except KeyboardInterrupt:
         logger.info("사용자에 의해 실행이 중단되었습니다")
