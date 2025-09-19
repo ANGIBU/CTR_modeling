@@ -37,126 +37,148 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 class ProgressReporter:
-    """Progress reporting class"""
+    """Progress reporting"""
     
-    def __init__(self, total_items: int, description: str = "Progress"):
-        self.total_items = total_items
-        self.current_items = 0
-        self.description = description
+    def __init__(self, total_rows: int, operation_name: str = "Data processing"):
+        self.total_rows = total_rows
+        self.processed_rows = 0
+        self.operation_name = operation_name
         self.start_time = time.time()
-        self.last_report_time = 0
-        self.report_interval = 5.0
+        self.last_report_time = self.start_time
+        self.report_interval = 30  # 30 seconds interval
         
-    def update(self, increment: int = 1):
+    def update(self, processed_count: int):
         """Update progress"""
-        self.current_items += increment
+        self.processed_rows += processed_count
         current_time = time.time()
         
-        if current_time - self.last_report_time >= self.report_interval or self.current_items >= self.total_items:
+        if current_time - self.last_report_time >= self.report_interval:
             self.report_progress()
             self.last_report_time = current_time
     
     def report_progress(self):
-        """Report progress"""
-        if self.total_items <= 0:
+        """Report current progress"""
+        if self.total_rows <= 0:
             return
-            
-        progress_percent = min(100.0, (self.current_items / self.total_items) * 100)
-        elapsed_time = time.time() - self.start_time
         
-        if progress_percent > 0 and elapsed_time > 0:
-            estimated_total_time = elapsed_time * (100 / progress_percent)
-            remaining_time = max(0, estimated_total_time - elapsed_time)
-            
-            items_per_sec = self.current_items / elapsed_time if elapsed_time > 0 else 0
-            
-            logger.info(f"{self.description}: {progress_percent:.1f}% "
-                       f"({self.current_items:,}/{self.total_items:,}) - "
-                       f"Speed: {items_per_sec:,.0f} rows/sec - "
-                       f"Remaining time: {remaining_time:.0f}s")
+        elapsed_time = time.time() - self.start_time
+        progress_rate = self.processed_rows / self.total_rows
+        
+        if progress_rate > 0:
+            estimated_total_time = elapsed_time / progress_rate
+            remaining_time = estimated_total_time - elapsed_time
         else:
-            logger.info(f"{self.description}: {progress_percent:.1f}% ({self.current_items:,}/{self.total_items:,})")
+            remaining_time = 0
+        
+        logger.info(f"{self.operation_name}: {self.processed_rows:,}/{self.total_rows:,} "
+                   f"({progress_rate:.1%}) - {elapsed_time:.1f}s elapsed, "
+                   f"~{remaining_time:.1f}s remaining")
 
 class MemoryMonitor:
-    """Memory monitoring and management"""
+    """Memory monitoring class"""
     
-    def __init__(self, max_memory_gb: float = 45.0):
-        self.monitoring_enabled = PSUTIL_AVAILABLE
-        self.max_memory_gb = max_memory_gb
-        self.memory_history = []
-        self.peak_memory = 0.0
-        self.start_time = time.time()
-        self.lock = threading.Lock()
-        
-        # Set memory thresholds
-        self.warning_threshold = max_memory_gb * 0.75
-        self.critical_threshold = max_memory_gb * 0.85
-        self.abort_threshold = max_memory_gb * 0.95
-        
-        logger.info(f"Memory thresholds set - Warning: {self.warning_threshold:.1f}GB, "
-                   f"Critical: {self.critical_threshold:.1f}GB, Abort: {self.abort_threshold:.1f}GB")
+    def __init__(self):
+        # Reduced memory thresholds to be more conservative
+        self.process_memory_warning = 25.0  # 25GB process memory warning
+        self.process_memory_critical = 30.0  # 30GB process memory critical  
+        self.available_memory_warning = 15.0  # 15GB available memory warning
+        self.available_memory_critical = 10.0  # 10GB available memory critical
         
     def get_process_memory_gb(self) -> float:
-        """Current process memory usage (GB)"""
-        if not self.monitoring_enabled:
-            return 2.0
-        
+        """Get current process memory in GB"""
         try:
-            process = psutil.Process()
-            return process.memory_info().rss / (1024**3)
+            if PSUTIL_AVAILABLE:
+                process = psutil.Process()
+                memory_mb = process.memory_info().rss / (1024**2)
+                return memory_mb / 1024
+            return 2.0
         except Exception:
             return 2.0
     
     def get_available_memory_gb(self) -> float:
-        """System available memory (GB)"""
-        if not self.monitoring_enabled:
-            return 30.0
-        
+        """Get available system memory in GB"""
         try:
-            return psutil.virtual_memory().available / (1024**3)
+            if PSUTIL_AVAILABLE:
+                vm = psutil.virtual_memory()
+                return vm.available / (1024**3)
+            return 40.0
         except Exception:
-            return 30.0
+            return 40.0
     
     def check_memory_pressure(self) -> Dict[str, Any]:
         """Check memory pressure status"""
-        process_memory = self.get_process_memory_gb()
-        available_memory = self.get_available_memory_gb()
-        
-        # Determine pressure level
-        if process_memory > self.abort_threshold or available_memory < 2:
-            pressure_level = "abort"
-        elif process_memory > self.critical_threshold or available_memory < 5:
-            pressure_level = "critical" 
-        elif process_memory > self.warning_threshold or available_memory < 8:
-            pressure_level = "high"
-        elif available_memory < 15:
-            pressure_level = "moderate"
-        else:
-            pressure_level = "low"
-        
-        return {
-            'memory_pressure': pressure_level in ['high', 'critical', 'abort'],
-            'pressure_level': pressure_level,
-            'process_memory_gb': process_memory,
-            'available_memory_gb': available_memory,
-            'should_reduce_chunk_size': pressure_level in ['moderate', 'high', 'critical', 'abort'],
-            'should_force_gc': pressure_level in ['high', 'critical', 'abort'],
-            'should_abort': pressure_level == 'abort'
-        }
+        try:
+            process_memory = self.get_process_memory_gb()
+            available_memory = self.get_available_memory_gb()
+            
+            # Determine pressure level
+            if (process_memory >= self.process_memory_critical or 
+                available_memory <= self.available_memory_critical):
+                pressure_level = 'abort'
+                should_abort = True
+                should_cleanup = True
+                should_simplify = True
+                should_reduce_batch = True
+            elif (process_memory >= self.process_memory_warning or 
+                  available_memory <= self.available_memory_warning):
+                pressure_level = 'critical'
+                should_abort = False
+                should_cleanup = True
+                should_simplify = True
+                should_reduce_batch = True
+            elif (process_memory >= 20 or available_memory <= 20):
+                pressure_level = 'high'
+                should_abort = False
+                should_cleanup = True
+                should_simplify = False
+                should_reduce_batch = True
+            elif (process_memory >= 15 or available_memory <= 25):
+                pressure_level = 'warning'
+                should_abort = False
+                should_cleanup = False
+                should_simplify = False
+                should_reduce_batch = False
+            else:
+                pressure_level = 'normal'
+                should_abort = False
+                should_cleanup = False
+                should_simplify = False
+                should_reduce_batch = False
+            
+            return {
+                'pressure_level': pressure_level,
+                'process_memory_gb': process_memory,
+                'available_memory_gb': available_memory,
+                'should_abort': should_abort,
+                'should_cleanup': should_cleanup,
+                'should_simplify': should_simplify,
+                'should_reduce_batch': should_reduce_batch
+            }
+            
+        except Exception:
+            return {
+                'pressure_level': 'normal',
+                'process_memory_gb': 2.0,
+                'available_memory_gb': 40.0,
+                'should_abort': False,
+                'should_cleanup': False,
+                'should_simplify': False,
+                'should_reduce_batch': False
+            }
     
-    def log_memory_status(self, context: str = "", force: bool = False):
-        """Log memory status"""
+    def log_memory_status(self, operation: str = "", force: bool = False):
+        """Log current memory status"""
         try:
             pressure = self.check_memory_pressure()
             
-            if force or pressure['pressure_level'] != 'low':
-                logger.info(f"Memory [{context}]: Process {pressure['process_memory_gb']:.1f}GB, "
-                           f"Available {pressure['available_memory_gb']:.1f}GB - "
-                           f"{pressure['pressure_level'].upper()}")
-            
-            if pressure['memory_pressure']:
-                logger.warning(f"Memory pressure: Process {pressure['process_memory_gb']:.1f}GB, "
-                             f"Available {pressure['available_memory_gb']:.1f}GB")
+            if force or pressure['pressure_level'] in ['warning', 'high', 'critical', 'abort']:
+                if pressure['pressure_level'] in ['critical', 'abort']:
+                    logger.warning(f"Memory pressure: Process {pressure['process_memory_gb']:.1f}GB, "
+                                 f"Available {pressure['available_memory_gb']:.1f}GB")
+                else:
+                    logger.info(f"{operation} - Memory status: "
+                               f"Process {pressure['process_memory_gb']:.1f}GB, "
+                               f"Available {pressure['available_memory_gb']:.1f}GB")
                 
         except Exception as e:
             logger.warning(f"Memory status logging failed: {e}")
@@ -169,17 +191,17 @@ class MemoryMonitor:
             
             # Cleanup intensity based on pressure level
             if pressure['pressure_level'] == 'abort' or intensive:
-                cleanup_rounds = 15
-                sleep_time = 0.5
-            elif pressure['pressure_level'] == 'critical':
-                cleanup_rounds = 12
+                cleanup_rounds = 20
                 sleep_time = 0.3
-            elif pressure['pressure_level'] == 'high':
-                cleanup_rounds = 8
+            elif pressure['pressure_level'] == 'critical':
+                cleanup_rounds = 15
                 sleep_time = 0.2
+            elif pressure['pressure_level'] == 'high':
+                cleanup_rounds = 10
+                sleep_time = 0.1
             else:
                 cleanup_rounds = 5
-                sleep_time = 0.1
+                sleep_time = 0.05
             
             # Garbage collection
             for i in range(cleanup_rounds):
@@ -190,24 +212,27 @@ class MemoryMonitor:
                 # Intermediate check
                 if i % 5 == 0:
                     current_memory = self.get_process_memory_gb()
-                    if initial_memory - current_memory > 2.0:
+                    if initial_memory - current_memory > 3.0:
                         break
             
             # Windows memory cleanup
-            if cleanup_rounds >= 8:
+            if cleanup_rounds >= 10:
                 try:
                     import ctypes
                     if hasattr(ctypes, 'windll'):
                         ctypes.windll.kernel32.SetProcessWorkingSetSize(-1, -1, -1)
                         time.sleep(0.5)
                         gc.collect()
+                        if intensive:
+                            time.sleep(1.0)
+                            ctypes.windll.kernel32.SetProcessWorkingSetSize(-1, -1, -1)
                 except Exception:
                     pass
             
             final_memory = self.get_process_memory_gb()
             memory_freed = initial_memory - final_memory
             
-            if memory_freed > 0.1:
+            if memory_freed > 0.2:
                 logger.info(f"Memory cleanup: {memory_freed:.2f}GB freed ({cleanup_rounds} rounds)")
             
             return memory_freed
@@ -221,163 +246,85 @@ class DataColumnAnalyzer:
     
     def __init__(self, config: Config = Config):
         self.config = config
-        self.target_candidates = config.TARGET_COLUMN_CANDIDATES
-        self.detection_config = config.TARGET_DETECTION_CONFIG
+        self.target_candidates = config.TARGET_COLUMN_CANDIDATES if hasattr(config, 'TARGET_COLUMN_CANDIDATES') else ['clicked', 'target', 'label', 'y']
         
-    def analyze_columns(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """Analyze dataframe columns"""
+    def detect_target_column(self, sample_df: pd.DataFrame) -> Optional[str]:
+        """Detect target column from sample data"""
         try:
-            analysis = {
-                'total_columns': len(df.columns),
-                'column_names': list(df.columns),
-                'dtypes': df.dtypes.to_dict(),
-                'null_counts': df.isnull().sum().to_dict(),
-                'unique_counts': {},
-                'target_candidates': [],
-                'binary_columns': [],
-                'categorical_columns': [],
-                'numeric_columns': [],
-                'id_columns': []
-            }
-            
-            logger.info(f"Column analysis started: {len(df.columns)} columns")
-            
-            # Detailed analysis for each column
-            for col in df.columns:
-                try:
-                    unique_count = df[col].nunique()
-                    analysis['unique_counts'][col] = unique_count
-                    
-                    # Column type classification
-                    dtype_str = str(df[col].dtype)
-                    col_lower = col.lower()
-                    
-                    # ID column identification
-                    if any(pattern in col_lower for pattern in ['id', 'uuid', 'key', 'hash']):
-                        unique_ratio = unique_count / len(df)
-                        if unique_ratio > 0.9:
-                            analysis['id_columns'].append(col)
-                            continue
-                    
-                    # Binary column identification (target candidates)
-                    if unique_count == 2:
-                        unique_values = df[col].dropna().unique()
-                        if set(unique_values).issubset(self.detection_config['binary_values']):
-                            analysis['binary_columns'].append(col)
-                            
-                            # CTR characteristics check
-                            positive_ratio = df[col].mean()
-                            if (self.detection_config['min_ctr'] <= positive_ratio <= 
-                                self.detection_config['max_ctr']):
-                                analysis['target_candidates'].append({
-                                    'column': col,
-                                    'ctr': positive_ratio,
-                                    'distribution': df[col].value_counts().to_dict()
-                                })
-                    
-                    # Numeric/categorical classification
-                    if dtype_str in ['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64',
-                                   'float16', 'float32', 'float64']:
-                        analysis['numeric_columns'].append(col)
-                    else:
-                        analysis['categorical_columns'].append(col)
-                        
-                except Exception as e:
-                    logger.warning(f"Column {col} analysis failed: {e}")
-            
-            # Sort target candidates by CTR
-            analysis['target_candidates'].sort(key=lambda x: x['ctr'])
-            
-            return analysis
-            
-        except Exception as e:
-            logger.error(f"Column analysis failed: {e}")
-            return {'error': str(e)}
-    
-    def detect_target_column(self, df: pd.DataFrame, provided_target: str = None) -> str:
-        """Detect target column"""
-        try:
-            analysis = self.analyze_columns(df)
-            
-            # Logging
-            logger.info(f"Data column structure:")
-            logger.info(f"  - Total columns: {analysis['total_columns']}")
-            logger.info(f"  - Numeric: {len(analysis['numeric_columns'])} columns")
-            logger.info(f"  - Categorical: {len(analysis['categorical_columns'])} columns")
-            logger.info(f"  - Binary: {len(analysis['binary_columns'])} columns")
-            logger.info(f"  - ID: {len(analysis['id_columns'])} columns")
-            logger.info(f"  - Target candidates: {len(analysis['target_candidates'])} columns")
-            
-            # Column name logging (first 20 only)
-            sample_columns = analysis['column_names'][:20]
-            if len(analysis['column_names']) > 20:
-                sample_columns.append(f"... (+{len(analysis['column_names']) - 20} more)")
-            logger.info(f"  - Column name samples: {sample_columns}")
-            
-            # Target candidate detailed logging
-            if analysis['target_candidates']:
-                logger.info("Target candidate analysis:")
-                for candidate in analysis['target_candidates']:
-                    logger.info(f"  - {candidate['column']}: CTR {candidate['ctr']:.4f}, "
-                               f"Distribution {candidate['distribution']}")
-            
-            # Check provided target column
-            if provided_target and provided_target in df.columns:
-                if provided_target in [c['column'] for c in analysis['target_candidates']]:
-                    logger.info(f"Provided target column confirmed: {provided_target}")
-                    return provided_target
-                else:
-                    logger.warning(f"Provided target column '{provided_target}' does not meet binary classification criteria")
-            
-            # Automatic detection
+            # Check exact matches first
             for candidate in self.target_candidates:
-                if candidate in df.columns:
-                    for target_info in analysis['target_candidates']:
-                        if target_info['column'] == candidate:
-                            logger.info(f"Target column auto-detected: {candidate}")
-                            return candidate
+                if candidate in sample_df.columns:
+                    logger.info(f"Target column detected: {candidate}")
+                    return candidate
             
-            # Select columns within CTR range
-            for candidate in analysis['target_candidates']:
-                ctr = candidate['ctr']
-                if (self.detection_config['typical_ctr_range'][0] <= ctr <= 
-                    self.detection_config['typical_ctr_range'][1]):
-                    logger.info(f"CTR pattern based target detection: {candidate['column']} (CTR: {ctr:.4f})")
-                    return candidate['column']
+            # Check partial matches
+            for col in sample_df.columns:
+                col_lower = col.lower()
+                for candidate in self.target_candidates:
+                    if candidate.lower() in col_lower:
+                        logger.info(f"Target column detected (partial match): {col}")
+                        return col
             
-            # Select lowest CTR column
-            if analysis['target_candidates']:
-                best_candidate = analysis['target_candidates'][0]
-                logger.info(f"Lowest CTR target selected: {best_candidate['column']} (CTR: {best_candidate['ctr']:.4f})")
-                return best_candidate['column']
+            # Check binary columns (0/1 values only)
+            for col in sample_df.columns:
+                if sample_df[col].dtype in ['int64', 'int32', 'float64', 'float32']:
+                    unique_values = sample_df[col].dropna().unique()
+                    if len(unique_values) == 2 and set(unique_values).issubset({0, 1, 0.0, 1.0}):
+                        logger.info(f"Target column detected (binary): {col}")
+                        return col
             
-            # Default
-            default_target = provided_target or 'clicked'
-            logger.warning(f"Target column detection failed, using default: {default_target}")
-            return default_target
+            logger.warning("Target column not detected")
+            return None
             
         except Exception as e:
             logger.error(f"Target column detection failed: {e}")
-            return provided_target or 'clicked'
+            return None
+    
+    def validate_data_consistency(self, train_df: pd.DataFrame, test_df: pd.DataFrame) -> bool:
+        """Validate data consistency between train and test"""
+        try:
+            train_cols = set(train_df.columns)
+            test_cols = set(test_df.columns)
+            
+            # Check column alignment
+            common_cols = train_cols & test_cols
+            train_only = train_cols - test_cols
+            test_only = test_cols - train_cols
+            
+            if train_only:
+                logger.info(f"Train-only columns: {list(train_only)}")
+            if test_only:
+                logger.info(f"Test-only columns: {list(test_only)}")
+            
+            if len(common_cols) < len(train_cols) * 0.8:
+                logger.warning("Significant column mismatch between train and test")
+                return False
+            
+            logger.info(f"Data consistency validation passed: {len(common_cols)} common columns")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Data consistency validation failed: {e}")
+            return False
+    
+    def get_detected_target_column(self) -> Optional[str]:
+        """Return detected target column name"""
+        return self.target_column
 
 class DataChunkProcessor:
     """Data chunk processor"""
     
-    def __init__(self, file_path: str, chunk_size: int = 25000):
+    def __init__(self, file_path: str, chunk_size: int = 50000, memory_monitor: MemoryMonitor = None):
         self.file_path = file_path
         self.chunk_size = chunk_size
-        self.total_rows = 0
-        self.memory_monitor = MemoryMonitor()
-        self.progress_reporter = None
-        
-        # Chunk size range adjustment
         self.min_chunk_size = 5000
         self.max_chunk_size = 100000
+        self.memory_monitor = memory_monitor or MemoryMonitor()
+        self.total_rows = 0
+        self.progress_reporter = None
         
     def __enter__(self):
-        """Initialization"""
-        logger.info(f"Data chunk processor initialization: {self.file_path}")
-        
+        """Context manager entry"""
         try:
             if not os.path.exists(self.file_path):
                 raise FileNotFoundError(f"File does not exist: {self.file_path}")
@@ -445,6 +392,116 @@ class DataChunkProcessor:
             logger.warning(f"Row count check failed: {e}. Using default value")
             return 1000000
     
+    def _adjust_chunk_size(self, pressure: Dict[str, Any]):
+        """Adjust chunk size based on memory pressure"""
+        try:
+            if pressure['should_reduce_batch']:
+                if pressure['pressure_level'] == 'abort':
+                    self.chunk_size = max(self.min_chunk_size, self.chunk_size // 4)
+                elif pressure['pressure_level'] == 'critical':
+                    self.chunk_size = max(self.min_chunk_size, self.chunk_size // 3)
+                elif pressure['pressure_level'] == 'high':
+                    self.chunk_size = max(self.min_chunk_size, self.chunk_size // 2)
+                
+                logger.info(f"Chunk size adjusted to {self.chunk_size:,} due to memory pressure")
+            
+        except Exception as e:
+            logger.warning(f"Chunk size adjustment failed: {e}")
+    
+    def _optimize_chunk_memory(self, chunk_df: pd.DataFrame) -> pd.DataFrame:
+        """Memory optimization for chunk"""
+        try:
+            initial_memory = chunk_df.memory_usage(deep=True).sum() / (1024**2)
+            
+            # Data type optimization
+            for col in chunk_df.columns:
+                if chunk_df[col].dtype == 'object':
+                    try:
+                        # Try categorical conversion for string columns
+                        if chunk_df[col].nunique() / len(chunk_df) < 0.5:
+                            chunk_df[col] = chunk_df[col].astype('category')
+                    except Exception:
+                        pass
+                elif chunk_df[col].dtype == 'int64':
+                    # Downcast integers
+                    col_min, col_max = chunk_df[col].min(), chunk_df[col].max()
+                    if col_min >= -128 and col_max <= 127:
+                        chunk_df[col] = chunk_df[col].astype('int8')
+                    elif col_min >= -32768 and col_max <= 32767:
+                        chunk_df[col] = chunk_df[col].astype('int16')
+                    elif col_min >= -2147483648 and col_max <= 2147483647:
+                        chunk_df[col] = chunk_df[col].astype('int32')
+                elif chunk_df[col].dtype == 'float64':
+                    # Downcast floats
+                    chunk_df[col] = pd.to_numeric(chunk_df[col], downcast='float')
+            
+            final_memory = chunk_df.memory_usage(deep=True).sum() / (1024**2)
+            memory_reduction = (initial_memory - final_memory) / initial_memory * 100
+            
+            if memory_reduction > 5:
+                logger.info(f"Chunk memory optimized: {memory_reduction:.1f}% reduction")
+            
+            return chunk_df
+            
+        except Exception as e:
+            logger.warning(f"Chunk memory optimization failed: {e}")
+            return chunk_df
+    
+    def _read_chunk_safe(self, start_row: int, chunk_size: int) -> Optional[pd.DataFrame]:
+        """Safe chunk reading"""
+        try:
+            if PYARROW_AVAILABLE:
+                parquet_file = pq.ParquetFile(self.file_path)
+                
+                # Calculate row group ranges
+                row_groups = []
+                current_row = 0
+                
+                for rg_idx in range(parquet_file.num_row_groups):
+                    rg_rows = parquet_file.metadata.row_group(rg_idx).num_rows
+                    if current_row + rg_rows > start_row:
+                        if current_row < start_row + chunk_size:
+                            row_groups.append(rg_idx)
+                    current_row += rg_rows
+                    
+                    if current_row >= start_row + chunk_size:
+                        break
+                
+                if not row_groups:
+                    return None
+                
+                # Read relevant row groups
+                tables = []
+                for rg_idx in row_groups:
+                    table = parquet_file.read_row_group(rg_idx)
+                    tables.append(table)
+                
+                if len(tables) == 1:
+                    chunk_df = tables[0].to_pandas()
+                else:
+                    combined_table = pa.concat_tables(tables)
+                    chunk_df = combined_table.to_pandas()
+                
+                # Apply row range filtering
+                rows_before_start = max(0, start_row - sum(parquet_file.metadata.row_group(i).num_rows for i in range(row_groups[0])))
+                if rows_before_start > 0 or len(chunk_df) > chunk_size:
+                    end_idx = min(len(chunk_df), rows_before_start + chunk_size)
+                    chunk_df = chunk_df.iloc[rows_before_start:end_idx].copy()
+                
+                return chunk_df
+                
+            else:
+                # Fallback to pandas
+                chunk_df = pd.read_parquet(self.file_path, 
+                                         engine='pyarrow' if PYARROW_AVAILABLE else 'fastparquet')
+                
+                end_row = min(start_row + chunk_size, len(chunk_df))
+                return chunk_df.iloc[start_row:end_row].copy()
+                
+        except Exception as e:
+            logger.error(f"Chunk reading failed: {e}")
+            return None
+    
     def process_in_chunks(self) -> pd.DataFrame:
         """Process data in chunks"""
         logger.info(f"Chunk-wise data processing started: {self.total_rows:,} rows")
@@ -508,7 +565,7 @@ class DataChunkProcessor:
                         self.memory_monitor.log_memory_status(f"Chunk{chunk_number}")
                     
                     # Intermediate combination (more frequent under memory pressure)
-                    combine_threshold = 3 if pressure['pressure_level'] in ['high', 'critical'] else 5
+                    combine_threshold = 2 if pressure['pressure_level'] in ['high', 'critical', 'abort'] else 4
                     if len(all_chunks) >= combine_threshold:
                         logger.info(f"Performing intermediate combination: {len(all_chunks)} chunks")
                         combined_df = self._combine_chunks_safe(all_chunks)
@@ -522,181 +579,27 @@ class DataChunkProcessor:
                     if self._try_recover_chunk(processed_rows, current_chunk_size):
                         continue
                     else:
-                        logger.error("Recovery failed. Processing stopped")
-                        break
+                        logger.error("Recovery failed. Skipping problematic data")
+                        processed_rows += current_chunk_size
+                        continue
             
-            # Final data combination
-            if all_chunks:
-                logger.info(f"Final data combination: {len(all_chunks)} chunks")
-                final_df = self._combine_chunks_safe(all_chunks)
-                
-                if final_df is not None and not final_df.empty:
-                    logger.info(f"Chunk processing completed: {final_df.shape}")
-                    return final_df
-                else:
-                    raise ValueError("Final data combination result is empty")
-            else:
-                raise ValueError("No processed chunks available")
-                
+            # Final combination
+            if len(all_chunks) == 0:
+                logger.error("No data processed successfully")
+                return pd.DataFrame()
+            
+            logger.info(f"Final combination: {len(all_chunks)} chunks")
+            final_df = self._combine_chunks_safe(all_chunks)
+            
+            logger.info(f"Chunk processing completed: {len(final_df):,} rows")
+            self.memory_monitor.force_memory_cleanup(intensive=True)
+            
+            return final_df
+            
         except Exception as e:
             logger.error(f"Chunk processing failed: {e}")
+            self.memory_monitor.force_memory_cleanup(intensive=True)
             raise
-    
-    def _adjust_chunk_size(self, pressure: Dict[str, Any]):
-        """Adjust chunk size"""
-        old_size = self.chunk_size
-        
-        if pressure['pressure_level'] == 'abort':
-            self.chunk_size = self.min_chunk_size
-        elif pressure['pressure_level'] == 'critical':
-            self.chunk_size = max(self.min_chunk_size, self.chunk_size // 5)
-        elif pressure['pressure_level'] == 'high':
-            self.chunk_size = max(self.min_chunk_size, self.chunk_size // 3)
-        elif pressure['pressure_level'] == 'moderate':
-            self.chunk_size = max(self.min_chunk_size, int(self.chunk_size * 0.7))
-        elif pressure['pressure_level'] == 'low':
-            self.chunk_size = min(self.max_chunk_size, int(self.chunk_size * 1.2))
-        
-        if old_size != self.chunk_size:
-            logger.info(f"Chunk size adjusted: {old_size:,} → {self.chunk_size:,}")
-    
-    def _read_chunk_safe(self, start_row: int, num_rows: int) -> Optional[pd.DataFrame]:
-        """Safe chunk reading"""
-        try:
-            # PyArrow chunk reading
-            if PYARROW_AVAILABLE:
-                try:
-                    # Read in smaller batches
-                    batch_size = min(num_rows, 10000)
-                    batches = []
-                    
-                    for i in range(0, num_rows, batch_size):
-                        current_batch_size = min(batch_size, num_rows - i)
-                        current_start = start_row + i
-                        
-                        try:
-                            # Use pandas skiprows/nrows approach
-                            batch_df = pd.read_parquet(
-                                self.file_path,
-                                engine='pyarrow'
-                            )
-                            
-                            # Extract requested range
-                            end_row = min(current_start + current_batch_size, len(batch_df))
-                            if current_start >= len(batch_df):
-                                break
-                            
-                            batch_chunk = batch_df.iloc[current_start:end_row].copy()
-                            batches.append(batch_chunk)
-                            
-                            # Memory release
-                            del batch_df
-                            gc.collect()
-                            
-                            # Early termination under memory pressure
-                            if self.memory_monitor.check_memory_pressure()['should_abort']:
-                                logger.warning("Memory pressure detected, stopping batch reading")
-                                break
-                                
-                        except Exception as e:
-                            logger.warning(f"Batch {i} reading failed: {e}")
-                            break
-                    
-                    if batches:
-                        result_df = pd.concat(batches, ignore_index=True)
-                        for batch in batches:
-                            del batch
-                        del batches
-                        gc.collect()
-                        return result_df
-                    else:
-                        return None
-                        
-                except Exception as e:
-                    logger.warning(f"PyArrow chunk reading failed: {e}")
-            
-            # Default pandas approach
-            try:
-                df = pd.read_parquet(self.file_path, engine='pyarrow')
-                
-                end_row = min(start_row + num_rows, len(df))
-                if start_row >= len(df):
-                    return None
-                
-                result_df = df.iloc[start_row:end_row].copy()
-                
-                # Memory release
-                del df
-                gc.collect()
-                
-                return result_df
-                
-            except Exception as e:
-                logger.error(f"Pandas chunk reading failed: {e}")
-                return None
-            
-        except Exception as e:
-            logger.error(f"Chunk reading failed (position: {start_row:,}, size: {num_rows:,}): {e}")
-            return None
-    
-    def _optimize_chunk_memory(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Chunk memory optimization"""
-        if df is None or df.empty:
-            return df
-        
-        try:
-            # Integer optimization
-            for col in df.select_dtypes(include=['int64', 'int32']).columns:
-                try:
-                    col_min, col_max = df[col].min(), df[col].max()
-                    if pd.isna(col_min) or pd.isna(col_max):
-                        continue
-                    
-                    if col_min >= 0:
-                        if col_max <= 255:
-                            df[col] = df[col].astype('uint8')
-                        elif col_max <= 65535:
-                            df[col] = df[col].astype('uint16')
-                        else:
-                            df[col] = df[col].astype('uint32')
-                    else:
-                        if col_min >= -128 and col_max <= 127:
-                            df[col] = df[col].astype('int8')
-                        elif col_min >= -32768 and col_max <= 32767:
-                            df[col] = df[col].astype('int16')
-                        else:
-                            df[col] = df[col].astype('int32')
-                            
-                except Exception:
-                    try:
-                        df[col] = df[col].astype('int32')
-                    except Exception:
-                        pass
-            
-            # Float optimization
-            for col in df.select_dtypes(include=['float64']).columns:
-                try:
-                    df[col] = df[col].astype('float32')
-                except Exception:
-                    pass
-            
-            # Categorical optimization
-            for col in df.select_dtypes(include=['object']).columns:
-                try:
-                    unique_count = df[col].nunique()
-                    total_count = len(df)
-                    
-                    # Stricter criteria
-                    if unique_count < total_count * 0.3 and unique_count < 50:
-                        df[col] = df[col].astype('category')
-                except Exception:
-                    pass
-            
-            return df
-            
-        except Exception as e:
-            logger.warning(f"Chunk optimization failed: {e}")
-            return df
     
     def _combine_chunks_safe(self, chunks: List[pd.DataFrame]) -> pd.DataFrame:
         """Safe chunk combination"""
@@ -707,64 +610,17 @@ class DataChunkProcessor:
             return chunks[0]
         
         try:
-            # Filter valid DataFrames only
-            valid_chunks = []
+            # Memory efficient combination
+            combined = pd.concat(chunks, ignore_index=True, copy=False)
+            
+            # Clear chunk references
             for chunk in chunks:
-                if isinstance(chunk, pd.DataFrame) and not chunk.empty:
-                    valid_chunks.append(chunk)
-            
-            if not valid_chunks:
-                logger.warning("No valid chunks available")
-                return pd.DataFrame()
-            
-            # Batch-wise combination
-            batch_size = 2
-            combined_chunks = []
-            
-            for i in range(0, len(valid_chunks), batch_size):
-                try:
-                    batch = valid_chunks[i:i + batch_size]
-                    
-                    if len(batch) == 1:
-                        combined_chunks.append(batch[0])
-                    else:
-                        # Batch combination
-                        batch_combined = pd.concat(batch, ignore_index=True)
-                        batch_combined = self._optimize_chunk_memory(batch_combined)
-                        combined_chunks.append(batch_combined)
-                    
-                    # Release original chunks
-                    for chunk in batch:
-                        del chunk
-                    
-                    gc.collect()
-                    
-                    # Intermediate cleanup under memory pressure
-                    if self.memory_monitor.check_memory_pressure()['should_force_gc']:
-                        self.memory_monitor.force_memory_cleanup()
-                    
-                except Exception as e:
-                    logger.warning(f"Batch combination failed: {e}")
-                    # Keep failed batch as individual chunks
-                    for chunk in batch:
-                        if isinstance(chunk, pd.DataFrame) and not chunk.empty:
-                            combined_chunks.append(chunk)
-            
-            # Final combination
-            if len(combined_chunks) == 1:
-                final_df = combined_chunks[0]
-            else:
-                final_df = pd.concat(combined_chunks, ignore_index=True)
-                final_df = self._optimize_chunk_memory(final_df)
-            
-            # Memory cleanup
-            for chunk in combined_chunks:
                 del chunk
-            del combined_chunks
+            chunks.clear()
             gc.collect()
             
-            logger.info(f"Chunk combination completed: {final_df.shape}")
-            return final_df
+            logger.info(f"Chunks combined successfully: {len(combined):,} rows")
+            return combined
             
         except Exception as e:
             logger.error(f"Chunk combination failed: {e}")
@@ -780,7 +636,7 @@ class DataChunkProcessor:
             logger.info(f"Chunk recovery attempt: position {failed_position:,}")
             
             # Reduce chunk size more aggressively for retry
-            recovery_chunk_size = max(self.min_chunk_size, failed_chunk_size // 3)
+            recovery_chunk_size = max(self.min_chunk_size, failed_chunk_size // 4)
             
             recovery_df = self._read_chunk_safe(failed_position, recovery_chunk_size)
             
@@ -863,13 +719,12 @@ class StreamingDataLoader:
             
             # Column analysis with first row group (for training data)
             if is_train:
-                # Remove batch_size parameter
                 sample_table = parquet_file.read_row_group(0)
                 sample_df = sample_table.to_pandas()
                 
-                # Limit sample size (to 5000 rows)
-                if len(sample_df) > 5000:
-                    sample_df = sample_df.head(5000)
+                # Limit sample size (to 3000 rows for memory efficiency)
+                if len(sample_df) > 3000:
+                    sample_df = sample_df.head(3000)
                 
                 # Target column detection
                 self.target_column = self.column_analyzer.detect_target_column(sample_df)
@@ -882,8 +737,10 @@ class StreamingDataLoader:
             all_chunks = []
             processed_rows = 0
             
-            # Streaming processing by row group
-            for rg_idx in range(num_row_groups):
+            # More conservative row group processing
+            max_groups_per_batch = 2  # Process fewer row groups at once
+            
+            for rg_start in range(0, num_row_groups, max_groups_per_batch):
                 try:
                     # Memory pressure check
                     pressure = self.memory_monitor.check_memory_pressure()
@@ -898,63 +755,111 @@ class StreamingDataLoader:
                             logger.error(f"Memory limit reached even after cleanup - Stopping: {processed_rows:,} rows")
                             break
                     
-                    # Read row group (remove batch_size parameter)
-                    table = parquet_file.read_row_group(rg_idx)
-                    chunk_df = table.to_pandas()
+                    # Process batch of row groups
+                    rg_end = min(rg_start + max_groups_per_batch, num_row_groups)
+                    batch_tables = []
                     
-                    logger.info(f"Row group {rg_idx+1}/{num_row_groups} processed: {len(chunk_df):,} rows")
+                    for rg_idx in range(rg_start, rg_end):
+                        table = parquet_file.read_row_group(rg_idx)
+                        batch_tables.append(table)
+                    
+                    # Combine tables in batch
+                    if len(batch_tables) == 1:
+                        batch_table = batch_tables[0]
+                    else:
+                        batch_table = pa.concat_tables(batch_tables)
+                    
+                    chunk_df = batch_table.to_pandas()
+                    
+                    logger.info(f"Row groups {rg_start+1}-{rg_end} processed: {len(chunk_df):,} rows")
                     
                     # Immediate memory optimization
-                    chunk_df = self._optimize_dataframe_aggressive(chunk_df)
+                    chunk_df = self._optimize_dataframe_memory(chunk_df)
                     
                     # Store chunk
                     all_chunks.append(chunk_df)
                     processed_rows += len(chunk_df)
                     
                     # Memory release
-                    del table
+                    del batch_tables, batch_table
                     gc.collect()
                     
-                    # More frequent intermediate combination
-                    if len(all_chunks) >= 3:
+                    # More frequent intermediate combination (every 2 chunks for memory efficiency)
+                    if len(all_chunks) >= 2:
                         logger.info(f"Performing intermediate combination: {len(all_chunks)} chunks")
                         combined = self._combine_chunks_immediate(all_chunks)
                         all_chunks = [combined]
                         self.memory_monitor.force_memory_cleanup()
                     
                     # Progress output
-                    progress = (rg_idx + 1) / num_row_groups * 100
-                    if rg_idx % 5 == 0 or rg_idx == num_row_groups - 1:
-                        logger.info(f"Progress: {progress:.1f}% ({processed_rows:,}/{total_rows:,} rows)")
+                    progress_pct = (rg_end / num_row_groups) * 100
+                    logger.info(f"Progress: {progress_pct:.1f}% ({processed_rows:,} rows)")
                     
                 except Exception as e:
-                    logger.error(f"Row group {rg_idx} processing failed: {e}")
-                    # Continue despite failure
+                    logger.error(f"Row group batch {rg_start+1}-{rg_end} processing failed: {e}")
                     continue
             
             # Final combination
             if not all_chunks:
-                raise ValueError("No processed data available")
+                logger.error("No data processed successfully")
+                return pd.DataFrame()
             
             logger.info(f"Final combination: {len(all_chunks)} chunks")
             final_df = self._combine_chunks_immediate(all_chunks)
             
-            # Target column check (for training data)
-            if is_train and self.target_column:
-                if self.target_column in final_df.columns:
-                    # CTR check
-                    target_ctr = final_df[self.target_column].mean()
-                    logger.info(f"Actual CTR: {target_ctr:.4f}")
-                else:
-                    logger.warning(f"Detected target column '{self.target_column}' not found in final data")
+            logger.info(f"File streaming completed: {len(final_df):,} rows")
             
-            logger.info(f"Streaming processing completed: {final_df.shape} ({processed_rows:,} rows processed)")
+            # Final memory cleanup
+            self.memory_monitor.force_memory_cleanup(intensive=True)
             
             return final_df
             
         except Exception as e:
             logger.error(f"File streaming processing failed: {e}")
+            self.memory_monitor.force_memory_cleanup(intensive=True)
             raise
+    
+    def _optimize_dataframe_memory(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Optimize DataFrame memory usage"""
+        try:
+            initial_memory = df.memory_usage(deep=True).sum() / (1024**2)
+            
+            # Optimize data types
+            for col in df.columns:
+                col_type = df[col].dtype
+                
+                if col_type == 'object':
+                    # Try to convert to numeric if possible
+                    if df[col].str.replace('.', '').str.isdigit().all():
+                        try:
+                            df[col] = pd.to_numeric(df[col], downcast='integer')
+                            continue
+                        except:
+                            pass
+                    
+                    # Convert to category if cardinality is low
+                    if df[col].nunique() / len(df) < 0.3:
+                        df[col] = df[col].astype('category')
+                
+                elif col_type in ['int64', 'int32']:
+                    # Downcast integers
+                    df[col] = pd.to_numeric(df[col], downcast='integer')
+                
+                elif col_type in ['float64', 'float32']:
+                    # Downcast floats
+                    df[col] = pd.to_numeric(df[col], downcast='float')
+            
+            final_memory = df.memory_usage(deep=True).sum() / (1024**2)
+            memory_reduction = (initial_memory - final_memory) / initial_memory * 100
+            
+            if memory_reduction > 10:
+                logger.info(f"DataFrame memory optimized: {memory_reduction:.1f}% reduction")
+            
+            return df
+            
+        except Exception as e:
+            logger.warning(f"DataFrame memory optimization failed: {e}")
+            return df
     
     def _combine_chunks_immediate(self, chunks: List[pd.DataFrame]) -> pd.DataFrame:
         """Immediate chunk combination"""
@@ -965,25 +870,19 @@ class StreamingDataLoader:
             return chunks[0]
         
         try:
-            # Select valid chunks only
-            valid_chunks = [chunk for chunk in chunks if isinstance(chunk, pd.DataFrame) and not chunk.empty]
+            logger.info(f"Combining {len(chunks)} chunks...")
             
-            if not valid_chunks:
-                return pd.DataFrame()
+            # Use concat with minimal memory overhead
+            combined = pd.concat(chunks, ignore_index=True, copy=False)
             
-            # Direct combination
-            combined_df = pd.concat(valid_chunks, ignore_index=True)
-            
-            # Immediate optimization
-            combined_df = self._optimize_dataframe_aggressive(combined_df)
-            
-            # Release original chunks
+            # Clear chunk references immediately
             for chunk in chunks:
                 del chunk
-            del chunks, valid_chunks
+            chunks.clear()
             gc.collect()
             
-            return combined_df
+            logger.info(f"Chunk combination successful: {len(combined):,} rows")
+            return combined
             
         except Exception as e:
             logger.error(f"Chunk combination failed: {e}")
@@ -993,95 +892,22 @@ class StreamingDataLoader:
                     return chunk
             return pd.DataFrame()
     
-    def _optimize_dataframe_aggressive(self, df: pd.DataFrame) -> pd.DataFrame:
-        """DataFrame optimization"""
-        if df is None or df.empty:
-            return df
-        
-        try:
-            # Integer optimization
-            for col in df.select_dtypes(include=['int64', 'int32']).columns:
-                try:
-                    col_min, col_max = df[col].min(), df[col].max()
-                    if pd.isna(col_min) or pd.isna(col_max):
-                        continue
-                    
-                    if col_min >= 0:
-                        if col_max <= 255:
-                            df[col] = df[col].astype('uint8')
-                        elif col_max <= 65535:
-                            df[col] = df[col].astype('uint16')
-                        else:
-                            df[col] = df[col].astype('uint32')
-                    else:
-                        if col_min >= -128 and col_max <= 127:
-                            df[col] = df[col].astype('int8')
-                        elif col_min >= -32768 and col_max <= 32767:
-                            df[col] = df[col].astype('int16')
-                        else:
-                            df[col] = df[col].astype('int32')
-                            
-                except Exception:
-                    try:
-                        df[col] = df[col].astype('int32')
-                    except Exception:
-                        pass
-            
-            # Float optimization
-            for col in df.select_dtypes(include=['float64']).columns:
-                try:
-                    df[col] = df[col].astype('float32')
-                except Exception:
-                    pass
-            
-            # Categorical optimization
-            for col in df.select_dtypes(include=['object']).columns:
-                try:
-                    unique_count = df[col].nunique()
-                    total_count = len(df)
-                    
-                    # Very low cardinality only
-                    if unique_count < 50 and unique_count < total_count * 0.05:
-                        df[col] = df[col].astype('category')
-                    else:
-                        # Attempt numeric conversion
-                        numeric_series = pd.to_numeric(df[col], errors='coerce')
-                        if not numeric_series.isna().all():
-                            df[col] = numeric_series.fillna(0).astype('float32')
-                        else:
-                            # Hash conversion
-                            df[col] = df[col].astype(str).apply(lambda x: hash(x) % 50000).astype('int32')
-                except Exception:
-                    try:
-                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype('float32')
-                    except Exception:
-                        pass
-            
-            # Handle missing values and infinite values
-            df = df.fillna(0)
-            df = df.replace([np.inf, -np.inf], [0, 0])
-            
-            return df
-            
-        except Exception as e:
-            logger.warning(f"DataFrame optimization failed: {e}")
-            return df
-    
     def _validate_files(self) -> bool:
-        """File validation"""
+        """Validate input files"""
         try:
-            train_exists = self.config.TRAIN_PATH.exists()
-            test_exists = self.config.TEST_PATH.exists()
+            train_path = Path(self.config.TRAIN_PATH)
+            test_path = Path(self.config.TEST_PATH)
             
-            if not train_exists or not test_exists:
+            if not train_path.exists():
+                logger.error(f"Training file not found: {train_path}")
                 return False
             
-            train_size_mb = self.config.TRAIN_PATH.stat().st_size / (1024**2)
-            test_size_mb = self.config.TEST_PATH.stat().st_size / (1024**2)
+            if not test_path.exists():
+                logger.error(f"Test file not found: {test_path}")
+                return False
             
-            logger.info(f"File sizes - Training: {train_size_mb:.1f}MB, Test: {test_size_mb:.1f}MB")
-            
-            return train_size_mb > 10 and test_size_mb > 10
+            logger.info("File validation successful")
+            return True
             
         except Exception as e:
             logger.error(f"File validation failed: {e}")

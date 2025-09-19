@@ -2,18 +2,18 @@
 
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, List, Optional, Tuple
 import logging
-from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
-from sklearn.metrics import roc_auc_score, average_precision_score, log_loss
-import time
 import gc
-import warnings
-from pathlib import Path
+import time
 import pickle
+from pathlib import Path
+import warnings
+from abc import ABC, abstractmethod
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.metrics import roc_auc_score, average_precision_score, log_loss
+import threading
 import joblib
-import os
-warnings.filterwarnings('ignore')
 
 # Safe library imports
 try:
@@ -23,93 +23,76 @@ except ImportError:
     PSUTIL_AVAILABLE = False
 
 try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
+try:
     import optuna
     OPTUNA_AVAILABLE = True
 except ImportError:
     OPTUNA_AVAILABLE = False
+    warnings.warn("Optuna is not installed. Hyperparameter tuning functionality will be disabled.")
 
 from config import Config
-from models import ModelFactory, BaseModel
+from models import BaseModel, ModelFactory
+from evaluation import CTRMetrics
 
-def get_safe_logger(name: str):
-    """Logger creation"""
-    logger = logging.getLogger(name)
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
-    return logger
-
-logger = get_safe_logger(__name__)
+logger = logging.getLogger(__name__)
 
 class LargeDataMemoryTracker:
-    """Large data memory tracking"""
+    """Large data memory monitoring"""
     
-    def __init__(self, max_memory_gb: float = 50.0):
-        self.max_memory_gb = max_memory_gb
-        self.monitoring_enabled = PSUTIL_AVAILABLE
+    def __init__(self):
+        self.warning_threshold = 45.0  # 45GB warning threshold
+        self.critical_threshold = 50.0  # 50GB critical threshold
+        self.lock = threading.Lock()
         
-        # Adjusted thresholds for 64GB environment
-        self.warning_threshold = max_memory_gb * 0.70  # 35GB
-        self.critical_threshold = max_memory_gb * 0.80  # 40GB
-        self.abort_threshold = max_memory_gb * 0.90     # 45GB
-    
     def get_memory_usage(self) -> float:
-        """Current memory usage (GB)"""
-        if not self.monitoring_enabled:
-            return 2.0
-        
+        """Current memory usage in GB"""
         try:
-            return psutil.virtual_memory().used / (1024**3)
+            if PSUTIL_AVAILABLE:
+                process = psutil.Process()
+                memory_mb = process.memory_info().rss / (1024**2)
+                return memory_mb / 1024
+            return 2.0
         except Exception:
             return 2.0
     
     def get_available_memory(self) -> float:
-        """Available memory (GB)"""
-        if not self.monitoring_enabled:
-            return 45.0
-        
+        """Available memory in GB"""
         try:
-            return psutil.virtual_memory().available / (1024**3)
+            if PSUTIL_AVAILABLE:
+                vm = psutil.virtual_memory()
+                return vm.available / (1024**3)
+            return 40.0
         except Exception:
-            return 45.0
+            return 40.0
     
     def get_gpu_memory_usage(self) -> Dict[str, float]:
         """GPU memory usage"""
         try:
-            import torch
-            if torch.cuda.is_available():
-                allocated = torch.cuda.memory_allocated(0) / (1024**3)
-                reserved = torch.cuda.memory_reserved(0) / (1024**3)
+            if TORCH_AVAILABLE and torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated() / (1024**3)
+                reserved = torch.cuda.memory_reserved() / (1024**3)
                 total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                free = total - allocated
-                utilization = (allocated / total) * 100
+                free = total - reserved
+                utilization = (reserved / total) * 100
                 
                 return {
                     'allocated': allocated,
                     'reserved': reserved,
-                    'free': free,
                     'total': total,
+                    'free': free,
                     'utilization': utilization
                 }
+            return {'allocated': 0, 'reserved': 0, 'total': 0, 'free': 0, 'utilization': 0}
         except Exception:
-            pass
-        
-        return {
-            'allocated': 0.0,
-            'reserved': 0.0,
-            'free': 16.0,
-            'total': 16.0,
-            'utilization': 0.0
-        }
+            return {'allocated': 0, 'reserved': 0, 'total': 0, 'free': 0, 'utilization': 0}
     
     def check_memory_pressure(self) -> bool:
-        """Memory pressure check"""
-        if not self.monitoring_enabled:
-            return False
-        
+        """Check if memory pressure exists"""
         try:
             current_usage = self.get_memory_usage()
             return current_usage > self.warning_threshold
@@ -189,8 +172,8 @@ class CTRModelTrainer:
             data_size_gb = (X_train.memory_usage(deep=True).sum() + y_train.memory_usage(deep=True)) / (1024**3)
             logger.info(f"Data size: {data_size_gb:.2f}GB, available memory: {available_memory:.2f}GB")
             
-            # Relaxed memory usage threshold for 64GB environment
-            if available_memory < 15:
+            # Relaxed memory usage threshold for 64GB environment (changed from 15GB to 5GB)
+            if available_memory < 5:
                 logger.warning(f"Low memory detected: {available_memory:.2f}GB available")
                 logger.info("Applying memory efficient processing")
                 X_train, y_train, X_val, y_val = self._apply_memory_efficient_sampling(
@@ -210,10 +193,10 @@ class CTRModelTrainer:
             
             model.fit(X_train, y_train, X_val, y_val)
             
-            # Apply calibration for all models in 64GB environment
+            # Apply calibration for all models in 64GB environment (relaxed threshold)
             if apply_calibration and X_val is not None and y_val is not None:
                 current_memory = self.memory_tracker.get_available_memory()
-                if current_memory > 15:  # Relaxed threshold
+                if current_memory > 5:  # Relaxed threshold from 15GB to 5GB
                     self._apply_calibration(model, X_val, y_val)
                     logger.info(f"{model_type} calibration applied successfully")
                 else:
@@ -250,342 +233,270 @@ class CTRModelTrainer:
             raise
     
     def _apply_memory_efficient_sampling(self, X_train, y_train, X_val, y_val, available_memory):
-        """Memory efficient data sampling"""
+        """Apply memory efficient sampling based on available memory"""
         try:
-            if available_memory < 20:  # Less than 20GB available
-                logger.info("Applying aggressive memory sampling")
+            # Calculate sampling ratio based on available memory
+            if available_memory < 3:
+                sample_ratio = 0.3
+            elif available_memory < 5:
+                sample_ratio = 0.5
+            elif available_memory < 8:
+                sample_ratio = 0.7
+            else:
+                sample_ratio = 0.85
+            
+            logger.info(f"Applying memory efficient sampling: ratio={sample_ratio:.2f}")
+            
+            # Sample training data
+            if sample_ratio < 1.0:
+                n_samples = int(len(X_train) * sample_ratio)
+                sample_indices = np.random.choice(X_train.index, size=n_samples, replace=False)
+                X_train = X_train.loc[sample_indices].copy()
+                y_train = y_train.loc[sample_indices].copy()
                 
-                # Reduce training data size
-                max_train_size = min(len(X_train), 5000000)  # Max 5M samples
-                if len(X_train) > max_train_size:
-                    indices = np.random.choice(len(X_train), max_train_size, replace=False)
-                    X_train = X_train.iloc[indices]
-                    y_train = y_train.iloc[indices]
-                    logger.info(f"Training data reduced to {len(X_train):,} samples")
+                logger.info(f"Training data sampled: {len(X_train):,} rows")
                 
-                # Reduce validation data size
-                if X_val is not None and len(X_val) > 200000:
-                    indices = np.random.choice(len(X_val), 200000, replace=False)
-                    X_val = X_val.iloc[indices]
-                    y_val = y_val.iloc[indices]
-                    logger.info(f"Validation data reduced to {len(X_val):,} samples")
+                # Sample validation data if exists
+                if X_val is not None and y_val is not None:
+                    val_sample_ratio = min(sample_ratio * 1.2, 1.0)
+                    if val_sample_ratio < 1.0:
+                        n_val_samples = int(len(X_val) * val_sample_ratio)
+                        val_sample_indices = np.random.choice(X_val.index, size=n_val_samples, replace=False)
+                        X_val = X_val.loc[val_sample_indices].copy()
+                        y_val = y_val.loc[val_sample_indices].copy()
+                        
+                        logger.info(f"Validation data sampled: {len(X_val):,} rows")
+            
+            LargeDataMemoryTracker.force_cleanup()
             
             return X_train, y_train, X_val, y_val
             
         except Exception as e:
-            logger.warning(f"Memory efficient sampling failed: {e}")
+            logger.error(f"Memory efficient sampling failed: {e}")
             return X_train, y_train, X_val, y_val
+    
+    def _validate_and_apply_params(self, model_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and apply model parameters"""
+        try:
+            default_params = self._get_default_params(model_type)
+            
+            # Merge with defaults
+            final_params = default_params.copy()
+            final_params.update(params)
+            
+            # Memory-based adjustments
+            available_memory = self.memory_tracker.get_available_memory()
+            
+            if model_type.lower() == 'lightgbm':
+                if available_memory < 10:
+                    final_params['max_depth'] = min(final_params.get('max_depth', 6), 5)
+                    final_params['num_leaves'] = min(final_params.get('num_leaves', 31), 20)
+                    final_params['min_data_in_leaf'] = max(final_params.get('min_data_in_leaf', 20), 50)
+            
+            elif model_type.lower() == 'xgboost':
+                if available_memory < 10:
+                    final_params['max_depth'] = min(final_params.get('max_depth', 6), 5)
+                    final_params['min_child_weight'] = max(final_params.get('min_child_weight', 1), 3)
+            
+            return final_params
+            
+        except Exception as e:
+            logger.warning(f"Parameter validation failed: {e}")
+            return self._get_default_params(model_type)
     
     def _get_default_params(self, model_type: str) -> Dict[str, Any]:
         """Get default parameters for model"""
-        if model_type.lower() == 'lightgbm':
-            return self.config.LIGHTGBM_PARAMS.copy()
-        elif model_type.lower() == 'xgboost':
-            return self.config.XGBOOST_PARAMS.copy()
-        elif model_type.lower() == 'logistic':
-            return {
-                'penalty': 'l2',
+        defaults = {
+            'lightgbm': {
+                'objective': 'binary',
+                'metric': 'binary_logloss',
+                'boosting_type': 'gbdt',
+                'num_leaves': 31,
+                'max_depth': 6,
+                'learning_rate': 0.1,
+                'feature_fraction': 0.8,
+                'bagging_fraction': 0.8,
+                'bagging_freq': 5,
+                'min_data_in_leaf': 20,
+                'lambda_l1': 0.0,
+                'lambda_l2': 0.0,
+                'min_gain_to_split': 0.0,
+                'verbosity': -1,
+                'random_state': self.config.RANDOM_STATE,
+                'n_estimators': 100,
+                'n_jobs': -1
+            },
+            'xgboost': {
+                'objective': 'binary:logistic',
+                'eval_metric': 'logloss',
+                'max_depth': 6,
+                'learning_rate': 0.1,
+                'n_estimators': 100,
+                'subsample': 0.8,
+                'colsample_bytree': 0.8,
+                'min_child_weight': 1,
+                'gamma': 0,
+                'alpha': 0,
+                'lambda': 1,
+                'random_state': self.config.RANDOM_STATE,
+                'n_jobs': -1,
+                'verbosity': 0
+            },
+            'logistic': {
                 'C': 1.0,
+                'penalty': 'l2',
                 'solver': 'liblinear',
                 'max_iter': 1000,
-                'class_weight': 'balanced',
-                'random_state': self.config.RANDOM_STATE
+                'random_state': self.config.RANDOM_STATE,
+                'n_jobs': -1
             }
-        else:
-            return {}
-    
-    def _validate_and_apply_params(self, model_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Parameter validation and application"""
-        default_params = self._get_default_params(model_type)
+        }
         
-        # Merge with defaults
-        validated_params = default_params.copy()
-        validated_params.update(params)
-        
-        # Model-specific validation
-        if model_type.lower() == 'lightgbm':
-            # Ensure RTX 4060 Ti optimization
-            if self.gpu_available:
-                validated_params.update({
-                    'device_type': 'cpu',  # Use CPU for stability with large data
-                    'num_threads': 12,
-                    'force_row_wise': True
-                })
-        
-        return validated_params
+        return defaults.get(model_type.lower(), {})
     
     def _apply_calibration(self, model: BaseModel, X_val: pd.DataFrame, y_val: pd.Series):
-        """Apply model calibration"""
+        """Apply calibration to model"""
         try:
-            if hasattr(model, 'apply_calibration'):
-                model.apply_calibration(X_val, y_val, method='auto')
-                if model.is_calibrated:
-                    logger.info(f"{model.name}: Calibration applied successfully")
+            logger.info(f"Applying calibration to {model.name}")
+            
+            # Get uncalibrated predictions
+            if hasattr(model, 'predict_proba_raw'):
+                val_predictions = model.predict_proba_raw(X_val)
+            else:
+                val_predictions = model.predict_proba(X_val)
+            
+            # Apply calibration
+            from models import CTRCalibrator
+            calibrator = CTRCalibrator(target_ctr=0.0201, method='auto')
+            calibrator.fit(y_val.values, val_predictions)
+            
+            # Set calibrator to model
+            model.calibrator = calibrator
+            model.is_calibrated = True
+            
+            # Test calibration
+            calibrated_predictions = calibrator.predict(val_predictions)
+            
+            original_ctr = val_predictions.mean()
+            calibrated_ctr = calibrated_predictions.mean()
+            actual_ctr = y_val.mean()
+            
+            logger.info(f"Calibration results:")
+            logger.info(f"  - Original CTR: {original_ctr:.4f}")
+            logger.info(f"  - Calibrated CTR: {calibrated_ctr:.4f}")
+            logger.info(f"  - Actual CTR: {actual_ctr:.4f}")
+            logger.info(f"  - Best method: {calibrator.best_method}")
+            
         except Exception as e:
-            logger.warning(f"Calibration application failed: {e}")
+            logger.error(f"Calibration application failed: {e}")
+            model.is_calibrated = False
     
     def _cleanup_memory_after_training(self, model_type: str):
-        """Memory cleanup after training"""
+        """Memory cleanup after model training"""
         try:
             LargeDataMemoryTracker.force_cleanup()
             
-            current_memory = self.memory_tracker.get_memory_usage()
-            if current_memory > self.memory_tracker.critical_threshold:
-                logger.warning(f"High memory usage after {model_type} training: {current_memory:.2f}GB")
+            available_memory = self.memory_tracker.get_available_memory()
+            logger.info(f"Memory after {model_type} training: {available_memory:.2f}GB available")
+            
         except Exception as e:
             logger.warning(f"Memory cleanup failed: {e}")
     
-    def hyperparameter_tuning_optuna(self,
-                                   model_type: str,
-                                   X_train: pd.DataFrame,
-                                   y_train: pd.Series,
-                                   n_trials: int = 100,
-                                   cv_folds: int = 3) -> Dict[str, Any]:
-        """Hyperparameter tuning with Optuna (memory optimized)"""
-        
-        if not OPTUNA_AVAILABLE:
-            logger.warning("Optuna not available, skipping hyperparameter tuning")
-            return {'best_params': self._get_default_params(model_type), 'best_score': 0.0}
-        
-        logger.info(f"{model_type} hyperparameter tuning started")
-        logger.info(f"Trials: {n_trials}, CV folds: {cv_folds}")
-        
-        available_memory = self.memory_tracker.get_available_memory()
-        
-        # Memory-based trial count adjustment
-        if available_memory < 20:
-            n_trials = min(n_trials, 30)
-            logger.warning(f"Reduced trials due to memory constraints: {n_trials}")
-        
-        # Reduce data size for tuning if needed
-        if len(X_train) > 500000:
-            sample_size = min(500000, len(X_train))
-            sample_indices = np.random.choice(len(X_train), sample_size, replace=False)
-            X_sample = X_train.iloc[sample_indices].copy()
-            y_sample = y_train.iloc[sample_indices].copy()
-            logger.info(f"Tuning data reduced for memory optimization: {len(X_train):,} → {len(X_sample):,}")
-        else:
-            X_sample = X_train.copy()
-            y_sample = y_train.copy()
-        
-        def objective(trial):
-            try:
-                if self.memory_tracker.get_available_memory() < 15:
-                    logger.warning("Trial aborted due to memory shortage")
-                    return 0.0
-                
-                if model_type.lower() == 'lightgbm':
-                    params = {
-                        'objective': 'binary',
-                        'metric': 'binary_logloss',
-                        'boosting_type': 'gbdt',
-                        'num_leaves': trial.suggest_int('num_leaves', 1500, 3000),
-                        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.02, log=True),
-                        'feature_fraction': trial.suggest_float('feature_fraction', 0.9, 0.98),
-                        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.8, 0.9),
-                        'bagging_freq': trial.suggest_int('bagging_freq', 3, 7),
-                        'min_child_samples': trial.suggest_int('min_child_samples', 100, 300),
-                        'min_child_weight': trial.suggest_float('min_child_weight', 5, 20),
-                        'lambda_l1': trial.suggest_float('lambda_l1', 0.5, 3.0),
-                        'lambda_l2': trial.suggest_float('lambda_l2', 0.5, 3.0),
-                        'max_depth': trial.suggest_int('max_depth', 15, 20),
-                        'verbose': -1,
-                        'random_state': self.config.RANDOM_STATE,
-                        'n_estimators': 1000,
-                        'early_stopping_rounds': 100,
-                        'scale_pos_weight': trial.suggest_float('scale_pos_weight', 45, 55),
-                        'force_row_wise': True,
-                        'max_bin': 255,
-                        'num_threads': 12,
-                        'device_type': 'cpu'
-                    }
-                
-                elif model_type.lower() == 'xgboost':
-                    params = {
-                        'objective': 'binary:logistic',
-                        'eval_metric': 'logloss',
-                        'tree_method': 'hist',
-                        'max_depth': trial.suggest_int('max_depth', 15, 20),
-                        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.02, log=True),
-                        'subsample': trial.suggest_float('subsample', 0.8, 0.9),
-                        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.9, 0.98),
-                        'min_child_weight': trial.suggest_float('min_child_weight', 5, 20),
-                        'reg_alpha': trial.suggest_float('reg_alpha', 0.5, 3.0),
-                        'reg_lambda': trial.suggest_float('reg_lambda', 0.5, 3.0),
-                        'random_state': self.config.RANDOM_STATE,
-                        'n_estimators': 1000,
-                        'early_stopping_rounds': 100,
-                        'scale_pos_weight': trial.suggest_float('scale_pos_weight', 45, 55),
-                        'n_jobs': 12
-                    }
-                
-                else:
-                    return 0.0
-                
-                # Cross-validation
-                skf = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=self.config.RANDOM_STATE)
-                scores = []
-                
-                for train_idx, val_idx in skf.split(X_sample, y_sample):
-                    X_fold_train = X_sample.iloc[train_idx]
-                    y_fold_train = y_sample.iloc[train_idx]
-                    X_fold_val = X_sample.iloc[val_idx]
-                    y_fold_val = y_sample.iloc[val_idx]
-                    
-                    try:
-                        model = ModelFactory.create_model(model_type, params=params)
-                        model.fit(X_fold_train, y_fold_train, X_fold_val, y_fold_val)
-                        
-                        val_pred = model.predict_proba(X_fold_val)
-                        score = average_precision_score(y_fold_val, val_pred)
-                        scores.append(score)
-                        
-                        del model
-                        
-                    except Exception as e:
-                        logger.warning(f"Fold evaluation failed: {e}")
-                        scores.append(0.0)
-                    
-                    LargeDataMemoryTracker.force_cleanup()
-                
-                mean_score = np.mean(scores) if scores else 0.0
-                return mean_score
-                
-            except Exception as e:
-                logger.error(f"Trial execution failed: {e}")
-                return 0.0
-        
-        try:
-            study = optuna.create_study(direction='maximize')
-            study.optimize(objective, n_trials=n_trials, timeout=1800)  # 30 minute timeout
-            
-        except Exception as e:
-            logger.error(f"Error during hyperparameter tuning: {str(e)}")
-        finally:
-            LargeDataMemoryTracker.force_cleanup()
-        
-        if not hasattr(study, 'best_value') or study.best_value is None or study.best_value <= 0:
-            logger.warning(f"{model_type} hyperparameter tuning did not produce valid results.")
-            best_params = self._get_default_params(model_type)
-        else:
-            best_params = study.best_params
-            
-        tuning_results = {
-            'model_type': model_type,
-            'best_params': best_params,
-            'best_score': getattr(study, 'best_value', 0.0) if hasattr(study, 'best_value') else 0.0,
-            'n_trials': len(getattr(study, 'trials', [])),
-            'study': study if hasattr(study, 'best_value') else None,
-            'optimized': True
-        }
-        
-        self.best_params[model_type] = best_params
-        
-        logger.info(f"{model_type} hyperparameter tuning complete")
-        logger.info(f"Best score: {tuning_results['best_score']:.4f}")
-        logger.info(f"Trials completed: {tuning_results['n_trials']}/{n_trials}")
-        
-        return tuning_results
-    
     def cross_validate_model(self,
                            model_type: str,
-                           X_train: pd.DataFrame,
-                           y_train: pd.Series,
-                           cv_folds: int = 5,
-                           params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Cross-validation evaluation"""
+                           X: pd.DataFrame,
+                           y: pd.Series,
+                           params: Optional[Dict[str, Any]] = None,
+                           cv_folds: int = 3) -> Dict[str, Any]:
+        """Cross-validation for model"""
         
-        logger.info(f"{model_type} cross-validation started (folds: {cv_folds})")
+        logger.info(f"Cross-validation started: {model_type} (folds: {cv_folds})")
         start_time = time.time()
         
         try:
-            if params is None:
-                params = self.best_params.get(model_type, self._get_default_params(model_type))
-            
-            # Memory-based data sampling
             available_memory = self.memory_tracker.get_available_memory()
-            if available_memory < 20 and len(X_train) > 800000:
-                sample_size = min(800000, len(X_train))
-                sample_indices = np.random.choice(len(X_train), sample_size, replace=False)
-                X_sample = X_train.iloc[sample_indices].copy()
-                y_sample = y_train.iloc[sample_indices].copy()
-                logger.info(f"CV data reduced for memory: {len(X_train):,} → {len(X_sample):,}")
-            else:
-                X_sample = X_train
-                y_sample = y_train
+            
+            # Adjust folds based on memory
+            if available_memory < 10:
+                cv_folds = min(cv_folds, 3)
+                logger.info(f"Reduced CV folds to {cv_folds} due to memory constraints")
+            
+            metrics_calculator = CTRMetrics()
+            fold_results = []
             
             skf = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=self.config.RANDOM_STATE)
             
-            cv_scores = {
-                'ap_scores': [],
-                'auc_scores': [],
-                'logloss_scores': [],
-                'fold_times': []
-            }
-            
-            for fold, (train_idx, val_idx) in enumerate(skf.split(X_sample, y_sample), 1):
+            for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X, y)):
                 fold_start = time.time()
+                logger.info(f"Fold {fold_idx + 1}/{cv_folds} started")
                 
                 try:
-                    if self.memory_tracker.get_available_memory() < 15:
-                        logger.warning(f"Fold {fold} skipped due to memory shortage")
-                        continue
+                    X_fold_train, X_fold_val = X.iloc[train_idx], X.iloc[val_idx]
+                    y_fold_train, y_fold_val = y.iloc[train_idx], y.iloc[val_idx]
                     
-                    X_fold_train = X_sample.iloc[train_idx]
-                    y_fold_train = y_sample.iloc[train_idx]
-                    X_fold_val = X_sample.iloc[val_idx]
-                    y_fold_val = y_sample.iloc[val_idx]
+                    # Memory efficient sampling for CV
+                    if available_memory < 10:
+                        sample_size = min(len(X_fold_train), 50000)
+                        if len(X_fold_train) > sample_size:
+                            sample_indices = np.random.choice(len(X_fold_train), size=sample_size, replace=False)
+                            X_fold_train = X_fold_train.iloc[sample_indices]
+                            y_fold_train = y_fold_train.iloc[sample_indices]
                     
-                    model = ModelFactory.create_model(model_type, params=params)
-                    model.fit(X_fold_train, y_fold_train, X_fold_val, y_fold_val)
+                    model = self.train_single_model(
+                        model_type=model_type,
+                        X_train=X_fold_train,
+                        y_train=y_fold_train,
+                        X_val=X_fold_val,
+                        y_val=y_fold_val,
+                        params=params,
+                        apply_calibration=True
+                    )
                     
-                    val_pred = model.predict_proba(X_fold_val)
+                    # Predictions
+                    y_pred_proba = model.predict_proba(X_fold_val)
                     
-                    ap_score = average_precision_score(y_fold_val, val_pred)
-                    auc_score = roc_auc_score(y_fold_val, val_pred)
-                    logloss_score = log_loss(y_fold_val, val_pred)
+                    # Calculate metrics
+                    fold_metrics = metrics_calculator.calculate_all_metrics(
+                        y_true=y_fold_val.values,
+                        y_pred_proba=y_pred_proba
+                    )
                     
-                    cv_scores['ap_scores'].append(ap_score)
-                    cv_scores['auc_scores'].append(auc_score)
-                    cv_scores['logloss_scores'].append(logloss_score)
-                    cv_scores['fold_times'].append(time.time() - fold_start)
+                    fold_time = time.time() - fold_start
+                    fold_metrics['fold_time'] = fold_time
+                    fold_results.append(fold_metrics)
                     
-                    logger.info(f"Fold {fold}/{cv_folds} - AP: {ap_score:.4f}, AUC: {auc_score:.4f}, LogLoss: {logloss_score:.4f}")
+                    logger.info(f"Fold {fold_idx + 1} completed: AP={fold_metrics['average_precision']:.4f}, "
+                              f"AUC={fold_metrics['auc']:.4f}, LogLoss={fold_metrics['log_loss']:.4f}")
                     
-                    del model, X_fold_train, y_fold_train, X_fold_val, y_fold_val
+                    LargeDataMemoryTracker.force_cleanup()
                     
                 except Exception as e:
-                    logger.warning(f"Fold {fold} evaluation failed: {e}")
-                
-                LargeDataMemoryTracker.force_cleanup()
+                    logger.error(f"Fold {fold_idx + 1} failed: {e}")
+                    continue
             
-            # Calculate final scores
-            cv_results = {
-                'model_type': model_type,
-                'cv_folds': len(cv_scores['ap_scores']),
-                'mean_ap': np.mean(cv_scores['ap_scores']) if cv_scores['ap_scores'] else 0.0,
-                'std_ap': np.std(cv_scores['ap_scores']) if cv_scores['ap_scores'] else 0.0,
-                'mean_auc': np.mean(cv_scores['auc_scores']) if cv_scores['auc_scores'] else 0.0,
-                'std_auc': np.std(cv_scores['auc_scores']) if cv_scores['auc_scores'] else 0.0,
-                'mean_logloss': np.mean(cv_scores['logloss_scores']) if cv_scores['logloss_scores'] else float('inf'),
-                'std_logloss': np.std(cv_scores['logloss_scores']) if cv_scores['logloss_scores'] else 0.0,
-                'total_time': time.time() - start_time,
-                'mean_fold_time': np.mean(cv_scores['fold_times']) if cv_scores['fold_times'] else 0.0,
-                'detailed_scores': cv_scores,
-                'params_used': params
-            }
+            if not fold_results:
+                raise ValueError("All folds failed")
             
-            self.cv_results[model_type] = cv_results
+            # Aggregate results
+            cv_metrics = {}
+            for metric in ['average_precision', 'auc', 'log_loss', 'fold_time']:
+                values = [result[metric] for result in fold_results if metric in result]
+                if values:
+                    cv_metrics[f'mean_{metric}'] = np.mean(values)
+                    cv_metrics[f'std_{metric}'] = np.std(values)
             
-            logger.info(f"{model_type} cross-validation completed")
-            logger.info(f"Mean AP: {cv_results['mean_ap']:.4f} (±{cv_results['std_ap']:.4f})")
-            logger.info(f"Mean AUC: {cv_results['mean_auc']:.4f} (±{cv_results['std_auc']:.4f})")
-            logger.info(f"Mean LogLoss: {cv_results['mean_logloss']:.4f} (±{cv_results['std_logloss']:.4f})")
+            total_time = time.time() - start_time
+            cv_metrics['total_time'] = total_time
+            cv_metrics['cv_folds'] = len(fold_results)
             
-            return cv_results
+            logger.info(f"Cross-validation completed: {model_type}")
+            logger.info(f"Mean AP: {cv_metrics.get('mean_average_precision', 0):.4f} ± {cv_metrics.get('std_average_precision', 0):.4f}")
+            logger.info(f"Mean AUC: {cv_metrics.get('mean_auc', 0):.4f} ± {cv_metrics.get('std_auc', 0):.4f}")
+            
+            return cv_metrics
             
         except Exception as e:
-            logger.error(f"{model_type} cross-validation failed: {str(e)}")
+            logger.error(f"Cross-validation failed: {e}")
             LargeDataMemoryTracker.force_cleanup()
             
             return {
@@ -635,48 +546,63 @@ class CTRModelTrainer:
             n_trials = 60
         
         if tune_hyperparameters and OPTUNA_AVAILABLE:
-            logger.info("Hyperparameter tuning stage")
+            logger.info(f"Hyperparameter tuning started (trials: {n_trials})")
+            
             for model_type in model_types:
                 try:
-                    # Relaxed memory threshold for 64GB environment
-                    if self.memory_tracker.get_available_memory() < 15:
-                        logger.warning(f"Skipping {model_type} tuning due to memory shortage")
+                    available_memory = self.memory_tracker.get_available_memory()
+                    
+                    # Relaxed memory threshold for hyperparameter tuning (changed from 15GB to 5GB)
+                    if available_memory < 5:
+                        logger.warning(f"Skipping {model_type} hyperparameter tuning due to memory shortage")
                         continue
                     
-                    current_trials = n_trials
+                    logger.info(f"{model_type} hyperparameter tuning started")
                     
-                    logger.info(f"{model_type} hyperparameter tuning started (trials: {current_trials})")
-                    
-                    self.hyperparameter_tuning_optuna(
-                        model_type, X_train, y_train, n_trials=current_trials, cv_folds=3
+                    best_params = self._tune_hyperparameters(
+                        model_type=model_type,
+                        X=X_train,
+                        y=y_train,
+                        n_trials=n_trials,
+                        cv_folds=3,
+                        timeout=1800
                     )
+                    
+                    self.best_params[model_type] = best_params
+                    logger.info(f"{model_type} hyperparameter tuning completed")
                     
                     LargeDataMemoryTracker.force_cleanup()
                     
                 except Exception as e:
                     logger.error(f"{model_type} hyperparameter tuning failed: {str(e)}")
+                    self.best_params[model_type] = self._get_default_params(model_type)
                     LargeDataMemoryTracker.force_cleanup()
-        else:
-            logger.info("Hyperparameter tuning skipped")
         
+        # Cross-validation stage
         if perform_cv:
-            logger.info("Cross-validation evaluation stage")
+            logger.info("Cross-validation stage started")
+            
             for model_type in model_types:
                 try:
-                    # Relaxed memory threshold for 64GB environment
-                    if self.memory_tracker.get_available_memory() < 15:
+                    available_memory = self.memory_tracker.get_available_memory()
+                    
+                    # Relaxed memory threshold for CV (changed from 15GB to 5GB)
+                    if available_memory < 5:
                         logger.warning(f"Skipping {model_type} cross-validation due to memory shortage")
                         continue
                     
-                    params = self.best_params.get(model_type, None)
-                    if params is None:
-                        params = self._get_default_params(model_type)
-                    
                     logger.info(f"{model_type} cross-validation started")
                     
-                    self.cross_validate_model(
-                        model_type, X_train, y_train, cv_folds=5, params=params
+                    params = self.best_params.get(model_type, None)
+                    cv_results = self.cross_validate_model(
+                        model_type=model_type,
+                        X=X_train,
+                        y=y_train,
+                        params=params
                     )
+                    
+                    self.cv_results[model_type] = cv_results
+                    logger.info(f"{model_type} cross-validation completed")
                     
                     LargeDataMemoryTracker.force_cleanup()
                     
@@ -691,8 +617,8 @@ class CTRModelTrainer:
                 available_memory = self.memory_tracker.get_available_memory()
                 gpu_memory = self.memory_tracker.get_gpu_memory_usage()
                 
-                # Relaxed memory threshold for 64GB environment
-                if available_memory < 15:
+                # Relaxed memory threshold for 64GB environment (changed from 15GB to 5GB)
+                if available_memory < 5:
                     logger.warning(f"Skipping {model_type} model training due to memory shortage")
                     continue
                 
@@ -722,50 +648,118 @@ class CTRModelTrainer:
                 LargeDataMemoryTracker.force_cleanup()
                 continue
         
-        logger.info(f"All models training completed. Successfully trained: {len(trained_models)}")
-        
-        # Save trained models
-        self._save_models(trained_models)
+        logger.info(f"All models training completed. Successful models: {len(trained_models)}")
         
         return trained_models
     
-    def _save_models(self, trained_models: Dict[str, BaseModel]):
-        """Save trained models"""
+    def _tune_hyperparameters(self,
+                            model_type: str,
+                            X: pd.DataFrame,
+                            y: pd.Series,
+                            n_trials: int = 100,
+                            cv_folds: int = 3,
+                            timeout: int = 1800) -> Dict[str, Any]:
+        """Hyperparameter tuning using Optuna"""
+        
+        if not OPTUNA_AVAILABLE:
+            logger.warning("Optuna not available, using default parameters")
+            return self._get_default_params(model_type)
+        
+        def objective(trial):
+            try:
+                params = self._suggest_params(trial, model_type)
+                
+                # Memory efficient CV for hyperparameter tuning
+                skf = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=self.config.RANDOM_STATE)
+                scores = []
+                
+                for train_idx, val_idx in skf.split(X, y):
+                    X_fold_train, X_fold_val = X.iloc[train_idx], X.iloc[val_idx]
+                    y_fold_train, y_fold_val = y.iloc[train_idx], y.iloc[val_idx]
+                    
+                    # Memory efficient sampling
+                    available_memory = self.memory_tracker.get_available_memory()
+                    if available_memory < 8:
+                        sample_size = min(len(X_fold_train), 30000)
+                        if len(X_fold_train) > sample_size:
+                            sample_indices = np.random.choice(len(X_fold_train), size=sample_size, replace=False)
+                            X_fold_train = X_fold_train.iloc[sample_indices]
+                            y_fold_train = y_fold_train.iloc[sample_indices]
+                    
+                    model = ModelFactory.create_model(model_type, params=params)
+                    model.fit(X_fold_train, y_fold_train)
+                    
+                    y_pred = model.predict_proba(X_fold_val)
+                    score = average_precision_score(y_fold_val, y_pred)
+                    scores.append(score)
+                    
+                    LargeDataMemoryTracker.force_cleanup()
+                
+                return np.mean(scores)
+                
+            except Exception as e:
+                logger.warning(f"Trial failed: {e}")
+                return 0.0
+        
         try:
-            models_dir = self.config.MODEL_DIR
-            models_dir.mkdir(exist_ok=True)
+            study = optuna.create_study(direction='maximize', 
+                                      sampler=optuna.samplers.TPESampler(seed=self.config.RANDOM_STATE))
+            study.optimize(objective, n_trials=n_trials, timeout=timeout)
             
-            for model_name, model in trained_models.items():
-                try:
-                    model_path = models_dir / f"{model_name}_model.pkl"
-                    
-                    with open(model_path, 'wb') as f:
-                        pickle.dump(model, f, protocol=4)
-                    
-                    logger.info(f"Model saved: {model_path}")
-                    
-                except Exception as e:
-                    logger.warning(f"Failed to save {model_name} model: {e}")
+            best_params = study.best_params
+            logger.info(f"{model_type} best score: {study.best_value:.4f}")
             
-            # Save training results
-            results_path = models_dir / "training_results.pkl"
-            training_results = {
-                'trained_models': list(trained_models.keys()),
-                'best_params': self.best_params,
-                'cv_results': self.cv_results,
-                'model_performance': self.model_performance
-            }
-            
-            with open(results_path, 'wb') as f:
-                pickle.dump(training_results, f, protocol=4)
-            
-            logger.info(f"Training results saved: {results_path}")
+            return best_params
             
         except Exception as e:
-            logger.error(f"Model saving failed: {e}")
+            logger.error(f"Hyperparameter tuning failed: {e}")
+            return self._get_default_params(model_type)
+    
+    def _suggest_params(self, trial, model_type: str) -> Dict[str, Any]:
+        """Suggest hyperparameters for Optuna trial"""
+        
+        if model_type.lower() == 'lightgbm':
+            return {
+                'num_leaves': trial.suggest_int('num_leaves', 10, 50),
+                'max_depth': trial.suggest_int('max_depth', 3, 8),
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
+                'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 1.0),
+                'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 1.0),
+                'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 10, 100),
+                'lambda_l1': trial.suggest_float('lambda_l1', 0.0, 1.0),
+                'lambda_l2': trial.suggest_float('lambda_l2', 0.0, 1.0),
+                'n_estimators': trial.suggest_int('n_estimators', 50, 200)
+            }
+        
+        elif model_type.lower() == 'xgboost':
+            return {
+                'max_depth': trial.suggest_int('max_depth', 3, 8),
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
+                'n_estimators': trial.suggest_int('n_estimators', 50, 200),
+                'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+                'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
+                'gamma': trial.suggest_float('gamma', 0.0, 1.0),
+                'alpha': trial.suggest_float('alpha', 0.0, 1.0),
+                'lambda': trial.suggest_float('lambda', 0.0, 2.0)
+            }
+        
+        elif model_type.lower() == 'logistic':
+            return {
+                'C': trial.suggest_float('C', 0.01, 10.0),
+                'penalty': trial.suggest_categorical('penalty', ['l1', 'l2']),
+                'solver': trial.suggest_categorical('solver', ['liblinear', 'saga'])
+            }
+        
+        return {}
     
     def get_training_summary(self) -> Dict[str, Any]:
         """Get training summary"""
+        calibrated_base_models = sum(
+            1 for info in self.trained_models.values()
+            if info.get('calibrated', False)
+        )
+        
         return {
             'trained_models': list(self.trained_models.keys()),
             'total_models': len(self.trained_models),

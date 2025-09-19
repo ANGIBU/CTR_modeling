@@ -265,54 +265,50 @@ def execute_final_pipeline(config, quick_mode: bool = False):
             
             if PSUTIL_AVAILABLE:
                 vm = psutil.virtual_memory()
-                # Relaxed threshold for 64GB environment
-                if vm.available / (1024**3) < 20:
+                # Relaxed threshold for 64GB environment (changed from 20GB to 10GB)
+                if vm.available / (1024**3) < 10:
                     logger.warning("Performing simplified feature engineering due to low memory")
-                    feature_cols = [col for col in train_df.columns if col != target_col]
-                    X_train = train_df[feature_cols[:150]].copy()
-                    X_test = test_df[feature_cols[:150]].copy() if set(feature_cols[:150]).issubset(test_df.columns) else test_df.iloc[:, :150].copy()
+                    feature_engineer.set_memory_efficient_mode(True)
+                    X_train, X_test = feature_engineer.fit_transform_memory_efficient(train_df, test_df, target_col)
                 else:
-                    # Full feature creation in 64GB environment
-                    X_train, X_test = feature_engineer.create_all_features(train_df, test_df, target_col)
+                    X_train, X_test = feature_engineer.fit_transform(train_df, test_df, target_col)
             else:
-                X_train, X_test = feature_engineer.create_all_features(train_df, test_df, target_col)
+                X_train, X_test = feature_engineer.fit_transform(train_df, test_df, target_col)
             
             y_train = train_df[target_col].copy()
+            
+            logger.info(f"Feature engineering completed - X_train: {X_train.shape}, X_test: {X_test.shape}")
+            
+            # Save feature information
+            feature_info_path = Path("models/feature_info.pkl")
+            with open(feature_info_path, 'wb') as f:
+                pickle.dump({
+                    'feature_names': list(X_train.columns),
+                    'target_column': target_col,
+                    'preprocessing_info': feature_engineer.get_preprocessing_info()
+                }, f)
+            logger.info(f"Feature information saved: {feature_info_path}")
             
         except Exception as e:
             logger.error(f"Feature engineering failed: {e}")
             
-            logger.warning("Using basic features only")
-            feature_cols = [col for col in train_df.columns if col != target_col]
-            X_train = train_df[feature_cols[:150]].copy()
-            X_test = test_df[feature_cols[:150]].copy() if set(feature_cols[:150]).issubset(test_df.columns) else test_df.iloc[:, :150].copy()
+            # Use basic feature engineering
+            logger.warning("Using basic feature processing")
+            feature_cols = [col for col in train_df.columns if col != target_col and 'ID' not in col.upper()]
+            X_train = train_df[feature_cols].copy()
+            X_test = test_df[feature_cols].copy()
             y_train = train_df[target_col].copy()
         
-        logger.info(f"Feature engineering completed - X_train: {X_train.shape}, X_test: {X_test.shape}")
-        
-        # Save feature information
-        try:
-            feature_info_path = config.MODEL_DIR / "feature_info.pkl"
-            feature_info = {
-                'feature_columns': list(X_train.columns),
-                'target_column': target_col,
-                'feature_count': X_train.shape[1],
-                'feature_dtypes': X_train.dtypes.to_dict()
-            }
-            
-            with open(feature_info_path, 'wb') as f:
-                pickle.dump(feature_info, f)
-            
-            logger.info(f"Feature information saved: {feature_info_path}")
-            
-        except Exception as e:
-            logger.warning(f"Feature information saving failed: {e}")
-        
+        del train_df, test_df
         force_memory_cleanup()
         
         if PSUTIL_AVAILABLE:
             vm = psutil.virtual_memory()
             logger.info(f"Post-feature engineering memory status: available {vm.available/(1024**3):.1f}GB")
+        
+        if cleanup_required:
+            logger.info("Pipeline interrupted by user request")
+            return None
         
         # 3. Model training (calibration forced application)
         logger.info("3. Model training (calibration forced application)")
@@ -356,10 +352,10 @@ def execute_final_pipeline(config, quick_mode: bool = False):
             try:
                 force_memory_cleanup()
                 
-                # Relaxed memory threshold for model training
+                # Relaxed memory threshold for model training (changed from 15GB to 5GB)
                 if PSUTIL_AVAILABLE:
                     vm = psutil.virtual_memory()
-                    if vm.available / (1024**3) < 15:  # 15GB threshold
+                    if vm.available / (1024**3) < 5:  # 5GB threshold instead of 15GB
                         logger.warning(f"{model_type} model training skipped: low memory")
                         continue
                 
@@ -389,10 +385,10 @@ def execute_final_pipeline(config, quick_mode: bool = False):
             
             force_memory_cleanup()
             
-            # Memory check after each model
+            # Memory check after each model (relaxed threshold)
             if PSUTIL_AVAILABLE:
                 vm = psutil.virtual_memory()
-                if vm.available / (1024**3) < 15:
+                if vm.available / (1024**3) < 5:  # 5GB threshold
                     logger.warning("Low memory detected, stopping additional model training")
                     break
         
@@ -486,135 +482,119 @@ def execute_final_pipeline(config, quick_mode: bool = False):
 
 def generate_final_submission(trained_models, X_test, config, ensemble_manager=None):
     """Submission file generation - ensemble priority"""
-    logger.info("Submission file generation started - ensemble priority")
-    
-    test_size = len(X_test)
-    logger.info(f"Test data size: {test_size:,} rows")
     
     try:
+        logger.info("Submission file generation started - ensemble priority")
+        test_size = len(X_test) if X_test is not None else 1527298
+        logger.info(f"Test data size: {test_size:,} rows")
+        
+        # Memory efficient batch processing
         if PSUTIL_AVAILABLE:
             vm = psutil.virtual_memory()
-            # Use larger batch size in 64GB environment
-            if vm.available / (1024**3) < 15:
+            if vm.available / (1024**3) < 8:  # 8GB threshold for batch processing
                 logger.warning("Performing batch prediction due to low memory")
-                batch_size = 50000
-            else:
-                batch_size = 150000
-        else:
-            batch_size = 150000
         
+        # Load submission template
         try:
-            submission_path = getattr(config, 'SUBMISSION_TEMPLATE_PATH', Path('data/sample_submission.csv'))
-            if submission_path.exists():
-                submission = pd.read_csv(submission_path, encoding='utf-8')
-                logger.info(f"Submission template loading completed: {len(submission):,} rows")
-            else:
-                submission = pd.DataFrame({
-                    'ID': [f'TEST_{i:07d}' for i in range(test_size)],
-                    'clicked': 0.0201
-                })
-                logger.warning("No submission template, creating default template")
+            sample_submission = pd.read_csv('data/sample_submission.csv')
+            logger.info(f"Submission template loading completed: {len(sample_submission):,} rows")
         except Exception as e:
             logger.warning(f"Submission template loading failed: {e}")
-            submission = pd.DataFrame({
+            sample_submission = pd.DataFrame({
                 'ID': [f'TEST_{i:07d}' for i in range(test_size)],
-                'clicked': 0.0201
+                'clicked': [0.0] * test_size
             })
         
-        if len(submission) != test_size:
-            logger.warning(f"Size mismatch - template: {len(submission):,}, test: {test_size:,}")
-            submission = pd.DataFrame({
-                'ID': [f'TEST_{i:07d}' for i in range(test_size)],
-                'clicked': 0.0201
-            })
+        # Prediction
+        prediction_method = "Default"
         
-        predictions = None
-        prediction_method = ""
-        
-        # Ensemble manager priority - forced execution
+        # Try ensemble prediction first
         if ensemble_manager is not None:
             try:
                 logger.info("Ensemble manager prediction started")
-                predictions = ensemble_manager.predict_with_best_ensemble(X_test)
-                prediction_method = "Ensemble"
-                logger.info("Ensemble manager prediction completed")
+                ensemble_predictions, ensemble_used = ensemble_manager.predict_with_best_ensemble(X_test)
                 
-                # Ensemble prediction validation
-                if predictions is not None and len(predictions) == test_size:
-                    unique_predictions = len(np.unique(predictions))
-                    logger.info(f"Ensemble prediction diversity: {unique_predictions} unique values")
-                    
-                    # Check prediction diversity
-                    if unique_predictions < 1000:
-                        logger.warning("Insufficient ensemble prediction diversity, using individual model")
-                        predictions = None
+                if ensemble_predictions is not None and len(ensemble_predictions) > 0:
+                    predictions = ensemble_predictions[:len(sample_submission)]
+                    prediction_method = "Ensemble"
+                    logger.info("Ensemble manager prediction completed")
                 else:
-                    logger.warning("Ensemble prediction size mismatch, using individual model")
-                    predictions = None
-                    
+                    raise ValueError("Ensemble prediction returned empty results")
+                
             except Exception as e:
                 logger.error(f"Ensemble prediction failed: {e}")
-                logger.error(f"Ensemble error details: {traceback.format_exc()}")
+                ensemble_predictions = None
+        else:
+            ensemble_predictions = None
+        
+        # Try individual model prediction if ensemble failed
+        if ensemble_predictions is None and trained_models:
+            try:
+                logger.info("Individual model prediction started")
+                # Use first available model
+                model_name = list(trained_models.keys())[0]
+                model = trained_models[model_name]
+                
+                predictions = model.predict_proba(X_test)
+                predictions = predictions[:len(sample_submission)]
+                prediction_method = f"Individual ({model_name})"
+                logger.info("Individual model prediction completed")
+                
+            except Exception as e:
+                logger.error(f"Individual model prediction failed: {e}")
                 predictions = None
+        else:
+            predictions = ensemble_predictions
         
-        # Use individual model if ensemble fails
-        if predictions is None and trained_models:
-            model_priority = ['lightgbm', 'xgboost', 'catboost', 'logistic', 'random_forest']
+        # Check prediction diversity
+        if predictions is not None:
+            unique_predictions = len(np.unique(predictions))
+            logger.info(f"Ensemble prediction diversity: {unique_predictions} unique values")
             
-            for model_name in model_priority:
-                if model_name in trained_models:
+            if unique_predictions < len(predictions) // 100:
+                logger.warning("Insufficient ensemble prediction diversity, using individual model")
+                if trained_models:
                     try:
-                        logger.info(f"Using {model_name} model for prediction")
+                        model_name = list(trained_models.keys())[0]
                         model = trained_models[model_name]
-                        
-                        # Batch prediction for memory efficiency
-                        batch_predictions = []
-                        for i in range(0, test_size, batch_size):
-                            end_idx = min(i + batch_size, test_size)
-                            batch_X = X_test.iloc[i:end_idx]
-                            
-                            batch_pred = model.predict_proba(batch_X)
-                            batch_predictions.append(batch_pred)
-                        
-                        predictions = np.concatenate(batch_predictions)
+                        predictions = model.predict_proba(X_test)
+                        predictions = predictions[:len(sample_submission)]
                         prediction_method = f"Individual ({model_name})"
-                        logger.info(f"{model_name} model prediction completed")
-                        break
-                        
                     except Exception as e:
-                        logger.warning(f"{model_name} model prediction failed: {e}")
-                        continue
+                        logger.error(f"Fallback prediction failed: {e}")
+                        predictions = None
         
-        # Use default values if all predictions fail
+        # Use default values if all predictions failed
         if predictions is None:
             logger.warning("All model predictions failed. Using default values")
-            base_ctr = 0.0191
             predictions = np.random.lognormal(
-                mean=np.log(base_ctr), 
+                mean=np.log(0.0193), 
                 sigma=0.15, 
-                size=test_size
+                size=len(sample_submission)
             )
-            predictions = np.clip(predictions, 0.001, 0.08)
+            predictions = np.clip(predictions, 0.0092, 0.0406)
             prediction_method = "Default"
         
-        # CTR correction
-        target_ctr = 0.0191
-        current_ctr = predictions.mean()
+        # Adjust predictions to match sample_submission length
+        if len(predictions) > len(sample_submission):
+            predictions = predictions[:len(sample_submission)]
+        elif len(predictions) < len(sample_submission):
+            # Pad with mean values
+            mean_pred = np.mean(predictions) if len(predictions) > 0 else 0.0193
+            padding = np.full(len(sample_submission) - len(predictions), mean_pred)
+            predictions = np.concatenate([predictions, padding])
         
-        if abs(current_ctr - target_ctr) > 0.002:
-            logger.info(f"CTR correction: {current_ctr:.4f} → {target_ctr:.4f}")
-            correction_factor = target_ctr / current_ctr if current_ctr > 0 else 1.0
-            predictions = predictions * correction_factor
-            predictions = np.clip(predictions, 0.001, 0.999)
-        
+        # Create submission
+        submission = sample_submission.copy()
         submission['clicked'] = predictions
         
+        # Statistics
         final_ctr = submission['clicked'].mean()
         final_std = submission['clicked'].std()
         final_min = submission['clicked'].min()
         final_max = submission['clicked'].max()
         
-        logger.info(f"=== Submission file generation results ===")
+        logger.info("=== Submission file generation results ===")
         logger.info(f"Prediction method: {prediction_method}")
         logger.info(f"Processed data: {test_size:,} rows")
         logger.info(f"Average CTR: {final_ctr:.4f}")
