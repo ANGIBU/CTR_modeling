@@ -78,9 +78,9 @@ class ProgressReporter:
             logger.info(f"{self.description}: {progress_percent:.1f}% ({self.current_items:,}/{self.total_items:,})")
 
 class MemoryMonitor:
-    """개선된 메모리 모니터링 및 관리"""
+    """메모리 모니터링 및 관리"""
     
-    def __init__(self, max_memory_gb: float = 45.0):  # 30GB → 45GB로 증가
+    def __init__(self, max_memory_gb: float = 45.0):
         self.monitoring_enabled = PSUTIL_AVAILABLE
         self.max_memory_gb = max_memory_gb
         self.memory_history = []
@@ -88,10 +88,10 @@ class MemoryMonitor:
         self.start_time = time.time()
         self.lock = threading.Lock()
         
-        # 메모리 임계값 설정 (완화)
-        self.warning_threshold = max_memory_gb * 0.75      # 30GB → 33.75GB
-        self.critical_threshold = max_memory_gb * 0.85     # 38.25GB
-        self.abort_threshold = max_memory_gb * 0.95        # 42.75GB (기존 28.5GB → 42.75GB)
+        # 메모리 임계값 설정
+        self.warning_threshold = max_memory_gb * 0.75
+        self.critical_threshold = max_memory_gb * 0.85
+        self.abort_threshold = max_memory_gb * 0.95
         
         logger.info(f"메모리 임계값 설정 - 경고: {self.warning_threshold:.1f}GB, "
                    f"위험: {self.critical_threshold:.1f}GB, 중단: {self.abort_threshold:.1f}GB")
@@ -118,11 +118,11 @@ class MemoryMonitor:
             return 30.0
     
     def check_memory_pressure(self) -> Dict[str, Any]:
-        """개선된 메모리 압박 상태 확인"""
+        """메모리 압박 상태 확인"""
         process_memory = self.get_process_memory_gb()
         available_memory = self.get_available_memory_gb()
         
-        # 압박 수준 결정 (완화된 기준)
+        # 압박 수준 결정
         if process_memory > self.abort_threshold or available_memory < 2:
             pressure_level = "abort"
         elif process_memory > self.critical_threshold or available_memory < 5:
@@ -162,26 +162,26 @@ class MemoryMonitor:
             logger.warning(f"메모리 상태 로깅 실패: {e}")
     
     def force_memory_cleanup(self, intensive: bool = False) -> float:
-        """강화된 메모리 정리"""
+        """메모리 정리"""
         try:
             initial_memory = self.get_process_memory_gb()
             pressure = self.check_memory_pressure()
             
             # 압박 수준에 따른 정리 강도
             if pressure['pressure_level'] == 'abort' or intensive:
-                cleanup_rounds = 15  # 10 → 15로 증가
-                sleep_time = 0.5     # 0.3 → 0.5로 증가
+                cleanup_rounds = 15
+                sleep_time = 0.5
             elif pressure['pressure_level'] == 'critical':
-                cleanup_rounds = 12  # 7 → 12로 증가
-                sleep_time = 0.3     # 0.2 → 0.3으로 증가
+                cleanup_rounds = 12
+                sleep_time = 0.3
             elif pressure['pressure_level'] == 'high':
-                cleanup_rounds = 8   # 5 → 8로 증가
-                sleep_time = 0.2     # 0.1 → 0.2로 증가
+                cleanup_rounds = 8
+                sleep_time = 0.2
             else:
-                cleanup_rounds = 5   # 3 → 5로 증가
-                sleep_time = 0.1     # 0.05 → 0.1로 증가
+                cleanup_rounds = 5
+                sleep_time = 0.1
             
-            # 강화된 가비지 컬렉션
+            # 가비지 컬렉션
             for i in range(cleanup_rounds):
                 collected = gc.collect()
                 if sleep_time > 0:
@@ -190,15 +190,14 @@ class MemoryMonitor:
                 # 중간 체크
                 if i % 5 == 0:
                     current_memory = self.get_process_memory_gb()
-                    if initial_memory - current_memory > 2.0:  # 2GB 이상 해제되면 조기 종료
+                    if initial_memory - current_memory > 2.0:
                         break
             
-            # Windows 메모리 정리 강화
+            # Windows 메모리 정리
             if cleanup_rounds >= 8:
                 try:
                     import ctypes
                     if hasattr(ctypes, 'windll'):
-                        # 더 강력한 메모리 정리
                         ctypes.windll.kernel32.SetProcessWorkingSetSize(-1, -1, -1)
                         time.sleep(0.5)
                         gc.collect()
@@ -217,10 +216,154 @@ class MemoryMonitor:
             logger.warning(f"메모리 정리 실패: {e}")
             return 0.0
 
-class DataChunkProcessor:
-    """개선된 데이터 청크 처리기"""
+class DataColumnAnalyzer:
+    """데이터 컬럼 분석기"""
     
-    def __init__(self, file_path: str, chunk_size: int = 25000):  # 100000 → 25000으로 축소
+    def __init__(self, config: Config = Config):
+        self.config = config
+        self.target_candidates = config.TARGET_COLUMN_CANDIDATES
+        self.detection_config = config.TARGET_DETECTION_CONFIG
+        
+    def analyze_columns(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """데이터프레임 컬럼 분석"""
+        try:
+            analysis = {
+                'total_columns': len(df.columns),
+                'column_names': list(df.columns),
+                'dtypes': df.dtypes.to_dict(),
+                'null_counts': df.isnull().sum().to_dict(),
+                'unique_counts': {},
+                'target_candidates': [],
+                'binary_columns': [],
+                'categorical_columns': [],
+                'numeric_columns': [],
+                'id_columns': []
+            }
+            
+            logger.info(f"컬럼 분석 시작: {len(df.columns)}개 컬럼")
+            
+            # 각 컬럼별 상세 분석
+            for col in df.columns:
+                try:
+                    unique_count = df[col].nunique()
+                    analysis['unique_counts'][col] = unique_count
+                    
+                    # 컬럼 타입별 분류
+                    dtype_str = str(df[col].dtype)
+                    col_lower = col.lower()
+                    
+                    # ID 컬럼 식별
+                    if any(pattern in col_lower for pattern in ['id', 'uuid', 'key', 'hash']):
+                        unique_ratio = unique_count / len(df)
+                        if unique_ratio > 0.9:
+                            analysis['id_columns'].append(col)
+                            continue
+                    
+                    # 이진 컬럼 식별 (타겟 후보)
+                    if unique_count == 2:
+                        unique_values = df[col].dropna().unique()
+                        if set(unique_values).issubset(self.detection_config['binary_values']):
+                            analysis['binary_columns'].append(col)
+                            
+                            # CTR 특성 확인
+                            positive_ratio = df[col].mean()
+                            if (self.detection_config['min_ctr'] <= positive_ratio <= 
+                                self.detection_config['max_ctr']):
+                                analysis['target_candidates'].append({
+                                    'column': col,
+                                    'ctr': positive_ratio,
+                                    'distribution': df[col].value_counts().to_dict()
+                                })
+                    
+                    # 수치형/범주형 분류
+                    if dtype_str in ['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32', 'uint64',
+                                   'float16', 'float32', 'float64']:
+                        analysis['numeric_columns'].append(col)
+                    else:
+                        analysis['categorical_columns'].append(col)
+                        
+                except Exception as e:
+                    logger.warning(f"컬럼 {col} 분석 실패: {e}")
+            
+            # 타겟 후보 정렬 (CTR 기준)
+            analysis['target_candidates'].sort(key=lambda x: x['ctr'])
+            
+            return analysis
+            
+        except Exception as e:
+            logger.error(f"컬럼 분석 실패: {e}")
+            return {'error': str(e)}
+    
+    def detect_target_column(self, df: pd.DataFrame, provided_target: str = None) -> str:
+        """타겟 컬럼 감지"""
+        try:
+            analysis = self.analyze_columns(df)
+            
+            # 로깅
+            logger.info(f"데이터 컬럼 구조:")
+            logger.info(f"  - 총 컬럼 수: {analysis['total_columns']}")
+            logger.info(f"  - 수치형: {len(analysis['numeric_columns'])}개")
+            logger.info(f"  - 범주형: {len(analysis['categorical_columns'])}개")
+            logger.info(f"  - 이진: {len(analysis['binary_columns'])}개")
+            logger.info(f"  - ID: {len(analysis['id_columns'])}개")
+            logger.info(f"  - 타겟 후보: {len(analysis['target_candidates'])}개")
+            
+            # 컬럼명 로깅 (처음 20개만)
+            sample_columns = analysis['column_names'][:20]
+            if len(analysis['column_names']) > 20:
+                sample_columns.append(f"... (+{len(analysis['column_names']) - 20}개)")
+            logger.info(f"  - 컬럼명 샘플: {sample_columns}")
+            
+            # 타겟 후보 상세 로깅
+            if analysis['target_candidates']:
+                logger.info("타겟 후보 분석:")
+                for candidate in analysis['target_candidates']:
+                    logger.info(f"  - {candidate['column']}: CTR {candidate['ctr']:.4f}, "
+                               f"분포 {candidate['distribution']}")
+            
+            # 제공된 타겟 컬럼 확인
+            if provided_target and provided_target in df.columns:
+                if provided_target in [c['column'] for c in analysis['target_candidates']]:
+                    logger.info(f"제공된 타겟 컬럼 확인: {provided_target}")
+                    return provided_target
+                else:
+                    logger.warning(f"제공된 타겟 컬럼 '{provided_target}'이 이진 분류 조건에 맞지 않음")
+            
+            # 자동 감지
+            for candidate in self.target_candidates:
+                if candidate in df.columns:
+                    for target_info in analysis['target_candidates']:
+                        if target_info['column'] == candidate:
+                            logger.info(f"타겟 컬럼 자동 감지: {candidate}")
+                            return candidate
+            
+            # CTR 범위의 컬럼 선택
+            for candidate in analysis['target_candidates']:
+                ctr = candidate['ctr']
+                if (self.detection_config['typical_ctr_range'][0] <= ctr <= 
+                    self.detection_config['typical_ctr_range'][1]):
+                    logger.info(f"CTR 패턴 기반 타겟 감지: {candidate['column']} (CTR: {ctr:.4f})")
+                    return candidate['column']
+            
+            # 최저 CTR 컬럼 선택
+            if analysis['target_candidates']:
+                best_candidate = analysis['target_candidates'][0]
+                logger.info(f"최저 CTR 타겟 선택: {best_candidate['column']} (CTR: {best_candidate['ctr']:.4f})")
+                return best_candidate['column']
+            
+            # 기본값
+            default_target = provided_target or 'clicked'
+            logger.warning(f"타겟 컬럼 감지 실패, 기본값 사용: {default_target}")
+            return default_target
+            
+        except Exception as e:
+            logger.error(f"타겟 컬럼 감지 실패: {e}")
+            return provided_target or 'clicked'
+
+class DataChunkProcessor:
+    """데이터 청크 처리기"""
+    
+    def __init__(self, file_path: str, chunk_size: int = 25000):
         self.file_path = file_path
         self.chunk_size = chunk_size
         self.total_rows = 0
@@ -228,8 +371,8 @@ class DataChunkProcessor:
         self.progress_reporter = None
         
         # 청크 크기 범위 조정
-        self.min_chunk_size = 5000   # 10000 → 5000으로 축소
-        self.max_chunk_size = 100000 # 500000 → 100000으로 축소
+        self.min_chunk_size = 5000
+        self.max_chunk_size = 100000
         
     def __enter__(self):
         """초기화"""
@@ -303,7 +446,7 @@ class DataChunkProcessor:
             return 1000000
     
     def process_in_chunks(self) -> pd.DataFrame:
-        """개선된 청크별 데이터 처리"""
+        """청크별 데이터 처리"""
         logger.info(f"청크별 데이터 처리 시작: {self.total_rows:,}행")
         
         all_chunks = []
@@ -360,7 +503,7 @@ class DataChunkProcessor:
                                f"(메모리: {self.memory_monitor.get_process_memory_gb():.1f}GB)")
                     
                     # 더 빈번한 메모리 정리
-                    if chunk_number % 2 == 0:  # 3 → 2로 변경
+                    if chunk_number % 2 == 0:
                         self.memory_monitor.force_memory_cleanup()
                         self.memory_monitor.log_memory_status(f"청크{chunk_number}")
                     
@@ -406,25 +549,25 @@ class DataChunkProcessor:
         if pressure['pressure_level'] == 'abort':
             self.chunk_size = self.min_chunk_size
         elif pressure['pressure_level'] == 'critical':
-            self.chunk_size = max(self.min_chunk_size, self.chunk_size // 5)  # 4 → 5로 변경
+            self.chunk_size = max(self.min_chunk_size, self.chunk_size // 5)
         elif pressure['pressure_level'] == 'high':
-            self.chunk_size = max(self.min_chunk_size, self.chunk_size // 3)  # 2 → 3으로 변경
+            self.chunk_size = max(self.min_chunk_size, self.chunk_size // 3)
         elif pressure['pressure_level'] == 'moderate':
-            self.chunk_size = max(self.min_chunk_size, int(self.chunk_size * 0.7))  # 0.8 → 0.7로 변경
+            self.chunk_size = max(self.min_chunk_size, int(self.chunk_size * 0.7))
         elif pressure['pressure_level'] == 'low':
-            self.chunk_size = min(self.max_chunk_size, int(self.chunk_size * 1.2))  # 1.1 → 1.2로 변경
+            self.chunk_size = min(self.max_chunk_size, int(self.chunk_size * 1.2))
         
         if old_size != self.chunk_size:
             logger.info(f"청크 크기 조정: {old_size:,} → {self.chunk_size:,}")
     
     def _read_chunk_safe(self, start_row: int, num_rows: int) -> Optional[pd.DataFrame]:
-        """개선된 안전한 청크 읽기"""
+        """안전한 청크 읽기"""
         try:
-            # PyArrow 청크 읽기 개선
+            # PyArrow 청크 읽기
             if PYARROW_AVAILABLE:
                 try:
                     # 더 작은 배치로 읽기
-                    batch_size = min(num_rows, 10000)  # 최대 1만행씩 읽기
+                    batch_size = min(num_rows, 10000)
                     batches = []
                     
                     for i in range(0, num_rows, batch_size):
@@ -470,7 +613,7 @@ class DataChunkProcessor:
                         return None
                         
                 except Exception as e:
-                    logger.warning(f"PyArrow 개선된 청크 읽기 실패: {e}")
+                    logger.warning(f"PyArrow 청크 읽기 실패: {e}")
             
             # 기본 pandas 방식
             try:
@@ -537,7 +680,7 @@ class DataChunkProcessor:
                 except Exception:
                     pass
             
-            # 범주형 최적화 (더 보수적)
+            # 범주형 최적화
             for col in df.select_dtypes(include=['object']).columns:
                 try:
                     unique_count = df[col].nunique()
@@ -556,7 +699,7 @@ class DataChunkProcessor:
             return df
     
     def _combine_chunks_safe(self, chunks: List[pd.DataFrame]) -> pd.DataFrame:
-        """안전한 청크 결합 - 단일 DataFrame 반환"""
+        """안전한 청크 결합"""
         if not chunks:
             return pd.DataFrame()
         
@@ -574,7 +717,7 @@ class DataChunkProcessor:
                 logger.warning("유효한 청크가 없습니다")
                 return pd.DataFrame()
             
-            # 더 작은 배치별 결합 (3 → 2로 변경)
+            # 더 작은 배치별 결합
             batch_size = 2
             combined_chunks = []
             
@@ -637,7 +780,7 @@ class DataChunkProcessor:
             logger.info(f"청크 복구 시도: 위치 {failed_position:,}")
             
             # 청크 크기를 더 크게 줄여서 재시도
-            recovery_chunk_size = max(self.min_chunk_size, failed_chunk_size // 3)  # 2 → 3으로 변경
+            recovery_chunk_size = max(self.min_chunk_size, failed_chunk_size // 3)
             
             recovery_df = self._read_chunk_safe(failed_position, recovery_chunk_size)
             
@@ -653,18 +796,19 @@ class DataChunkProcessor:
             return False
 
 class StreamingDataLoader:
-    """개선된 스트리밍 데이터 로더 - 1070만행 전체 처리"""
+    """스트리밍 데이터 로더"""
     
     def __init__(self, config: Config = Config):
         self.config = config
         self.memory_monitor = MemoryMonitor()
-        self.target_column = 'clicked'
+        self.column_analyzer = DataColumnAnalyzer(config)
+        self.target_column = None
         
-        logger.info("개선된 스트리밍 데이터 로더 초기화 완료")
+        logger.info("스트리밍 데이터 로더 초기화 완료")
     
     def load_full_data_streaming(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """개선된 스트리밍 방식으로 1070만행 전체 처리"""
-        logger.info("=== 1070만행 전체 데이터 스트리밍 로딩 시작 ===")
+        """스트리밍 방식으로 전체 처리"""
+        logger.info("=== 전체 데이터 스트리밍 로딩 시작 ===")
         
         try:
             # 메모리 상태 확인
@@ -681,7 +825,7 @@ class StreamingDataLoader:
             if train_df is None or train_df.empty:
                 raise ValueError("학습 데이터 스트리밍 처리 실패")
             
-            # 중간 메모리 정리 강화
+            # 중간 메모리 정리
             self.memory_monitor.force_memory_cleanup(intensive=True)
             self.memory_monitor.log_memory_status("학습 데이터 완료", force=True)
             
@@ -700,12 +844,12 @@ class StreamingDataLoader:
             return train_df, test_df
             
         except Exception as e:
-            logger.error(f"개선된 스트리밍 데이터 로딩 실패: {e}")
+            logger.error(f"스트리밍 데이터 로딩 실패: {e}")
             self.memory_monitor.force_memory_cleanup(intensive=True)
             raise
     
     def _stream_process_file(self, file_path: str, is_train: bool = True) -> pd.DataFrame:
-        """개선된 파일 스트리밍 처리"""
+        """파일 스트리밍 처리"""
         try:
             # PyArrow로 메타데이터 확인
             if not PYARROW_AVAILABLE:
@@ -717,11 +861,28 @@ class StreamingDataLoader:
             
             logger.info(f"파일 분석 - 총 {total_rows:,}행, {num_row_groups}개 row groups")
             
+            # 첫 번째 row group으로 컬럼 분석 (학습 데이터인 경우)
+            if is_train:
+                # batch_size 매개변수 제거하여 수정
+                sample_table = parquet_file.read_row_group(0)
+                sample_df = sample_table.to_pandas()
+                
+                # 샘플 크기 조정 (5000행으로 제한)
+                if len(sample_df) > 5000:
+                    sample_df = sample_df.head(5000)
+                
+                # 타겟 컬럼 감지
+                self.target_column = self.column_analyzer.detect_target_column(sample_df)
+                logger.info(f"감지된 타겟 컬럼: {self.target_column}")
+                
+                del sample_df, sample_table
+                gc.collect()
+            
             # 결과 수집용
             all_chunks = []
             processed_rows = 0
             
-            # Row group 단위로 개선된 스트리밍 처리
+            # Row group 단위로 스트리밍 처리
             for rg_idx in range(num_row_groups):
                 try:
                     # 메모리 압박 확인
@@ -737,7 +898,7 @@ class StreamingDataLoader:
                             logger.error(f"메모리 정리 후에도 한계 - 중단: {processed_rows:,}행")
                             break
                     
-                    # Row group 읽기
+                    # Row group 읽기 (batch_size 매개변수 제거)
                     table = parquet_file.read_row_group(rg_idx)
                     chunk_df = table.to_pandas()
                     
@@ -754,7 +915,7 @@ class StreamingDataLoader:
                     del table
                     gc.collect()
                     
-                    # 더 빈번한 중간 결합 (5 → 3으로 변경)
+                    # 더 빈번한 중간 결합
                     if len(all_chunks) >= 3:
                         logger.info(f"중간 결합 수행: {len(all_chunks)}개 청크")
                         combined = self._combine_chunks_immediate(all_chunks)
@@ -763,7 +924,7 @@ class StreamingDataLoader:
                     
                     # 진행률 출력
                     progress = (rg_idx + 1) / num_row_groups * 100
-                    if rg_idx % 5 == 0 or rg_idx == num_row_groups - 1:  # 10 → 5로 변경
+                    if rg_idx % 5 == 0 or rg_idx == num_row_groups - 1:
                         logger.info(f"진행률: {progress:.1f}% ({processed_rows:,}/{total_rows:,}행)")
                     
                 except Exception as e:
@@ -779,18 +940,13 @@ class StreamingDataLoader:
             final_df = self._combine_chunks_immediate(all_chunks)
             
             # 타겟 컬럼 확인 (학습 데이터인 경우)
-            if is_train:
-                if self.target_column not in final_df.columns:
-                    possible_targets = [col for col in final_df.columns if 'click' in col.lower()]
-                    if possible_targets:
-                        self.target_column = possible_targets[0]
-                        logger.info(f"타겟 컬럼 변경: {self.target_column}")
-                    else:
-                        raise ValueError(f"타겟 컬럼 '{self.target_column}'을 찾을 수 없습니다")
-                
-                # CTR 확인
-                target_ctr = final_df[self.target_column].mean()
-                logger.info(f"실제 CTR: {target_ctr:.4f}")
+            if is_train and self.target_column:
+                if self.target_column in final_df.columns:
+                    # CTR 확인
+                    target_ctr = final_df[self.target_column].mean()
+                    logger.info(f"실제 CTR: {target_ctr:.4f}")
+                else:
+                    logger.warning(f"감지된 타겟 컬럼 '{self.target_column}'이 최종 데이터에 없음")
             
             logger.info(f"스트리밍 처리 완료: {final_df.shape} ({processed_rows:,}행 처리됨)")
             
@@ -801,7 +957,7 @@ class StreamingDataLoader:
             raise
     
     def _combine_chunks_immediate(self, chunks: List[pd.DataFrame]) -> pd.DataFrame:
-        """즉시 청크 결합 - 메모리 효율성 우선"""
+        """즉시 청크 결합"""
         if not chunks:
             return pd.DataFrame()
         
@@ -838,12 +994,12 @@ class StreamingDataLoader:
             return pd.DataFrame()
     
     def _optimize_dataframe_aggressive(self, df: pd.DataFrame) -> pd.DataFrame:
-        """공격적 DataFrame 최적화"""
+        """DataFrame 최적화"""
         if df is None or df.empty:
             return df
         
         try:
-            # 정수형 대폭 최적화
+            # 정수형 최적화
             for col in df.select_dtypes(include=['int64', 'int32']).columns:
                 try:
                     col_min, col_max = df[col].min(), df[col].max()
@@ -878,14 +1034,14 @@ class StreamingDataLoader:
                 except Exception:
                     pass
             
-            # 범주형 최적화 - 매우 선택적
+            # 범주형 최적화
             for col in df.select_dtypes(include=['object']).columns:
                 try:
                     unique_count = df[col].nunique()
                     total_count = len(df)
                     
                     # 매우 낮은 카디널리티만 범주형으로
-                    if unique_count < 50 and unique_count < total_count * 0.05:  # 0.1 → 0.05로 변경
+                    if unique_count < 50 and unique_count < total_count * 0.05:
                         df[col] = df[col].astype('category')
                     else:
                         # 수치 변환 시도
@@ -894,7 +1050,7 @@ class StreamingDataLoader:
                             df[col] = numeric_series.fillna(0).astype('float32')
                         else:
                             # 해시 변환
-                            df[col] = df[col].astype(str).apply(lambda x: hash(x) % 50000).astype('int32')  # 100000 → 50000으로 변경
+                            df[col] = df[col].astype(str).apply(lambda x: hash(x) % 50000).astype('int32')
                 except Exception:
                     try:
                         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype('float32')
@@ -930,6 +1086,10 @@ class StreamingDataLoader:
         except Exception as e:
             logger.error(f"파일 검증 실패: {e}")
             return False
+    
+    def get_detected_target_column(self) -> Optional[str]:
+        """감지된 타겟 컬럼명 반환"""
+        return self.target_column
 
 class LargeDataLoader:
     """대용량 데이터 로더"""
@@ -937,7 +1097,7 @@ class LargeDataLoader:
     def __init__(self, config: Config = Config):
         self.config = config
         self.memory_monitor = MemoryMonitor()
-        self.target_column = 'clicked'
+        self.target_column = None
         
         # 성능 통계
         self.loading_stats = {
@@ -952,12 +1112,21 @@ class LargeDataLoader:
         logger.info("대용량 데이터 로더 초기화 완료")
     
     def load_large_data_optimized(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """1070만행 전체 데이터 처리"""
-        logger.info("=== 1070만행 전체 데이터 처리 시작 ===")
+        """전체 데이터 처리"""
+        logger.info("=== 전체 데이터 처리 시작 ===")
         
         # 스트리밍 방식으로 전체 데이터 처리
         streaming_loader = StreamingDataLoader(self.config)
-        return streaming_loader.load_full_data_streaming()
+        result = streaming_loader.load_full_data_streaming()
+        
+        # 감지된 타겟 컬럼 저장
+        self.target_column = streaming_loader.get_detected_target_column()
+        
+        return result
+    
+    def get_detected_target_column(self) -> Optional[str]:
+        """감지된 타겟 컬럼명 반환"""
+        return self.target_column
 
 # 기존 코드와의 호환성을 위한 별칭
 DataLoader = StreamingDataLoader
@@ -977,6 +1146,7 @@ if __name__ == "__main__":
         
         print(f"학습 데이터: {train_df.shape}")
         print(f"테스트 데이터: {test_df.shape}")
+        print(f"감지된 타겟 컬럼: {loader.get_detected_target_column()}")
         print(f"전체 처리 완료: {len(train_df) + len(test_df):,}행")
         
     except Exception as e:

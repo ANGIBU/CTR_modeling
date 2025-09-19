@@ -13,7 +13,7 @@ except ImportError:
     logging.warning("PyTorch가 설치되지 않았습니다. GPU 기능이 비활성화됩니다.")
 
 class Config:
-    """프로젝트 전체 설정 관리 - 메모리 최적화"""
+    """프로젝트 전체 설정 관리"""
     
     # 기본 경로 설정
     BASE_DIR = Path(__file__).parent
@@ -28,6 +28,29 @@ class Config:
     SUBMISSION_PATH = DATA_DIR / "sample_submission.csv"
     SUBMISSION_TEMPLATE_PATH = DATA_DIR / "sample_submission.csv"
     
+    # 타겟 컬럼 설정
+    TARGET_COLUMN_CANDIDATES = [
+        'clicked',      # 가장 일반적인 CTR 타겟 컬럼명
+        'click',        # 축약형
+        'target',       # 일반적인 타겟명
+        'label',        # 라벨
+        'y',            # 수학적 표현
+        'is_click',     # boolean 형태
+        'ctr',          # CTR 직접 표현
+        'response',     # 응답
+        'conversion',   # 전환
+        'action'        # 액션
+    ]
+    
+    # 타겟 컬럼 감지 설정
+    TARGET_DETECTION_CONFIG = {
+        'binary_values': {0, 1},           # 이진 분류 값
+        'min_ctr': 0.001,                  # 최소 CTR (0.1%)
+        'max_ctr': 0.1,                    # 최대 CTR (10%)
+        'prefer_low_ctr': True,            # 낮은 CTR 선호 (CTR 특성)
+        'typical_ctr_range': (0.005, 0.05) # 일반적인 CTR 범위 (0.5%-5%)
+    }
+    
     # GPU 및 하드웨어 설정
     if TORCH_AVAILABLE:
         DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -41,124 +64,124 @@ class Config:
     USE_MIXED_PRECISION = True
     GPU_OPTIMIZATION_LEVEL = 1
     
-    # 메모리 설정 (대폭 개선)
-    MAX_MEMORY_GB = 45           # 30GB → 45GB로 증가
-    CHUNK_SIZE = 25000           # 100,000 → 25,000으로 대폭 축소
-    BATCH_SIZE_GPU = 4096        # 8192 → 4096으로 축소 (안정성 확보)
-    BATCH_SIZE_CPU = 1024        # 2048 → 1024로 축소
+    # 메모리 설정
+    MAX_MEMORY_GB = 45
+    CHUNK_SIZE = 25000
+    BATCH_SIZE_GPU = 4096
+    BATCH_SIZE_CPU = 1024
     PREFETCH_FACTOR = 2
-    NUM_WORKERS = 6              # 4 → 6으로 증가 (AMD Ryzen 5 5600X 활용)
+    NUM_WORKERS = 6
     
-    # 데이터 처리 전략 (더 유연하게)
-    TARGET_DATA_USAGE_RATIO = 1.0        # 0.8 → 1.0으로 증가 (전체 데이터 사용)
-    MIN_TRAIN_SIZE = 100000              # 최소 10만행
-    MAX_TRAIN_SIZE = 12000000            # 500만행 → 1200만행으로 대폭 증가
-    MIN_TEST_SIZE = 50000                # 최소 5만행
+    # 데이터 처리 전략
+    TARGET_DATA_USAGE_RATIO = 1.0
+    MIN_TRAIN_SIZE = 100000
+    MAX_TRAIN_SIZE = 12000000
+    MIN_TEST_SIZE = 50000
     MAX_TEST_SIZE = 2000000
     FORCE_FULL_TEST_PREDICTION = True
-    FORCE_FULL_DATA_PROCESSING = True    # False → True로 변경 (전체 데이터 처리 강제)
+    FORCE_FULL_DATA_PROCESSING = True
     
-    # 대용량 데이터 검증 설정 (현실적으로 조정)
-    EXPECTED_TRAIN_SIZE = 10000000       # 1,000,000 → 10,000,000으로 증가
-    EXPECTED_TEST_SIZE = 1500000         # 500,000 → 1,500,000으로 증가
-    DATA_SIZE_TOLERANCE = 0.3            # 0.2 → 0.3으로 확대 (허용 오차 30%)
+    # 대용량 데이터 검증 설정
+    EXPECTED_TRAIN_SIZE = 10000000
+    EXPECTED_TEST_SIZE = 1500000
+    DATA_SIZE_TOLERANCE = 0.3
     REQUIRE_REAL_DATA = True
-    SAMPLE_DATA_FALLBACK = False         # True → False로 변경 (실제 데이터 필수)
+    SAMPLE_DATA_FALLBACK = False
     
     # 모델 하이퍼파라미터
     RANDOM_STATE = 42
     N_SPLITS = 3
     TEST_SIZE = 0.2
     
-    # LightGBM 파라미터 (메모리 최적화)
+    # LightGBM 파라미터
     LGBM_PARAMS = {
         'objective': 'binary',
         'metric': 'binary_logloss',
         'boosting_type': 'gbdt',
-        'num_leaves': 127,           # 255 → 127로 축소
+        'num_leaves': 127,
         'learning_rate': 0.05,
         'feature_fraction': 0.8,
         'bagging_fraction': 0.7,
         'bagging_freq': 5,
-        'min_child_samples': 200,    # 100 → 200으로 증가 (안정성)
-        'min_child_weight': 20,      # 10 → 20으로 증가
-        'lambda_l1': 2.0,            # 1.0 → 2.0으로 증가
-        'lambda_l2': 2.0,            # 1.0 → 2.0으로 증가
+        'min_child_samples': 200,
+        'min_child_weight': 20,
+        'lambda_l1': 2.0,
+        'lambda_l2': 2.0,
         'verbose': -1,
         'random_state': RANDOM_STATE,
-        'n_estimators': 1500,        # 1000 → 1500으로 증가
-        'early_stopping_rounds': 150, # 100 → 150으로 증가
+        'n_estimators': 1500,
+        'early_stopping_rounds': 150,
         'scale_pos_weight': 49.0,
         'force_row_wise': True,
         'max_bin': 255,
         'num_threads': NUM_WORKERS,
         'device_type': 'cpu',
-        'min_data_in_leaf': 100,     # 50 → 100으로 증가
-        'max_depth': 12,             # 10 → 12로 증가
+        'min_data_in_leaf': 100,
+        'max_depth': 12,
         'feature_fraction_bynode': 0.8
     }
     
-    # XGBoost 파라미터 (메모리 최적화)
+    # XGBoost 파라미터
     XGB_PARAMS = {
         'objective': 'binary:logistic',
         'eval_metric': 'logloss',
         'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
         'gpu_id': 0 if GPU_AVAILABLE else None,
-        'max_depth': 10,             # 8 → 10으로 증가
+        'max_depth': 10,
         'learning_rate': 0.05,
         'subsample': 0.8,
         'colsample_bytree': 0.8,
         'colsample_bylevel': 0.8,
         'colsample_bynode': 0.8,
-        'min_child_weight': 20,      # 10 → 20으로 증가
-        'reg_alpha': 2.0,            # 1.0 → 2.0으로 증가
-        'reg_lambda': 2.0,           # 1.0 → 2.0으로 증가
+        'min_child_weight': 20,
+        'reg_alpha': 2.0,
+        'reg_lambda': 2.0,
         'scale_pos_weight': 49.0,
         'random_state': RANDOM_STATE,
-        'n_estimators': 1500,        # 1000 → 1500으로 증가
-        'early_stopping_rounds': 150, # 100 → 150으로 증가
+        'n_estimators': 1500,
+        'early_stopping_rounds': 150,
         'max_bin': 255,
         'nthread': NUM_WORKERS,
         'grow_policy': 'depthwise',
-        'max_leaves': 127,           # 255 → 127로 축소
+        'max_leaves': 127,
         'gamma': 0.1
     }
     
-    # CatBoost 파라미터 (메모리 최적화)
+    # CatBoost 파라미터
     CAT_PARAMS = {
         'loss_function': 'Logloss',
         'eval_metric': 'Logloss',
         'task_type': 'GPU' if GPU_AVAILABLE else 'CPU',
         'devices': '0' if GPU_AVAILABLE else None,
-        'depth': 10,                 # 8 → 10으로 증가
+        'depth': 10,
         'learning_rate': 0.05,
-        'l2_leaf_reg': 15,           # 10 → 15로 증가
-        'iterations': 1500,          # 1000 → 1500으로 증가
+        'l2_leaf_reg': 15,
+        'iterations': 1500,
         'random_seed': RANDOM_STATE,
         'verbose': False,
         'auto_class_weights': 'Balanced',
-        'max_ctr_complexity': 3,     # 2 → 3으로 증가
+        'max_ctr_complexity': 3,
         'thread_count': NUM_WORKERS,
         'bootstrap_type': 'Bayesian',
         'bagging_temperature': 1.0,
         'od_type': 'IncToDec',
-        'od_wait': 150,              # 100 → 150으로 증가
-        'leaf_estimation_iterations': 15, # 10 → 15로 증가
+        'od_wait': 150,
+        'leaf_estimation_iterations': 15,
         'grow_policy': 'SymmetricTree',
-        'max_leaves': 127,           # 255 → 127로 축소
-        'min_data_in_leaf': 100,     # 50 → 100으로 증가
+        'max_leaves': 127,
+        'min_data_in_leaf': 100,
         'rsm': 0.8
     }
     
-    # 딥러닝 모델 파라미터 (메모리 최적화)
+    # 딥러닝 모델 파라미터
     NN_PARAMS = {
         'hidden_dims': [512, 256, 128, 64],
         'dropout_rate': 0.3,
         'batch_size': BATCH_SIZE_GPU if GPU_AVAILABLE else BATCH_SIZE_CPU,
         'learning_rate': 0.001,
         'weight_decay': 1e-4,
-        'epochs': 60,                # 50 → 60으로 증가
-        'patience': 15,              # 10 → 15로 증가
+        'epochs': 60,
+        'patience': 15,
         'use_batch_norm': True,
         'activation': 'relu',
         'use_residual': False,
@@ -171,19 +194,19 @@ class Config:
         'min_lr': 1e-6
     }
     
-    # 피처 엔지니어링 설정 (메모리 효율적)
+    # 피처 엔지니어링 설정
     FEATURE_CONFIG = {
-        'target_encoding_smoothing': 150,   # 100 → 150으로 증가
-        'frequency_threshold': 100,         # 50 → 100으로 증가
-        'interaction_features': True,       # False → True로 변경
+        'target_encoding_smoothing': 150,
+        'frequency_threshold': 100,
+        'interaction_features': True,
         'time_features': True,
         'statistical_features': True,
         'preserve_ids': True,
         'id_hash_features': True,
         'polynomial_features': False,
         'binning_features': True,
-        'quantile_features': True,          # False → True로 변경
-        'rank_features': True,              # False → True로 변경
+        'quantile_features': True,
+        'rank_features': True,
         'group_statistics': True,
         'lag_features': False,
         'rolling_features': False,
@@ -191,12 +214,17 @@ class Config:
         'pca_features': False,
         'clustering_features': False,
         'text_features': False,
-        'max_features': 800,                # 500 → 800으로 증가
+        'max_features': 800,
         'feature_selection_method': 'mutual_info',
-        'feature_selection_k': 300,         # 200 → 300으로 증가
-        'memory_efficient_mode_threshold': 5000000,  # 1,000,000 → 5,000,000으로 증가
+        'feature_selection_k': 300,
+        'memory_efficient_mode_threshold': 5000000,
         'chunked_feature_engineering': True,
-        'feature_importance_threshold': 0.001
+        'feature_importance_threshold': 0.001,
+        # 타겟 컬럼 관련 설정
+        'target_column_candidates': TARGET_COLUMN_CANDIDATES,
+        'target_detection': TARGET_DETECTION_CONFIG,
+        'auto_detect_target': True,
+        'strict_target_validation': True
     }
     
     # 평가 설정
@@ -207,43 +235,43 @@ class Config:
         'pos_weight': 0.0201,
         'neg_weight': 0.9799,
         'target_score': 0.36000,
-        'bootstrap_samples': 1000,          # 500 → 1000으로 증가
+        'bootstrap_samples': 1000,
         'confidence_interval': 0.95,
         'stability_threshold': 0.015,
         'performance_metrics': ['ap', 'wll', 'auc', 'f1'],
         'ctr_tolerance': 0.0005,
         'bias_penalty_weight': 2.5,
         'calibration_weight': 0.4,
-        'large_data_evaluation': True,      # False → True로 변경
-        'evaluation_sample_size': 500000    # 100,000 → 500,000으로 증가
+        'large_data_evaluation': True,
+        'evaluation_sample_size': 500000
     }
     
-    # 앙상블 설정 (향상된 성능)
+    # 앙상블 설정
     ENSEMBLE_CONFIG = {
         'use_optimal_ensemble': True,
-        'use_stabilized_ensemble': True,    # False → True로 변경
-        'use_meta_learning': True,          # False → True로 변경
-        'use_stacking': True,               # False → True로 변경
+        'use_stabilized_ensemble': True,
+        'use_meta_learning': True,
+        'use_stacking': True,
         'meta_model': 'ridge',
         'calibration_ensemble': True,
-        'optimization_method': 'bayesian',  # 'simple' → 'bayesian'로 변경
-        'diversification_method': 'weighted',  # 'equal' → 'weighted'로 변경
+        'optimization_method': 'bayesian',
+        'diversification_method': 'weighted',
         'ensemble_types': ['optimal', 'calibrated', 'stacked'],
         'blend_weights': {
             'lgbm': 0.35,
             'xgb': 0.35,
             'cat': 0.30
         },
-        'ensemble_optimization_trials': 100,  # 50 → 100으로 증가
-        'ensemble_cv_folds': 5,               # 3 → 5로 증가
-        'ensemble_early_stopping': 50,       # 25 → 50으로 증가
+        'ensemble_optimization_trials': 100,
+        'ensemble_cv_folds': 5,
+        'ensemble_early_stopping': 50,
         'ensemble_regularization': 0.01,
-        'dynamic_weighting': True,            # False → True로 변경
-        'adaptive_blending': True,            # False → True로 변경
+        'dynamic_weighting': True,
+        'adaptive_blending': True,
         'temporal_ensemble': False,
-        'multi_level_ensemble': True,         # False → True로 변경
-        'large_data_ensemble': True,          # False → True로 변경
-        'ensemble_memory_limit': 8.0          # 4.0 → 8.0으로 증가
+        'multi_level_ensemble': True,
+        'large_data_ensemble': True,
+        'ensemble_memory_limit': 8.0
     }
     
     # 로깅 설정
@@ -252,8 +280,8 @@ class Config:
         'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         'file_handler': True,
         'console_handler': True,
-        'detailed_logging': True,            # False → True로 변경
-        'performance_logging': True,         # False → True로 변경
+        'detailed_logging': True,
+        'performance_logging': True,
         'memory_logging': True,
         'model_logging': True,
         'data_processing_logging': True
@@ -261,33 +289,33 @@ class Config:
     
     # 실시간 추론 설정
     INFERENCE_CONFIG = {
-        'batch_size': 2000,                  # 1000 → 2000으로 증가
+        'batch_size': 2000,
         'single_prediction_batch_size': 1,
         'timeout': 100,
-        'cache_size': 20000,                 # 10,000 → 20,000으로 증가
+        'cache_size': 20000,
         'model_version': 'v1.0',
         'use_gpu': GPU_AVAILABLE,
-        'parallel_inference': True,          # False → True로 변경
+        'parallel_inference': True,
         'inference_optimization': True,
         'model_compilation': False,
         'quantization': False,
         'tensorrt_optimization': False,
         'onnx_optimization': False,
-        'async_inference': True,             # False → True로 변경
+        'async_inference': True,
         'memory_pool': True,
-        'connection_pool_size': 20,          # 10 → 20으로 증가
-        'warm_up_requests': 10,              # 5 → 10으로 증가
+        'connection_pool_size': 20,
+        'warm_up_requests': 10,
         'feature_caching': True,
-        'prediction_caching': True,          # False → True로 변경
-        'real_time_optimization': True,      # False → True로 변경
+        'prediction_caching': True,
+        'real_time_optimization': True,
         'latency_target_ms': 100,
-        'throughput_target_qps': 200,        # 100 → 200으로 증가
+        'throughput_target_qps': 200,
         'model_preloading': True,
-        'feature_preprocessing_cache': True, # False → True로 변경
+        'feature_preprocessing_cache': True,
         'thread_pool_size': NUM_WORKERS,
         'response_compression': False,
-        'monitoring_enabled': True,          # False → True로 변경
-        'performance_logging': True,         # False로 변경
+        'monitoring_enabled': True,
+        'performance_logging': True,
         'rule_compliance_check': True,
         'independent_execution': True,
         'no_external_api': True,
@@ -296,156 +324,177 @@ class Config:
         'relative_path_only': True
     }
     
-    # 하이퍼파라미터 튜닝 설정 (향상)
+    # 하이퍼파라미터 튜닝 설정
     TUNING_CONFIG = {
-        'n_trials': 50,                      # 20 → 50으로 증가
-        'timeout': 7200,                     # 3600 → 7200 (2시간)로 증가
-        'parallel_jobs': 2,                  # 1 → 2로 증가
+        'n_trials': 50,
+        'timeout': 7200,
+        'parallel_jobs': 2,
         'pruner': 'MedianPruner',
         'sampler': 'TPESampler',
         'optimization_direction': 'maximize',
         'study_storage': None,
         'load_if_exists': True,
         'enable_pruning': True,
-        'n_startup_trials': 10,              # 5 → 10으로 증가
-        'n_warmup_steps': 5,                 # 3 → 5로 증가
+        'n_startup_trials': 10,
+        'n_warmup_steps': 5,
         'interval_steps': 1,
         'percentile': 50.0,
         'min_resource': 1,
-        'max_resource': 162,                 # 81 → 162로 증가
+        'max_resource': 162,
         'reduction_factor': 3,
-        'bootstrap_count': 100,              # 50 → 100으로 증가
+        'bootstrap_count': 100,
         'multi_objective': False,
-        'large_data_tuning': True            # False → True로 변경
+        'large_data_tuning': True
     }
     
-    # 메모리 관리 설정 (대폭 개선)
+    # 메모리 관리 설정
     MEMORY_CONFIG = {
         'max_memory_gb': MAX_MEMORY_GB,
         'auto_gc': True,
-        'gc_threshold': 0.7,                 # 0.6 → 0.7로 조정 (덜 적극적)
-        'force_gc_interval': 50,             # 100 → 50으로 변경 (더 빈번)
+        'gc_threshold': 0.7,
+        'force_gc_interval': 50,
         'memory_monitoring': True,
-        'memory_limit_warning': 0.75,        # 0.7 → 0.75로 조정
-        'memory_limit_error': 0.85,          # 동일
-        'memory_limit_abort': 0.95,          # 새로 추가
-        'chunk_memory_limit': 8.0,           # 4.0 → 8.0으로 증가
-        'batch_memory_limit': 4.0,           # 2.0 → 4.0으로 증가
-        'model_memory_limit': 12.0,          # 6.0 → 12.0으로 증가
-        'ensemble_memory_limit': 16.0,       # 8.0 → 16.0으로 증가
+        'memory_limit_warning': 0.75,
+        'memory_limit_error': 0.85,
+        'memory_limit_abort': 0.95,
+        'chunk_memory_limit': 8.0,
+        'batch_memory_limit': 4.0,
+        'model_memory_limit': 12.0,
+        'ensemble_memory_limit': 16.0,
         'swap_usage_limit': 0.05,
-        'memory_profiling': True,            # False → True로 변경
+        'memory_profiling': True,
         'memory_optimization': True,
         'lazy_loading': True,
         'memory_mapping': False,
         'compressed_storage': True,
         'aggressive_memory_management': True,
-        'large_data_memory_strategy': True   # False → True로 변경
+        'large_data_memory_strategy': True
     }
     
-    # GPU 설정 (RTX 4060 Ti 16GB 최적화)
+    # GPU 설정
     GPU_CONFIG = {
-        'gpu_memory_fraction': 0.8,          # 0.7 → 0.8로 증가
+        'gpu_memory_fraction': 0.8,
         'allow_growth': True,
         'mixed_precision': USE_MIXED_PRECISION,
-        'tensor_core_optimization': True,    # False → True로 변경
+        'tensor_core_optimization': True,
         'cuda_optimization_level': GPU_OPTIMIZATION_LEVEL,
         'cuda_cache_config': 'PreferShared',
         'cudnn_benchmark': True,
         'cudnn_deterministic': False,
         'cuda_launch_blocking': False,
         'gpu_memory_monitoring': True,
-        'gpu_utilization_monitoring': True,  # False → True로 변경
+        'gpu_utilization_monitoring': True,
         'multi_gpu': False,
         'gpu_sync_interval': 200,
-        'gpu_memory_pool': True,             # False → True로 변경
+        'gpu_memory_pool': True,
         'gpu_kernel_sync': False,
         'gpu_profiling': False,
         'tensor_parallelism': False,
         'pipeline_parallelism': False,
-        'gradient_checkpointing': True,      # False → True로 변경 (메모리 절약)
-        'activation_checkpointing': True     # False → True로 변경
+        'gradient_checkpointing': True,
+        'activation_checkpointing': True
     }
     
-    # 병렬 처리 설정 (향상)
+    # 병렬 처리 설정
     PARALLEL_CONFIG = {
         'num_workers': NUM_WORKERS,
         'max_workers': NUM_WORKERS,
-        'thread_pool_size': NUM_WORKERS * 3, # 2 → 3으로 증가
+        'thread_pool_size': NUM_WORKERS * 3,
         'process_pool_size': NUM_WORKERS,
         'multiprocessing_context': 'spawn',
-        'shared_memory': True,               # False → True로 변경
+        'shared_memory': True,
         'parallel_backend': 'threading',
-        'parallel_feature_engineering': True, # False → True로 변경
-        'parallel_model_training': True,     # False → True로 변경
-        'parallel_inference': True,          # False → True로 변경
-        'parallel_evaluation': True,         # False → True로 변경
+        'parallel_feature_engineering': True,
+        'parallel_model_training': True,
+        'parallel_inference': True,
+        'parallel_evaluation': True,
         'thread_local_storage': True,
         'numa_optimization': False,
         'cpu_affinity': False,
         'priority_scheduling': False,
-        'load_balancing': True,              # False → True로 변경
-        'work_stealing': True,               # False → True로 변경
-        'dynamic_scheduling': True,          # False → True로 변경
-        'parallel_io': True,                 # False → True로 변경
-        'async_processing': True             # False → True로 변경
+        'load_balancing': True,
+        'work_stealing': True,
+        'dynamic_scheduling': True,
+        'parallel_io': True,
+        'async_processing': True
     }
     
-    # 데이터 처리 설정 (최적화)
+    # 데이터 처리 설정
     DATA_CONFIG = {
         'use_pyarrow': True,
         'compression': 'snappy',
         'memory_map': False,
         'lazy_loading': True,
         'batch_processing': True,
-        'streaming_processing': True,        # False → True로 변경
+        'streaming_processing': True,
         'data_validation': True,
-        'schema_validation': True,           # False → True로 변경
+        'schema_validation': True,
         'type_optimization': True,
         'categorical_optimization': True,
         'string_optimization': True,
-        'datetime_optimization': True,       # False → True로 변경
+        'datetime_optimization': True,
         'numeric_optimization': True,
         'memory_efficient_dtypes': True,
         'sparse_arrays': False,
         'columnar_storage': True,
-        'indexed_access': True,              # False → True로 변경
-        'cached_operations': True,           # False → True로 변경
+        'indexed_access': True,
+        'cached_operations': True,
         'vectorized_operations': True,
-        'broadcast_operations': True,        # False → True로 변경
-        'parallel_reading': True,            # False → True로 변경
-        'async_io': True,                    # False → True로 변경
-        'prefetch_batches': True,            # False → True로 변경
+        'broadcast_operations': True,
+        'parallel_reading': True,
+        'async_io': True,
+        'prefetch_batches': True,
         'chunk_size': CHUNK_SIZE,
         'max_memory_usage': MAX_MEMORY_GB,
-        'large_data_optimization': True      # False → True로 변경
+        'large_data_optimization': True,
+        # 타겟 컬럼 처리 관련
+        'target_column_detection': True,
+        'validate_target_column': True,
+        'target_column_fallback': 'clicked'
     }
     
     # 모델 저장/로딩 설정
     MODEL_IO_CONFIG = {
-        'compression_level': 6,              # 3 → 6으로 증가
-        'pickle_protocol': 5,                # 4 → 5로 증가
-        'joblib_compression': 'lz4',         # 'zlib' → 'lz4'로 변경 (더 빠름)
+        'compression_level': 6,
+        'pickle_protocol': 5,
+        'joblib_compression': 'lz4',
         'model_versioning': True,
-        'incremental_saving': True,          # False → True로 변경
-        'checkpoint_frequency': 200,         # 100 → 200으로 증가
-        'backup_models': True,               # False → True로 변경
+        'incremental_saving': True,
+        'checkpoint_frequency': 200,
+        'backup_models': True,
         'model_metadata': True,
-        'model_signature': True,             # False → True로 변경
+        'model_signature': True,
         'model_validation': True,
-        'lazy_model_loading': True,          # False → True로 변경
-        'model_caching': True,               # False → True로 변경
-        'model_pooling': True,               # False → True로 변경
+        'lazy_model_loading': True,
+        'model_caching': True,
+        'model_pooling': True,
         'distributed_storage': False,
         'cloud_storage': False,
         'local_storage_optimization': True,
         'model_compression': True,
-        'large_model_handling': True         # False → True로 변경
+        'large_model_handling': True
     }
     
     @classmethod
+    def get_target_column_config(cls):
+        """타겟 컬럼 설정 반환"""
+        return {
+            'candidates': cls.TARGET_COLUMN_CANDIDATES,
+            'detection_config': cls.TARGET_DETECTION_CONFIG,
+            'feature_config': {
+                'auto_detect': cls.FEATURE_CONFIG['auto_detect_target'],
+                'strict_validation': cls.FEATURE_CONFIG['strict_target_validation']
+            },
+            'data_config': {
+                'detection_enabled': cls.DATA_CONFIG['target_column_detection'],
+                'validation_enabled': cls.DATA_CONFIG['validate_target_column'],
+                'fallback_column': cls.DATA_CONFIG['target_column_fallback']
+            }
+        }
+    
+    @classmethod
     def verify_data_requirements(cls):
-        """개선된 데이터 요구사항 검증"""
+        """데이터 요구사항 검증"""
         print("=== 대용량 데이터 요구사항 검증 ===")
         
         requirements = {
@@ -460,12 +509,12 @@ class Config:
         }
         
         # 실제 파일 크기에 맞춘 검증 기준
-        min_train_size_mb = 5000    # 100MB → 5000MB (5GB)로 증가
-        min_test_size_mb = 800      # 50MB → 800MB로 증가
+        min_train_size_mb = 5000
+        min_test_size_mb = 800
         
         requirements['train_size_adequate'] = requirements['train_file_size_mb'] >= min_train_size_mb
         requirements['test_size_adequate'] = requirements['test_file_size_mb'] >= min_test_size_mb
-        requirements['memory_adequate'] = requirements['memory_available'] >= 40  # 20GB → 40GB로 증가
+        requirements['memory_adequate'] = requirements['memory_available'] >= 40
         
         for key, value in requirements.items():
             status = "✓" if (isinstance(value, bool) and value) or (isinstance(value, (int, float)) and value > 0) else "✗"
@@ -590,14 +639,13 @@ class Config:
     
     @classmethod
     def get_memory_config(cls):
-        """개선된 메모리 설정 반환"""
+        """메모리 설정 반환"""
         try:
             import psutil
             
             total_memory = psutil.virtual_memory().total / (1024**3)
             available_memory = psutil.virtual_memory().available / (1024**3)
             
-            # 사용 가능 메모리의 80%로 확대 (70% → 80%)
             max_memory = min(cls.MAX_MEMORY_GB, available_memory * 0.8)
             
             return {
@@ -648,12 +696,15 @@ class Config:
             'batch_processing': cls.DATA_CONFIG['batch_processing'],
             'streaming_processing': cls.DATA_CONFIG['streaming_processing'],
             'type_optimization': cls.DATA_CONFIG['type_optimization'],
-            'large_data_optimization': cls.DATA_CONFIG['large_data_optimization']
+            'large_data_optimization': cls.DATA_CONFIG['large_data_optimization'],
+            'target_column_detection': cls.DATA_CONFIG['target_column_detection'],
+            'validate_target_column': cls.DATA_CONFIG['validate_target_column'],
+            'target_column_fallback': cls.DATA_CONFIG['target_column_fallback']
         }
     
     @classmethod
     def get_safe_memory_limits(cls):
-        """안전한 메모리 한계 설정 (RTX 4060 Ti 16GB + 64GB RAM 최적화)"""
+        """안전한 메모리 한계 설정"""
         try:
             import psutil
             
@@ -661,8 +712,7 @@ class Config:
             total_gb = vm.total / (1024**3)
             available_gb = vm.available / (1024**3)
             
-            # RTX 4060 Ti 16GB + 64GB RAM 환경에 최적화된 메모리 사용
-            safe_limit = min(cls.MAX_MEMORY_GB, available_gb * 0.8)  # 80%까지 사용
+            safe_limit = min(cls.MAX_MEMORY_GB, available_gb * 0.8)
             
             return {
                 'total_memory_gb': total_gb,
@@ -710,7 +760,7 @@ class Config:
 
     @classmethod
     def setup_gpu_environment(cls):
-        """RTX 4060 Ti 16GB 최적화 GPU 환경 설정"""
+        """GPU 환경 설정"""
         if not cls.GPU_AVAILABLE:
             print("GPU를 사용할 수 없습니다. CPU 모드로 실행됩니다.")
             return False
@@ -719,7 +769,6 @@ class Config:
             if TORCH_AVAILABLE:
                 import torch
                 
-                # RTX 4060 Ti 최적화 설정
                 torch.backends.cudnn.benchmark = cls.GPU_CONFIG['cudnn_benchmark']
                 torch.backends.cudnn.deterministic = cls.GPU_CONFIG['cudnn_deterministic']
                 
@@ -746,7 +795,7 @@ class Config:
             
         return False
 
-# 환경변수 설정 (RTX 4060 Ti + AMD Ryzen 5 5600X 최적화)
+# 환경변수 설정
 try:
     os.environ['PYTHONHASHSEED'] = str(Config.RANDOM_STATE)
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'
@@ -756,21 +805,21 @@ try:
     os.environ['NUMBA_NUM_THREADS'] = str(Config.NUM_WORKERS)
     
     # 대용량 데이터 처리용 환경변수
-    os.environ['PANDAS_MAX_COLUMNS'] = '2000'        # 1000 → 2000으로 증가
-    os.environ['PANDAS_MAX_ROWS'] = '15000000'       # 5,000,000 → 15,000,000으로 증가
+    os.environ['PANDAS_MAX_COLUMNS'] = '2000'
+    os.environ['PANDAS_MAX_ROWS'] = '15000000'
     
-    # CUDA 환경 변수 (RTX 4060 Ti 16GB 최적화)
+    # CUDA 환경 변수
     if Config.GPU_AVAILABLE:
         os.environ['CUDA_VISIBLE_DEVICES'] = Config.CUDA_VISIBLE_DEVICES
         os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
         os.environ['CUDA_CACHE_DISABLE'] = '0'
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:1024'  # 512 → 1024로 증가
-        os.environ['CUDA_MEMORY_FRACTION'] = '0.8'   # 추가
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:1024'
+        os.environ['CUDA_MEMORY_FRACTION'] = '0.8'
     
-    # 메모리 관리 환경 변수 (64GB RAM 최적화)
-    os.environ['MALLOC_TRIM_THRESHOLD_'] = '200000'   # 100000 → 200000으로 증가
-    os.environ['MALLOC_MMAP_THRESHOLD_'] = '262144'   # 131072 → 262144로 증가
-    os.environ['MALLOC_MMAP_MAX_'] = '65536'          # 추가
+    # 메모리 관리 환경 변수
+    os.environ['MALLOC_TRIM_THRESHOLD_'] = '200000'
+    os.environ['MALLOC_MMAP_THRESHOLD_'] = '262144'
+    os.environ['MALLOC_MMAP_MAX_'] = '65536'
     
     # 규칙 준수 환경 변수
     os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -778,12 +827,12 @@ try:
     os.environ['LANG'] = 'C.UTF-8'
     
     # PyArrow 최적화
-    os.environ['ARROW_USER_SIMD_LEVEL'] = 'AVX2'      # 추가
-    os.environ['ARROW_DEFAULT_MEMORY_POOL'] = 'system' # 추가
+    os.environ['ARROW_USER_SIMD_LEVEL'] = 'AVX2'
+    os.environ['ARROW_DEFAULT_MEMORY_POOL'] = 'system'
     
     # LightGBM/XGBoost 최적화
-    os.environ['LIGHTGBM_EXEC_PREFER'] = 'disk'       # 추가
-    os.environ['XGBOOST_CACHE_PREFERENCE'] = 'memory'  # 추가
+    os.environ['LIGHTGBM_EXEC_PREFER'] = 'disk'
+    os.environ['XGBOOST_CACHE_PREFERENCE'] = 'memory'
     
 except Exception as e:
     print(f"환경 변수 설정 실패: {e}")

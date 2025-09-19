@@ -47,7 +47,6 @@ class MemoryMonitor:
         self._check_interval = 3.0
         self.max_memory_gb = max_memory_gb
         
-        # 64GB 환경에 최적화된 임계값
         self.warning_threshold = max_memory_gb * 0.80
         self.critical_threshold = max_memory_gb * 0.90
         self.abort_threshold = max_memory_gb * 0.95
@@ -88,7 +87,6 @@ class MemoryMonitor:
             usage = self.get_memory_usage()
             available = self.get_available_memory()
             
-            # 64GB 환경에서 더 관대한 기준
             return usage > self.critical_threshold or available < 15.0
         except Exception:
             return False
@@ -113,7 +111,7 @@ class MemoryMonitor:
                 'available_gb': available,
                 'level': level,
                 'should_cleanup': level in ['warning', 'critical', 'abort'],
-                'should_simplify': level in ['abort']  # 64GB 환경에서 완화
+                'should_simplify': level in ['abort']
             }
         except Exception:
             return {
@@ -158,7 +156,7 @@ class CTRFeatureEngineer:
     def __init__(self, config: Config = Config):
         self.config = config
         self.memory_monitor = MemoryMonitor()
-        self.memory_efficient_mode = False  # 64GB 환경에서 기본 비활성화
+        self.memory_efficient_mode = False
         
         # 피처 엔지니어링 상태
         self.target_encoders = {}
@@ -172,6 +170,10 @@ class CTRFeatureEngineer:
         self.removed_columns = []
         self.final_feature_columns = []
         self.original_feature_order = []
+        
+        # 타겟 컬럼 관리
+        self.target_column = None
+        self.target_candidates = ['clicked', 'click', 'target', 'label', 'y', 'is_click', 'ctr']
         
         # 피처 생성 카운터
         self.interaction_features = []
@@ -191,6 +193,45 @@ class CTRFeatureEngineer:
         }
         
         logger.info("CTR 피처 엔지니어 초기화 완료")
+    
+    def _detect_target_column(self, train_df: pd.DataFrame, provided_target_col: str = None) -> str:
+        """타겟 컬럼 자동 감지"""
+        try:
+            # 제공된 타겟 컬럼이 있고 존재하는 경우
+            if provided_target_col and provided_target_col in train_df.columns:
+                logger.info(f"제공된 타겟 컬럼 사용: {provided_target_col}")
+                return provided_target_col
+            
+            # 타겟 컬럼 후보들 확인
+            for candidate in self.target_candidates:
+                if candidate in train_df.columns:
+                    # 이진 분류 컬럼인지 확인
+                    unique_values = train_df[candidate].dropna().unique()
+                    if len(unique_values) == 2 and set(unique_values).issubset({0, 1}):
+                        logger.info(f"타겟 컬럼 자동 감지: {candidate}")
+                        return candidate
+            
+            # 이진 분류 패턴으로 컬럼 찾기
+            for col in train_df.columns:
+                if train_df[col].dtype in ['int64', 'int32', 'int8', 'uint8']:
+                    unique_values = train_df[col].dropna().unique()
+                    if len(unique_values) == 2 and set(unique_values).issubset({0, 1}):
+                        # CTR 특성 확인 (클릭률이 매우 낮음)
+                        positive_ratio = train_df[col].mean()
+                        if 0.001 <= positive_ratio <= 0.1:  # 0.1% ~ 10% 범위
+                            logger.info(f"CTR 패턴 타겟 컬럼 감지: {col} (CTR: {positive_ratio:.4f})")
+                            return col
+            
+            # 기본값으로 첫 번째 후보 사용
+            if provided_target_col:
+                logger.warning(f"타겟 컬럼 '{provided_target_col}'을 찾을 수 없어 기본값 사용")
+                return provided_target_col
+            else:
+                raise ValueError("타겟 컬럼을 찾을 수 없습니다")
+                
+        except Exception as e:
+            logger.error(f"타겟 컬럼 감지 실패: {e}")
+            return provided_target_col or 'clicked'
     
     def set_memory_efficient_mode(self, enabled: bool):
         """메모리 효율 모드 설정"""
@@ -220,16 +261,16 @@ class CTRFeatureEngineer:
             # 4. 기본 피처 정리
             X_train, X_test = self._clean_basic_features(X_train, X_test)
             
-            # 5. 교차 피처 생성 (64GB 환경에서 적극적 생성)
+            # 5. 교차 피처 생성
             X_train, X_test = self._create_interaction_features(X_train, X_test, y_train)
             
-            # 6. 타겟 인코딩 (64GB 환경에서 더 많은 피처 생성)
+            # 6. 타겟 인코딩
             X_train, X_test = self._create_target_encoding_features(X_train, X_test, y_train)
             
             # 7. 시간 기반 피처
             X_train, X_test = self._create_temporal_features(X_train, X_test)
             
-            # 8. 통계 피처 (64GB 환경에서 모든 피처 생성)
+            # 8. 통계 피처
             X_train, X_test = self._create_statistical_features(X_train, X_test)
             
             # 9. 빈도 기반 피처
@@ -262,30 +303,34 @@ class CTRFeatureEngineer:
         """초기화"""
         try:
             self.processing_stats['start_time'] = time.time()
-            self.original_feature_order = sorted([col for col in train_df.columns if col != target_col])
+            
+            # 타겟 컬럼 감지
+            self.target_column = self._detect_target_column(train_df, target_col)
+            
+            self.original_feature_order = sorted([col for col in train_df.columns if col != self.target_column])
             
             logger.info(f"초기 데이터: 학습 {train_df.shape}, 테스트 {test_df.shape}")
+            logger.info(f"타겟 컬럼: {self.target_column}")
             logger.info(f"원본 피처 수: {len(self.original_feature_order)}")
             
             self.memory_monitor.log_memory_status("초기화")
             
         except Exception as e:
             logger.warning(f"초기화 실패: {e}")
+            self.target_column = target_col
     
     def _prepare_basic_data(self, train_df: pd.DataFrame, test_df: pd.DataFrame, 
                            target_col: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
         """기본 데이터 준비"""
         try:
-            if target_col not in train_df.columns:
-                available_targets = [col for col in train_df.columns if 'click' in col.lower()]
-                if available_targets:
-                    target_col = available_targets[0]
-                    logger.warning(f"타겟 컬럼 변경: {target_col}")
-                else:
-                    raise ValueError(f"타겟 컬럼 '{target_col}'을 찾을 수 없습니다")
+            # 감지된 타겟 컬럼 사용
+            actual_target_col = self.target_column
             
-            X_train = train_df.drop(columns=[target_col]).copy()
-            y_train = train_df[target_col].copy()
+            if actual_target_col not in train_df.columns:
+                raise ValueError(f"타겟 컬럼 '{actual_target_col}'을 찾을 수 없습니다")
+            
+            X_train = train_df.drop(columns=[actual_target_col]).copy()
+            y_train = train_df[actual_target_col].copy()
             X_test = test_df.copy()
             
             # 타겟 분포 확인
@@ -354,7 +399,7 @@ class CTRFeatureEngineer:
             common_columns = list(set(X_train.columns) & set(X_test.columns))
             processed_count = 0
             
-            batch_size = 20  # 64GB 환경에서 더 큰 배치
+            batch_size = 20
             
             for i in range(0, len(common_columns), batch_size):
                 batch_cols = common_columns[i:i + batch_size]
@@ -466,7 +511,7 @@ class CTRFeatureEngineer:
         try:
             cols_to_remove = []
             
-            batch_size = 30  # 64GB 환경에서 더 큰 배치
+            batch_size = 30
             for i in range(0, len(X_train.columns), batch_size):
                 batch_cols = X_train.columns[i:i + batch_size]
                 
@@ -499,7 +544,6 @@ class CTRFeatureEngineer:
         
         try:
             memory_status = self.memory_monitor.get_memory_status()
-            # 64GB 환경에서 더 많은 교차 피처 생성
             max_interactions = 20 if not memory_status['should_simplify'] else 12
             
             # 중요한 피처들 식별
@@ -561,7 +605,6 @@ class CTRFeatureEngineer:
         
         try:
             memory_status = self.memory_monitor.get_memory_status()
-            # 64GB 환경에서 더 많은 타겟 인코딩 피처 생성
             max_target_features = 15 if not memory_status['should_simplify'] else 8
             
             # 범주형 피처들 선택
@@ -573,19 +616,28 @@ class CTRFeatureEngineer:
             
             categorical_candidates = categorical_candidates[:max_target_features]
             
+            # 타겟 평균값
+            target_mean = y_train.mean()
+            
             for col in categorical_candidates:
                 try:
-                    # 베이지안 평활화를 적용한 타겟 인코딩
-                    target_mean = y_train.mean()
+                    # 그룹별 통계 계산
+                    group_stats = X_train.groupby(col).agg({
+                        col: 'count'
+                    }).rename(columns={col: 'count'})
                     
-                    # 그룹별 통계
-                    group_stats = pd.DataFrame()
-                    group_stats['count'] = X_train[col].value_counts()
-                    group_stats['mean'] = X_train.groupby(col)[y_train.name if hasattr(y_train, 'name') else 0].agg(lambda x: y_train.iloc[x.index].mean())
+                    # y_train을 인덱스로 그룹화하여 평균 계산
+                    target_by_group = X_train.groupby(col).apply(
+                        lambda x: y_train.iloc[x.index].mean()
+                    )
+                    
+                    group_stats['mean'] = target_by_group
                     
                     # 베이지안 평활화
                     alpha = 100
-                    group_stats['target_encoded'] = (group_stats['mean'] * group_stats['count'] + target_mean * alpha) / (group_stats['count'] + alpha)
+                    group_stats['target_encoded'] = (
+                        group_stats['mean'] * group_stats['count'] + target_mean * alpha
+                    ) / (group_stats['count'] + alpha)
                     
                     # 매핑 적용
                     target_map = group_stats['target_encoded'].to_dict()
@@ -597,6 +649,8 @@ class CTRFeatureEngineer:
                     self.target_encoding_features.append(feature_name)
                     self.generated_features.append(feature_name)
                     self.target_encoders[col] = target_map
+                    
+                    logger.info(f"타겟 인코딩 생성: {feature_name}")
                     
                 except Exception as e:
                     logger.warning(f"타겟 인코딩 {col} 실패: {e}")
@@ -635,7 +689,7 @@ class CTRFeatureEngineer:
             X_train['time_cos'] = np.cos(2 * np.pi * X_train['time_index']).astype('float32')
             X_test['time_cos'] = np.cos(2 * np.pi * X_test['time_index']).astype('float32')
             
-            # 64GB 환경에서 추가 시간 피처
+            # 추가 시간 피처
             memory_status = self.memory_monitor.get_memory_status()
             if not memory_status['should_simplify']:
                 # 시간 구간별 상대적 위치
@@ -689,7 +743,6 @@ class CTRFeatureEngineer:
                         X_train[mean_feature] = X_train[group_cols].mean(axis=1).astype('float32')
                         X_test[mean_feature] = X_test[group_cols].mean(axis=1).astype('float32')
                         
-                        # 64GB 환경에서 추가 통계 피처
                         if not memory_status['should_simplify']:
                             # 그룹 표준편차
                             std_feature = f'{group_name}_std'
@@ -732,7 +785,6 @@ class CTRFeatureEngineer:
         
         try:
             memory_status = self.memory_monitor.get_memory_status()
-            # 64GB 환경에서 더 많은 빈도 피처 생성
             max_freq_features = 12 if not memory_status['should_simplify'] else 6
             
             # 빈도 인코딩할 피처들 선택
@@ -799,7 +851,6 @@ class CTRFeatureEngineer:
         
         try:
             memory_status = self.memory_monitor.get_memory_status()
-            # 64GB 환경에서 더 많은 범주형 피처 처리
             max_categorical = 15 if not memory_status['should_simplify'] else 8
             
             for col in current_categorical_cols[:max_categorical]:
@@ -876,7 +927,6 @@ class CTRFeatureEngineer:
             
             memory_status = self.memory_monitor.get_memory_status()
             feature_count = 0
-            # 64GB 환경에서 더 많은 수치형 피처 변환
             max_features = 18 if not memory_status['should_simplify'] else 8
             
             for col in current_numeric_cols[:15]:
@@ -936,7 +986,7 @@ class CTRFeatureEngineer:
             X_train = X_train[common_columns]
             X_test = X_test[common_columns]
             
-            # 컬럼 수 제한 (64GB 환경에서 더 많은 컬럼 허용)
+            # 컬럼 수 제한
             memory_status = self.memory_monitor.get_memory_status()
             max_cols = 250 if not memory_status['should_simplify'] else 150
             
@@ -1034,18 +1084,21 @@ class CTRFeatureEngineer:
         logger.warning("기본 피처만 생성")
         
         try:
+            # 감지된 타겟 컬럼 사용
+            actual_target_col = self.target_column
+            
             # 수치형 컬럼만 선택
             numeric_cols = []
             for col in train_df.columns:
-                if col != target_col and train_df[col].dtype in ['int8', 'int16', 'int32', 'int64', 
-                                                                'uint8', 'uint16', 'uint32', 'uint64',
-                                                                'float16', 'float32', 'float64']:
+                if col != actual_target_col and train_df[col].dtype in ['int8', 'int16', 'int32', 'int64', 
+                                                                        'uint8', 'uint16', 'uint32', 'uint64',
+                                                                        'float16', 'float32', 'float64']:
                     numeric_cols.append(col)
                     if len(numeric_cols) >= 100:
                         break
             
             if not numeric_cols:
-                numeric_cols = [col for col in train_df.columns if col != target_col][:100]
+                numeric_cols = [col for col in train_df.columns if col != actual_target_col][:100]
             
             X_train = train_df[numeric_cols].copy()
             X_test = test_df[numeric_cols].copy() if set(numeric_cols).issubset(test_df.columns) else test_df.iloc[:, :len(numeric_cols)].copy()
@@ -1105,7 +1158,8 @@ class CTRFeatureEngineer:
                 'target_encoders': len(self.target_encoders),
                 'label_encoders': len(self.label_encoders),
                 'scalers': len(self.scalers)
-            }
+            },
+            'target_column': self.target_column
         }
 
 FeatureEngineer = CTRFeatureEngineer
