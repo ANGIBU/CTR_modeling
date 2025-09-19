@@ -4,6 +4,7 @@ import logging
 import time
 import gc
 import warnings
+import json
 from typing import Dict, List, Tuple, Optional, Any, Union
 from pathlib import Path
 
@@ -160,6 +161,46 @@ class CTRAdvancedMetrics:
             logger.error(f"WLL calculation failed: {e}")
             return 100.0
     
+    def weighted_log_loss_enhanced(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
+        """Enhanced weighted log loss with additional stability"""
+        try:
+            base_wll = self.weighted_log_loss_ctr(y_true, y_pred_proba)
+            
+            # Additional stability measures
+            predicted_ctr = np.mean(y_pred_proba)
+            actual_ctr = np.mean(y_true)
+            ctr_bias = abs(predicted_ctr - actual_ctr)
+            
+            # Bias penalty
+            if ctr_bias > self.ctr_tolerance:
+                bias_penalty = (ctr_bias - self.ctr_tolerance) * 2.0
+                enhanced_wll = base_wll + bias_penalty
+            else:
+                enhanced_wll = base_wll
+            
+            return float(enhanced_wll)
+            
+        except Exception as e:
+            logger.error(f"Enhanced WLL calculation failed: {e}")
+            return 100.0
+    
+    def combined_score_enhanced(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
+        """Enhanced combined score calculation"""
+        try:
+            ap = self.average_precision_enhanced(y_true, y_pred_proba)
+            wll = self.weighted_log_loss_enhanced(y_true, y_pred_proba)
+            
+            # Avoid extreme WLL values
+            wll = min(wll, 10.0)
+            
+            combined = (ap * self.ap_weight) - (wll * self.wll_weight)
+            
+            return float(combined)
+            
+        except Exception as e:
+            logger.error(f"Enhanced combined score calculation failed: {e}")
+            return -100.0
+    
     def ctr_calibration_score_enhanced(self, y_true: np.ndarray, y_pred_proba: np.ndarray, 
                                      n_bins: int = 10) -> Dict[str, float]:
         """Enhanced CTR calibration evaluation"""
@@ -169,7 +210,8 @@ class CTRAdvancedMetrics:
             
             if len(y_true) != len(y_pred_proba) or len(y_true) == 0:
                 return {'calibration_score': 0.0, 'expected_calibration_error': 1.0, 
-                       'reliability_score': 0.0, 'calibration_slope': 0.0}
+                       'reliability_score': 0.0, 'calibration_slope': 0.0,
+                       'calibration_ece': 1.0, 'calibration_mce': 1.0}
             
             # Bin creation and validation
             bin_boundaries = np.linspace(0, 1, n_bins + 1)
@@ -180,6 +222,7 @@ class CTRAdvancedMetrics:
             
             calibration_errors = []
             bin_scores = []
+            max_calibration_error = 0.0
             
             total_samples = len(y_true)
             predicted_ctr = np.mean(y_pred_proba)
@@ -195,6 +238,7 @@ class CTRAdvancedMetrics:
                     
                     bin_error = np.abs(avg_confidence_in_bin - accuracy_in_bin)
                     calibration_errors.append(bin_error * prop_in_bin)
+                    max_calibration_error = max(max_calibration_error, bin_error)
                     
                     # Bin quality score (lower error = higher score)
                     bin_score = max(0, 1 - bin_error)
@@ -231,20 +275,72 @@ class CTRAdvancedMetrics:
                 'calibration_slope': float(calibration_slope),
                 'ctr_bias': float(ctr_bias),
                 'predicted_ctr': float(predicted_ctr),
-                'actual_ctr': float(actual_ctr)
+                'actual_ctr': float(actual_ctr),
+                'calibration_ece': float(expected_calibration_error),
+                'calibration_mce': float(max_calibration_error)
             }
             
         except Exception as e:
             logger.error(f"CTR calibration evaluation failed: {e}")
             return {'calibration_score': 0.0, 'expected_calibration_error': 1.0, 
-                   'reliability_score': 0.0, 'calibration_slope': 1.0}
+                   'reliability_score': 0.0, 'calibration_slope': 1.0,
+                   'calibration_ece': 1.0, 'calibration_mce': 1.0}
+    
+    def _compute_ks_statistic(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
+        """Compute Kolmogorov-Smirnov statistic"""
+        try:
+            pos_scores = y_pred_proba[y_true == 1]
+            neg_scores = y_pred_proba[y_true == 0]
+            
+            if len(pos_scores) == 0 or len(neg_scores) == 0:
+                return 0.0
+            
+            if SCIPY_AVAILABLE:
+                ks_stat, p_value = stats.ks_2samp(pos_scores, neg_scores)
+                return float(ks_stat)
+            else:
+                # Manual KS calculation
+                all_scores = np.concatenate([pos_scores, neg_scores])
+                all_scores_sorted = np.sort(all_scores)
+                
+                cdf_pos = np.searchsorted(pos_scores, all_scores_sorted, side='right') / len(pos_scores)
+                cdf_neg = np.searchsorted(neg_scores, all_scores_sorted, side='right') / len(neg_scores)
+                
+                ks_stat = np.max(np.abs(cdf_pos - cdf_neg))
+                return float(ks_stat)
+                
+        except Exception as e:
+            logger.error(f"KS statistic calculation failed: {e}")
+            return 0.0
+    
+    def _compute_gini_coefficient(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
+        """Compute Gini coefficient"""
+        try:
+            if len(y_true) == 0:
+                return 0.0
+            
+            # Sort by predicted probability
+            sorted_indices = np.argsort(y_pred_proba)
+            sorted_true = y_true[sorted_indices]
+            
+            n = len(sorted_true)
+            index = np.arange(1, n + 1)
+            
+            gini = (2 * np.sum(index * sorted_true)) / (n * np.sum(sorted_true)) - (n + 1) / n
+            
+            if np.isnan(gini) or np.isinf(gini):
+                return 0.0
+            
+            return float(np.abs(gini))
+        except:
+            return 0.0
     
     def ctr_ultra_optimized_score(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
         """CTR ultra optimized combined score calculation"""
         try:
             # Basic metrics
             ap = self.average_precision_enhanced(y_true, y_pred_proba)
-            wll = self.weighted_log_loss_ctr(y_true, y_pred_proba)
+            wll = self.weighted_log_loss_enhanced(y_true, y_pred_proba)
             
             # Avoid extreme WLL values
             wll = min(wll, 10.0)
@@ -285,49 +381,109 @@ class CTRAdvancedMetrics:
             logger.error(f"Ultra optimized score calculation failed: {e}")
             return 0.0
     
+    def _get_default_metrics_ultra_with_calibration(self, model_name: str = "Unknown") -> Dict[str, Any]:
+        """Return default metrics for failed evaluations"""
+        return {
+            'model_name': model_name,
+            'ap_enhanced': 0.0,
+            'wll_enhanced': 100.0,
+            'combined_score_enhanced': -100.0,
+            'ctr_ultra_optimized_score': 0.0,
+            'auc': 0.5,
+            'log_loss': 100.0,
+            'brier_score': 1.0,
+            'ctr_bias': 1.0,
+            'ctr_bias_ratio': 50.0,
+            'ctr_accuracy': 0.0,
+            'predicted_ctr': 0.0,
+            'actual_ctr': 0.0,
+            'calibration_score': 0.0,
+            'calibration_ece': 1.0,
+            'calibration_mce': 1.0,
+            'reliability_score': 0.0,
+            'calibration_slope': 1.0,
+            'ks_statistic': 0.0,
+            'gini_coefficient': 0.0,
+            'pred_entropy': 0.0,
+            'separation': 0.0,
+            'separation_ratio': 1.0,
+            'performance_tier': 'very_poor',
+            'target_combined_score_achievement': 0.0,
+            'ultra_score_achievement': 0.0,
+            'calibration_achievement': 0.0,
+            'integrated_achievement': 0.0,
+            'evaluation_time': 0.0,
+            'error': 'Evaluation failed'
+        }
+    
     def comprehensive_evaluation_ultra_with_calibration(self, 
                                                       y_true: np.ndarray, 
                                                       y_pred_proba: np.ndarray,
-                                                      model_name: str = "Unknown") -> Dict[str, Any]:
-        """Comprehensive evaluation including calibration assessment"""
-        
-        start_time = time.time()
-        
-        y_true = np.asarray(y_true).flatten()
-        y_pred_proba = np.asarray(y_pred_proba).flatten()
-        
-        logger.info(f"Comprehensive evaluation started for {model_name} (including calibration)")
-        
-        if len(y_true) != len(y_pred_proba):
-            logger.error(f"Size mismatch: y_true={len(y_true)}, y_pred_proba={len(y_pred_proba)}")
-            return {'error': 'Size mismatch between true and predicted values'}
-        
-        if len(y_true) == 0:
-            logger.error("Empty arrays provided")
-            return {'error': 'Empty arrays provided'}
-        
-        metrics = {}
+                                                      model_name: str = "Unknown",
+                                                      threshold: float = 0.5) -> Dict[str, Any]:
+        """Ultra-comprehensive evaluation metrics calculation - Combined Score 0.30+ target + calibration evaluation"""
         
         try:
-            # Basic evaluation metrics
-            metrics['model_name'] = model_name
-            metrics['sample_count'] = len(y_true)
-            metrics['positive_ratio'] = float(np.mean(y_true))
-            metrics['predicted_ctr'] = float(np.mean(y_pred_proba))
-            metrics['actual_ctr'] = metrics['positive_ratio']
+            start_time = time.time()
             
-            # Core performance metrics
+            y_true = np.asarray(y_true).flatten()
+            y_pred_proba = np.asarray(y_pred_proba).flatten()
+            
+            if len(y_true) != len(y_pred_proba):
+                logger.error(f"Input size mismatch: y_true={len(y_true)}, y_pred_proba={len(y_pred_proba)}")
+                return self._get_default_metrics_ultra_with_calibration(model_name)
+            
+            if len(y_true) == 0:
+                logger.error("Empty input array")
+                return self._get_default_metrics_ultra_with_calibration(model_name)
+            
+            if np.any(np.isnan(y_pred_proba)) or np.any(np.isinf(y_pred_proba)):
+                logger.warning("NaN or infinite values in predictions, performing cleanup")
+                y_pred_proba = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
+                y_pred_proba = np.nan_to_num(y_pred_proba, nan=0.5, posinf=1.0, neginf=0.0)
+            
+            y_pred = (y_pred_proba >= threshold).astype(int)
+        
+            metrics = {}
+            metrics['model_name'] = model_name
+            
+            # Main CTR ultra-performance metrics
             try:
-                metrics['average_precision'] = self.average_precision_enhanced(y_true, y_pred_proba)
-                metrics['weighted_log_loss'] = self.weighted_log_loss_ctr(y_true, y_pred_proba)
-                metrics['combined_score_enhanced'] = (metrics['average_precision'] * self.ap_weight) - (metrics['weighted_log_loss'] * self.wll_weight)
+                metrics['ap_enhanced'] = self.average_precision_enhanced(y_true, y_pred_proba)
+                metrics['wll_enhanced'] = self.weighted_log_loss_enhanced(y_true, y_pred_proba)
+                metrics['combined_score_enhanced'] = self.combined_score_enhanced(y_true, y_pred_proba)
                 metrics['ctr_ultra_optimized_score'] = self.ctr_ultra_optimized_score(y_true, y_pred_proba)
             except Exception as e:
-                logger.warning(f"Core metrics calculation failed: {e}")
+                logger.error(f"Main CTR metrics calculation failed: {e}")
                 metrics.update({
-                    'average_precision': 0.0, 'weighted_log_loss': 100.0, 
+                    'ap_enhanced': 0.0, 'wll_enhanced': 100.0, 
                     'combined_score_enhanced': -100.0, 'ctr_ultra_optimized_score': 0.0
                 })
+            
+            # Standard sklearn metrics
+            try:
+                metrics['auc'] = roc_auc_score(y_true, y_pred_proba)
+                metrics['log_loss'] = log_loss(y_true, y_pred_proba)
+                metrics['brier_score'] = brier_score_loss(y_true, y_pred_proba)
+            except Exception as e:
+                logger.warning(f"Standard metrics calculation failed: {e}")
+                metrics.update({'auc': 0.5, 'log_loss': 100.0, 'brier_score': 1.0})
+            
+            # CTR specific metrics
+            try:
+                predicted_ctr = np.mean(y_pred_proba)
+                actual_ctr = np.mean(y_true)
+                ctr_bias = abs(predicted_ctr - actual_ctr)
+                
+                metrics['predicted_ctr'] = float(predicted_ctr)
+                metrics['actual_ctr'] = float(actual_ctr)
+                metrics['ctr_bias'] = float(ctr_bias)
+                metrics['ctr_bias_ratio'] = float(ctr_bias / max(actual_ctr, 1e-10))
+                metrics['ctr_accuracy'] = float(1.0 - min(ctr_bias / self.ctr_tolerance, 1.0))
+            except Exception as e:
+                logger.warning(f"CTR specific metrics calculation failed: {e}")
+                metrics.update({'predicted_ctr': 0.0, 'actual_ctr': 0.0, 'ctr_bias': 1.0, 
+                              'ctr_bias_ratio': 50.0, 'ctr_accuracy': 0.0})
             
             # Calibration evaluation
             try:
@@ -335,29 +491,16 @@ class CTRAdvancedMetrics:
                 metrics.update(calibration_results)
             except Exception as e:
                 logger.warning(f"Calibration evaluation failed: {e}")
-                metrics['calibration_score'] = 0.0
-                metrics['expected_calibration_error'] = 1.0
-                metrics['reliability_score'] = 0.0
-                metrics['calibration_slope'] = 1.0
+                metrics.update({'calibration_score': 0.0, 'calibration_ece': 1.0, 'calibration_mce': 1.0,
+                              'reliability_score': 0.0, 'calibration_slope': 1.0})
             
-            # Additional sklearn metrics
+            # Advanced statistical metrics
             try:
-                metrics['roc_auc'] = roc_auc_score(y_true, y_pred_proba)
-                metrics['log_loss'] = log_loss(y_true, y_pred_proba)
-                metrics['brier_score'] = brier_score_loss(y_true, y_pred_proba)
+                metrics['ks_statistic'] = self._compute_ks_statistic(y_true, y_pred_proba)
+                metrics['gini_coefficient'] = self._compute_gini_coefficient(y_true, y_pred_proba)
             except Exception as e:
-                logger.warning(f"Additional sklearn metrics calculation failed: {e}")
-                metrics.update({'roc_auc': 0.5, 'log_loss': 100.0, 'brier_score': 1.0})
-            
-            # CTR specific metrics
-            try:
-                ctr_bias = abs(metrics['predicted_ctr'] - metrics['actual_ctr'])
-                metrics['ctr_bias'] = ctr_bias
-                metrics['ctr_bias_ratio'] = ctr_bias / max(metrics['actual_ctr'], 1e-10)
-                metrics['ctr_accuracy'] = 1.0 - min(ctr_bias / self.ctr_tolerance, 1.0)
-            except Exception as e:
-                logger.warning(f"CTR specific metrics calculation failed: {e}")
-                metrics.update({'ctr_bias': 1.0, 'ctr_bias_ratio': 50.0, 'ctr_accuracy': 0.0})
+                logger.warning(f"Advanced statistical metrics calculation failed: {e}")
+                metrics.update({'ks_statistic': 0.0, 'gini_coefficient': 0.0})
             
             # Prediction distribution analysis
             try:
@@ -469,12 +612,9 @@ class CTRAdvancedMetrics:
             
         except Exception as e:
             logger.error(f"Comprehensive evaluation failed for {model_name}: {e}")
-            return {
-                'model_name': model_name,
-                'error': str(e),
-                'sample_count': len(y_true),
-                'evaluation_time': time.time() - start_time
-            }
+            default_metrics = self._get_default_metrics_ultra_with_calibration(model_name)
+            default_metrics['evaluation_time'] = time.time() - start_time if 'start_time' in locals() else 0.0
+            return default_metrics
     
     def _calculate_entropy_enhanced(self, probabilities: np.ndarray) -> float:
         """Enhanced entropy calculation of prediction probabilities"""
@@ -545,46 +685,71 @@ class UltraModelComparator:
                     continue
                 
                 if np.any(np.isnan(y_pred_proba)) or np.any(np.isinf(y_pred_proba)):
-                    logger.warning(f"{model_name}: Invalid values in predictions, applying corrections")
+                    logger.warning(f"{model_name}: NaN or infinite values in predictions, performing cleanup")
                     y_pred_proba = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
                     y_pred_proba = np.nan_to_num(y_pred_proba, nan=0.5, posinf=1.0, neginf=0.0)
                 
-                # Comprehensive evaluation
+                # Comprehensive evaluation including calibration evaluation
                 metrics = self.metrics_calculator.comprehensive_evaluation_ultra_with_calibration(
                     y_true, y_pred_proba, model_name
                 )
                 
-                if 'error' not in metrics:
-                    # Additional model info integration
-                    if models_info and model_name in models_info:
-                        info = models_info[model_name]
-                        metrics.update({
-                            'model_type': info.get('type', 'unknown'),
-                            'hyperparameters': str(info.get('params', {})),
-                            'training_time': info.get('training_time', 0.0)
-                        })
-                    
-                    metrics['comparison_time'] = time.time() - start_time
-                    results.append(metrics)
-                    
-                    logger.info(f"{model_name} evaluation completed: Combined Score = {metrics['combined_score_enhanced']:.4f}")
+                evaluation_time = time.time() - start_time
+                metrics['evaluation_duration'] = evaluation_time
+                
+                # Add model information
+                if models_info and model_name in models_info:
+                    model_info = models_info[model_name]
+                    metrics['is_calibrated'] = model_info.get('is_calibrated', False)
+                    metrics['calibration_method'] = model_info.get('calibration_method', 'none')
+                    metrics['model_type'] = model_info.get('model_type', 'unknown')
+                else:
+                    metrics['is_calibrated'] = False
+                    metrics['calibration_method'] = 'none'
+                    metrics['model_type'] = 'unknown'
+                
+                results.append(metrics)
+                
+                logger.info(f"{model_name} evaluation completed ({evaluation_time:.2f}s)")
+                logger.info(f"  - Combined Score Enhanced: {metrics['combined_score_enhanced']:.4f}")
+                logger.info(f"  - Ultra Optimized Score: {metrics['ctr_ultra_optimized_score']:.4f}")
+                logger.info(f"  - CTR Bias: {metrics['ctr_bias']:.4f}")
+                logger.info(f"  - Calibration Score: {metrics.get('calibration_score', 0.0):.4f}")
+                logger.info(f"  - Calibration Applied: {'Yes' if metrics['is_calibrated'] else 'No'}")
+                logger.info(f"  - Performance Tier: {metrics['performance_tier']}")
                 
             except Exception as e:
-                logger.error(f"{model_name} evaluation failed: {e}")
-                continue
+                logger.error(f"{model_name} ultra high-performance model evaluation failed: {str(e)}")
+                default_metrics = self.metrics_calculator._get_default_metrics_ultra_with_calibration(model_name)
+                default_metrics['evaluation_duration'] = 0.0
+                default_metrics['is_calibrated'] = False
+                default_metrics['calibration_method'] = 'none'
+                default_metrics['model_type'] = 'unknown'
+                results.append(default_metrics)
         
         if not results:
-            logger.error("No models were successfully evaluated")
+            logger.error("No evaluable models available")
             return pd.DataFrame()
         
-        self.comparison_results = pd.DataFrame(results)
-        
-        # Performance analysis
-        self._perform_ultra_analysis_with_calibration()
-        
-        logger.info(f"Model comparison completed: {len(self.comparison_results)} models evaluated")
-        
-        return self.comparison_results
+        try:
+            comparison_df = pd.DataFrame(results)
+            
+            # Sort by ultra optimized score
+            comparison_df = comparison_df.sort_values('ctr_ultra_optimized_score', ascending=False)
+            comparison_df = comparison_df.reset_index(drop=True)
+            
+            self.comparison_results = comparison_df
+            
+            # Performance analysis
+            self._perform_ultra_analysis_with_calibration()
+            
+            logger.info(f"Ultra high-performance model comparison completed: {len(comparison_df)} models evaluated")
+            
+            return comparison_df
+            
+        except Exception as e:
+            logger.error(f"Comparison results processing failed: {e}")
+            return pd.DataFrame()
     
     def _perform_ultra_analysis_with_calibration(self):
         """Ultra performance analysis including calibration assessment"""
@@ -664,7 +829,7 @@ class UltraModelComparator:
             else:
                 # If no calibrated models, find best overall
                 logger.warning("No models meet calibration threshold, selecting best overall performance")
-                for attempt_metric in [metric, 'combined_score_enhanced', 'average_precision']:
+                for attempt_metric in [metric, 'combined_score_enhanced', 'ap_enhanced']:
                     if attempt_metric in self.comparison_results.columns:
                         metric = attempt_metric
                         break
@@ -714,7 +879,7 @@ class EvaluationReporter:
             report['summary']['best_score'] = best_score
             
             # Detailed results
-            for model_name, row in comparator.comparison_results.iterrows():
+            for idx, row in comparator.comparison_results.iterrows():
                 model_data = row.to_dict()
                 report['detailed_results'][model_data['model_name']] = model_data
             
@@ -729,7 +894,10 @@ class EvaluationReporter:
                 'min_calibration_score': float(calibration_scores.min()),
                 'max_calibration_score': float(calibration_scores.max()),
                 'models_well_calibrated': int((calibration_scores >= 0.7).sum()),
-                'calibration_achievement_rate': float((calibration_scores >= 0.7).mean())
+                'calibration_achievement_rate': float((calibration_scores >= 0.7).mean()),
+                'target_achievers': int(comparator.performance_analysis.get('target_achievers_count', 0)),
+                'calibrated_achievers': int(comparator.performance_analysis.get('calibrated_models_count', 0)),
+                'integrated_achievers': int(comparator.performance_analysis.get('integrated_achievers_count', 0))
             }
             
             # Recommendations
@@ -741,27 +909,77 @@ class EvaluationReporter:
             if report['calibration_analysis']['calibration_achievement_rate'] >= 0.5:
                 report['recommendations'].append("Good model calibration achieved")
             else:
-                report['recommendations'].append("Calibration improvement recommended")
+                report['recommendations'].append("Try more advanced calibration techniques")
             
-            # Save report
+            if report['calibration_analysis']['integrated_achievers'] == 0:
+                report['recommendations'].append("Integrated optimization: Find ways to simultaneously improve performance and calibration")
+            
+            # Save
             if save_path:
                 try:
-                    import json
-                    save_path = Path(save_path)
                     save_path.parent.mkdir(parents=True, exist_ok=True)
-                    
                     with open(save_path, 'w', encoding='utf-8') as f:
-                        json.dump(report, f, indent=2, ensure_ascii=False, default=str)
-                    
-                    logger.info(f"Performance report saved: {save_path}")
+                        json.dump(report, f, indent=2, ensure_ascii=False)
+                    logger.info(f"Evaluation report saved: {save_path} (including calibration analysis)")
                 except Exception as e:
                     logger.warning(f"Report saving failed: {e}")
             
+            self.report_data = report
             return report
             
         except Exception as e:
-            logger.error(f"Report generation failed: {e}")
-            return {'error': str(e)}
+            logger.error(f"Evaluation report generation failed: {e}")
+            return {'error': f'Error during report generation: {str(e)}'}
+    
+    def save_comparison_results_with_calibration(self, 
+                                               comparison_df: pd.DataFrame,
+                                               save_path: Optional[Path] = None) -> bool:
+        """Save comparison results to file - including calibration information"""
+        try:
+            if save_path is None:
+                save_path = self.config.OUTPUT_DIR / "model_comparison_results_with_calibration.csv"
+            
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            comparison_df.to_csv(save_path, index=True, encoding='utf-8')
+            
+            logger.info(f"Model comparison results saved: {save_path} (including calibration information)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Comparison results saving failed: {e}")
+            return False
+    
+    def generate_summary_table_with_calibration(self, comparison_df: pd.DataFrame) -> pd.DataFrame:
+        """Generate summary table - including calibration"""
+        try:
+            if comparison_df.empty:
+                return pd.DataFrame()
+            
+            summary_columns = [
+                'combined_score_enhanced', 'ctr_ultra_optimized_score', 
+                'ap_enhanced', 'auc', 'ctr_bias', 'performance_tier',
+                'calibration_score', 'calibration_ece', 'calibration_mce',
+                'is_calibrated', 'calibration_method',
+                'target_combined_score_achievement', 'ultra_score_achievement',
+                'calibration_achievement', 'integrated_achievement'
+            ]
+            
+            available_columns = [col for col in summary_columns if col in comparison_df.columns]
+            
+            if available_columns:
+                summary_df = comparison_df[available_columns].copy()
+                
+                # Round only numeric columns
+                numeric_columns = summary_df.select_dtypes(include=[np.number]).columns
+                summary_df[numeric_columns] = summary_df[numeric_columns].round(4)
+                
+                return summary_df
+            else:
+                return comparison_df
+            
+        except Exception as e:
+            logger.error(f"Summary table generation failed: {e}")
+            return comparison_df
     
     def generate_calibration_plots(self, y_true: np.ndarray, y_pred_proba: np.ndarray, 
                                  model_name: str, save_dir: Optional[Path] = None) -> bool:
