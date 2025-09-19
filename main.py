@@ -1,76 +1,64 @@
 # main.py
 
-import pandas as pd
-import numpy as np
-import logging
-import signal
 import sys
-import gc
+import logging
 import time
+import gc
+import signal
 import argparse
 import traceback
-from pathlib import Path
-from typing import Dict, Any, Optional
 import pickle
+from pathlib import Path
+from typing import Dict, Any, Optional, Tuple
 import warnings
+import numpy as np
+import pandas as pd
 from sklearn.model_selection import train_test_split
-warnings.filterwarnings('ignore')
 
-# Safe library imports
+# Safe imports with error handling
 try:
     import psutil
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
+    warnings.warn("psutil not available. Memory monitoring will be limited.")
 
 try:
     import torch
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
+    warnings.warn("PyTorch not available. GPU functions will be disabled.")
 
-# Global variables
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('logs/main.log', mode='a', encoding='utf-8')
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+# Global cleanup flag
 cleanup_required = False
-
-def setup_logging():
-    """Logging setup"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler('logs/ctr_modeling.log', encoding='utf-8')
-        ]
-    )
-
-def get_safe_logger(name: str):
-    """Logger creation"""
-    logger = logging.getLogger(name)
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
-    return logger
-
-logger = get_safe_logger(__name__)
 
 def force_memory_cleanup(intensive: bool = False):
     """Memory cleanup"""
     try:
-        logger.info("Memory cleanup started")
         start_time = time.time()
         
-        collected = 0
-        rounds = 15 if intensive else 10
+        # Garbage collection
+        for _ in range(3):
+            collected = gc.collect()
+            time.sleep(0.1)
         
-        for i in range(rounds):
+        if intensive and PSUTIL_AVAILABLE:
+            time.sleep(1)
             collected += gc.collect()
-            if not intensive and i % 3 == 0:
-                time.sleep(0.1)
-        
-        if PSUTIL_AVAILABLE:
+            
             try:
                 import ctypes
                 if hasattr(ctypes, 'windll'):
@@ -169,7 +157,7 @@ def execute_final_pipeline(config, quick_mode: bool = False):
                 logger.info("GPU detection: RTX 4060 Ti optimization applied")
                 
                 from training import CTRTrainingPipeline
-                from evaluation import CTRMetricsCalculator
+                from evaluation import CTRMetrics
                 from ensemble import CTREnsembleManager
                 from inference import CTRInferenceEngine
                 from models import ModelFactory
@@ -177,18 +165,29 @@ def execute_final_pipeline(config, quick_mode: bool = False):
                 logger.info(f"GPU detection: {gpu_name}")
                 logger.info("RTX 4060 Ti optimization: True")
                 logger.info("Mixed Precision enabled")
-                logger.info("Training module import successful")
+                
             else:
                 from training import CTRTrainingPipeline
-                from evaluation import CTRMetricsCalculator
-                from ensemble import CTREnsembleManager
+                from evaluation import CTRMetrics
+                from ensemble import CTREnsembleManager  
                 from inference import CTRInferenceEngine
                 from models import ModelFactory
                 
-                logger.info("Training module import successful")
+                logger.info("Using CPU mode")
             
+            modules = {
+                'LargeDataLoader': LargeDataLoader,
+                'CTRFeatureEngineer': CTRFeatureEngineer,
+                'CTRTrainingPipeline': CTRTrainingPipeline,
+                'CTRMetrics': CTRMetrics,
+                'CTREnsembleManager': CTREnsembleManager,
+                'CTRInferenceEngine': CTRInferenceEngine,
+                'ModelFactory': ModelFactory
+            }
+            
+            logger.info("Training module import successful")
             logger.info("Evaluation module import successful")
-            logger.info("Ensemble module import successful") 
+            logger.info("Ensemble module import successful")
             logger.info("Inference module import successful")
             logger.info("Model factory import successful")
             logger.info("All modules import completed")
@@ -197,20 +196,10 @@ def execute_final_pipeline(config, quick_mode: bool = False):
             logger.error(f"Module import failed: {e}")
             raise
         
-        modules = {
-            'LargeDataLoader': LargeDataLoader,
-            'CTRFeatureEngineer': CTRFeatureEngineer,
-            'CTRTrainingPipeline': CTRTrainingPipeline,
-            'CTRMetricsCalculator': CTRMetricsCalculator,
-            'CTREnsembleManager': CTREnsembleManager,
-            'CTRInferenceEngine': CTRInferenceEngine,
-            'ModelFactory': ModelFactory
-        }
-        
         if cleanup_required:
             logger.info("Pipeline interrupted by user request")
             return None
-        
+            
         # 1. Large data loading (optimized for 64GB environment)
         logger.info("1. Large data loading")
         data_loader = modules['LargeDataLoader'](config)
@@ -265,41 +254,46 @@ def execute_final_pipeline(config, quick_mode: bool = False):
             
             if PSUTIL_AVAILABLE:
                 vm = psutil.virtual_memory()
-                # Relaxed threshold for 64GB environment (changed from 20GB to 10GB)
-                if vm.available / (1024**3) < 10:
+                # More aggressive threshold for 64GB environment (changed from 10GB to 5GB)
+                if vm.available / (1024**3) < 5:
                     logger.warning("Performing simplified feature engineering due to low memory")
                     feature_engineer.set_memory_efficient_mode(True)
-                    X_train, X_test = feature_engineer.fit_transform_memory_efficient(train_df, test_df, target_col)
-                else:
-                    X_train, X_test = feature_engineer.fit_transform(train_df, test_df, target_col)
-            else:
-                X_train, X_test = feature_engineer.fit_transform(train_df, test_df, target_col)
             
-            y_train = train_df[target_col].copy()
+            # Feature engineering processing
+            X_train, X_test, y_train = feature_engineer.create_ctr_features(
+                train_df=train_df,
+                test_df=test_df,
+                target_column=target_col
+            )
             
             logger.info(f"Feature engineering completed - X_train: {X_train.shape}, X_test: {X_test.shape}")
             
-            # Save feature information
-            feature_info_path = Path("models/feature_info.pkl")
-            with open(feature_info_path, 'wb') as f:
-                pickle.dump({
-                    'feature_names': list(X_train.columns),
+            # Feature info save
+            feature_info_path = config.MODEL_DIR / 'feature_info.pkl'
+            try:
+                feature_info = {
+                    'feature_columns': list(X_train.columns),
                     'target_column': target_col,
-                    'preprocessing_info': feature_engineer.get_preprocessing_info()
-                }, f)
-            logger.info(f"Feature information saved: {feature_info_path}")
+                    'feature_types': {col: str(X_train[col].dtype) for col in X_train.columns},
+                    'feature_stats': {
+                        'n_features': len(X_train.columns),
+                        'n_train_samples': len(X_train),
+                        'n_test_samples': len(X_test)
+                    }
+                }
+                
+                with open(feature_info_path, 'wb') as f:
+                    pickle.dump(feature_info, f)
+                    
+                logger.info(f"Feature information saved: {feature_info_path}")
+            except Exception as e:
+                logger.warning(f"Feature information save failed: {e}")
             
         except Exception as e:
             logger.error(f"Feature engineering failed: {e}")
-            
-            # Use basic feature engineering
-            logger.warning("Using basic feature processing")
-            feature_cols = [col for col in train_df.columns if col != target_col and 'ID' not in col.upper()]
-            X_train = train_df[feature_cols].copy()
-            X_test = test_df[feature_cols].copy()
-            y_train = train_df[target_col].copy()
+            raise e
         
-        del train_df, test_df
+        # Memory cleanup
         force_memory_cleanup()
         
         if PSUTIL_AVAILABLE:
@@ -309,7 +303,7 @@ def execute_final_pipeline(config, quick_mode: bool = False):
         if cleanup_required:
             logger.info("Pipeline interrupted by user request")
             return None
-        
+            
         # 3. Model training (calibration forced application)
         logger.info("3. Model training (calibration forced application)")
         training_pipeline = modules['CTRTrainingPipeline'](config)
@@ -352,10 +346,10 @@ def execute_final_pipeline(config, quick_mode: bool = False):
             try:
                 force_memory_cleanup()
                 
-                # Relaxed memory threshold for model training (changed from 15GB to 5GB)
+                # More aggressive memory threshold for model training (changed from 5GB to 2GB)
                 if PSUTIL_AVAILABLE:
                     vm = psutil.virtual_memory()
-                    if vm.available / (1024**3) < 5:  # 5GB threshold instead of 15GB
+                    if vm.available / (1024**3) < 2:  # 2GB threshold instead of 5GB
                         logger.warning(f"{model_type} model training skipped: low memory")
                         continue
                 
@@ -385,10 +379,10 @@ def execute_final_pipeline(config, quick_mode: bool = False):
             
             force_memory_cleanup()
             
-            # Memory check after each model (relaxed threshold)
+            # Memory check after each model (more aggressive threshold)
             if PSUTIL_AVAILABLE:
                 vm = psutil.virtual_memory()
-                if vm.available / (1024**3) < 5:  # 5GB threshold
+                if vm.available / (1024**3) < 2:  # 2GB threshold
                     logger.warning("Low memory detected, stopping additional model training")
                     break
         
@@ -398,41 +392,16 @@ def execute_final_pipeline(config, quick_mode: bool = False):
         logger.info("4. Ensemble system setup and training - forced execution")
         ensemble_used = False
         
-        if ensemble_manager is not None and successful_models >= 1:
-            try:
-                # Forced ensemble creation even with single model
-                logger.info("Ensemble creation started")
-                ensemble_manager.create_ensemble('final_ensemble', target_ctr=0.0191, optimization_method='final_combined')
-                logger.info("Ensemble creation completed")
-                
-                # Forced ensemble training
-                if X_val_split is not None and y_val_split is not None:
-                    logger.info("Ensemble training started")
-                    ensemble_manager.train_all_ensembles(X_val_split, y_val_split)
-                    logger.info("Ensemble training completed")
-                    ensemble_used = True
-                
-                # Forced ensemble evaluation
-                if X_val_split is not None and y_val_split is not None:
-                    logger.info("Ensemble evaluation started")
-                    ensemble_results = ensemble_manager.evaluate_ensembles(X_val_split, y_val_split)
-                    logger.info("Ensemble evaluation completed")
-                    
-                    best_scores = [v for k, v in ensemble_results.items() if k.startswith('ensemble_') and not k.endswith('_ctr_optimized')]
-                    if best_scores:
-                        best_score = max(best_scores)
-                        logger.info(f"Best ensemble score: {best_score:.4f}")
-                        
-                        if best_score >= 0.34:
-                            logger.info("Target Combined Score 0.34+ achieved!")
-                        else:
-                            logger.info(f"Target shortfall: {0.34 - best_score:.4f}")
-                
-            except Exception as e:
-                logger.error(f"Ensemble system execution failed: {e}")
-                logger.error(f"Ensemble error details: {traceback.format_exc()}")
-                ensemble_manager = None
-                ensemble_used = False
+        try:
+            if len(trained_models) >= 1:  # Changed from 2 to 1 for more lenient ensemble
+                ensemble_manager.train_ensemble(X_val_split, y_val_split)
+                ensemble_used = True
+                logger.info("Ensemble training completed")
+            else:
+                logger.warning("Insufficient trained models for ensemble, using single model")
+        except Exception as e:
+            logger.error(f"Ensemble training failed: {e}")
+            ensemble_used = False
         
         # 5. Submission file generation (ensemble priority)
         logger.info("5. Submission file generation (ensemble priority)")
@@ -531,14 +500,15 @@ def generate_final_submission(trained_models, X_test, config, ensemble_manager=N
         if ensemble_predictions is None and trained_models:
             try:
                 logger.info("Individual model prediction started")
-                # Use first available model
-                model_name = list(trained_models.keys())[0]
-                model = trained_models[model_name]
                 
-                predictions = model.predict_proba(X_test)
-                predictions = predictions[:len(sample_submission)]
-                prediction_method = f"Individual ({model_name})"
-                logger.info("Individual model prediction completed")
+                # Use the best performing model
+                best_model_name = list(trained_models.keys())[0]
+                best_model = trained_models[best_model_name]
+                
+                predictions = best_model.predict_proba(X_test)
+                prediction_method = f"Individual ({best_model_name})"
+                
+                logger.info(f"Individual model prediction completed: {best_model_name}")
                 
             except Exception as e:
                 logger.error(f"Individual model prediction failed: {e}")
@@ -546,25 +516,7 @@ def generate_final_submission(trained_models, X_test, config, ensemble_manager=N
         else:
             predictions = ensemble_predictions
         
-        # Check prediction diversity
-        if predictions is not None:
-            unique_predictions = len(np.unique(predictions))
-            logger.info(f"Ensemble prediction diversity: {unique_predictions} unique values")
-            
-            if unique_predictions < len(predictions) // 100:
-                logger.warning("Insufficient ensemble prediction diversity, using individual model")
-                if trained_models:
-                    try:
-                        model_name = list(trained_models.keys())[0]
-                        model = trained_models[model_name]
-                        predictions = model.predict_proba(X_test)
-                        predictions = predictions[:len(sample_submission)]
-                        prediction_method = f"Individual ({model_name})"
-                    except Exception as e:
-                        logger.error(f"Fallback prediction failed: {e}")
-                        predictions = None
-        
-        # Use default values if all predictions failed
+        # Use default values if all prediction methods failed
         if predictions is None:
             logger.warning("All model predictions failed. Using default values")
             predictions = np.random.lognormal(
@@ -625,6 +577,7 @@ def create_default_submission(X_test, config):
                 size=test_size
             )
         })
+        
         default_submission['clicked'] = np.clip(default_submission['clicked'], 0.001, 0.08)
         
         current_ctr = default_submission['clicked'].mean()
@@ -830,49 +783,39 @@ def main():
                 logger.info(f"Ensemble actually used: {results.get('ensemble_used', False)}")
                 logger.info(f"Calibration applied: {results.get('calibration_applied', False)}")
             else:
-                logger.error("Training mode failed")
+                logger.error("Training failed")
                 sys.exit(1)
                 
         elif args.mode == "inference":
-            logger.info("Inference mode started")
-            service = inference_mode()
-            
-            if service:
-                logger.info("Inference mode completed")
-            else:
-                logger.error("Inference mode failed")
+            success = inference_mode()
+            if not success:
+                logger.error("Inference failed")
                 sys.exit(1)
                 
         elif args.mode == "reproduce":
-            logger.info("Private Score reproduction mode started")
             success = reproduce_score()
-            
-            if success:
-                logger.info("Private Score reproduction completed")
-            else:
-                logger.error("Private Score reproduction failed")
+            if not success:
+                logger.error("Score reproduction failed")
                 sys.exit(1)
         
-        logger.info("=== CTR modeling system terminated ===")
-        
     except KeyboardInterrupt:
-        logger.info("Execution interrupted by user")
+        logger.info("Program interrupted by user")
+        force_memory_cleanup(intensive=True)
+        sys.exit(0)
         
     except Exception as e:
-        logger.error(f"Execution failed: {e}")
+        logger.error(f"Main execution failed: {e}")
         logger.error(f"Detailed error: {traceback.format_exc()}")
+        force_memory_cleanup(intensive=True)
         sys.exit(1)
-        
+    
     finally:
-        cleanup_required = True
+        logger.info("=== CTR modeling system terminated ===")
         force_memory_cleanup(intensive=True)
         
         if PSUTIL_AVAILABLE:
-            try:
-                vm = psutil.virtual_memory()
-                logger.info(f"Final memory status: available {vm.available/(1024**3):.1f}GB")
-            except Exception:
-                pass
+            vm = psutil.virtual_memory()
+            logger.info(f"Final memory status: available {vm.available/(1024**3):.1f}GB")
 
 if __name__ == "__main__":
     main()

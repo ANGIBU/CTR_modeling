@@ -65,163 +65,99 @@ class Config:
     GPU_OPTIMIZATION_LEVEL = 1
     
     # Memory settings (optimized for 64GB environment)
-    MAX_MEMORY_GB = 50
-    CHUNK_SIZE = 50000
-    BATCH_SIZE_GPU = 4096
-    BATCH_SIZE_CPU = 1024
-    PREFETCH_FACTOR = 2
-    NUM_WORKERS = 6
+    MAX_MEMORY_GB = 55  # Increased from 50 to 55 for more aggressive use
+    CHUNK_SIZE = 60000  # Increased chunk size for better throughput
+    BATCH_SIZE_GPU = 5120  # Increased batch size for RTX 4060 Ti
+    BATCH_SIZE_CPU = 2048  # Increased CPU batch size
+    PREFETCH_FACTOR = 3  # Increased prefetch factor
+    NUM_WORKERS = 8  # Increased workers for 6C12T CPU
     
-    # Memory thresholds (adjusted for better performance)
-    MEMORY_WARNING_THRESHOLD = 25  # 25GB threshold (more lenient)
-    MEMORY_CRITICAL_THRESHOLD = 35  # 35GB threshold
-    MEMORY_SAFE_THRESHOLD = 20     # 20GB safe threshold
-    MEMORY_ABORT_THRESHOLD = 40     # 40GB abort threshold
-    MAX_TRAIN_SIZE = 12000000
-    MAX_TEST_SIZE = 2000000
+    # Memory thresholds (more aggressive for 64GB environment)
+    MEMORY_WARNING_THRESHOLD = 45  # Increased from 25 to 45GB
+    MEMORY_CRITICAL_THRESHOLD = 50  # New critical threshold at 50GB
+    MEMORY_ABORT_THRESHOLD = 55  # Abort threshold at 55GB
     
-    # Data processing strategy
-    TARGET_DATA_USAGE_RATIO = 1.0
-    MIN_TRAIN_SIZE = 100000
-    MIN_TEST_SIZE = 50000
-    FORCE_FULL_TEST_PROCESSING = True
+    # Data size limits (for large dataset)
+    MAX_TRAIN_SIZE = 15000000  # 15M rows maximum
+    MAX_TEST_SIZE = 2000000    # 2M rows maximum
     
-    # Feature engineering settings
-    FEATURE_SELECTION_METHODS = ['correlation', 'mutual_info', 'chi2']
-    MAX_CATEGORICAL_CARDINALITY = 1000
-    NUMERICAL_SCALING_METHOD = 'standard'
-    CATEGORICAL_ENCODING = 'target'
-    INTERACTION_FEATURES = True
-    POLYNOMIAL_FEATURES = False
-    MAX_FEATURES = 500
-    MAX_INTERACTION_FEATURES = 100
-    MAX_TARGET_ENCODING_FEATURES = 50
-    FEATURE_SELECTION_K = 200
-    ENABLE_FEATURE_INTERACTION = True
-    ENABLE_TARGET_ENCODING = True
-    FEATURE_ENGINEERING_THREADS = 4
-    
-    # Model-specific settings
-    MODEL_CONFIG = {
-        'logistic': {
-            'C': 1.0,
-            'max_iter': 1000,
-            'random_state': 42,
-            'solver': 'lbfgs'
-        },
+    # Model training settings
+    MODEL_TRAINING_CONFIG = {
         'lightgbm': {
-            'objective': 'binary',
-            'metric': 'binary_logloss',
-            'boosting_type': 'gbdt',
-            'num_leaves': 31,
-            'learning_rate': 0.05,
+            'max_depth': 8,
+            'num_leaves': 64,
+            'min_data_in_leaf': 100,
             'feature_fraction': 0.9,
-            'bagging_fraction': 0.8,
+            'bagging_fraction': 0.9,
             'bagging_freq': 5,
-            'verbose': -1,
-            'random_state': 42,
-            'n_estimators': 100
+            'lambda_l1': 0.1,
+            'lambda_l2': 0.2,
+            'min_gain_to_split': 0.02,
+            'max_cat_threshold': 32,
+            'cat_smooth': 10.0,
+            'cat_l2': 10.0
         },
         'xgboost': {
-            'objective': 'binary:logistic',
-            'eval_metric': 'logloss',
-            'max_depth': 6,
-            'learning_rate': 0.1,
-            'n_estimators': 100,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'random_state': 42,
-            'verbosity': 0
+            'max_depth': 8,
+            'learning_rate': 0.05,
+            'n_estimators': 1000,
+            'subsample': 0.9,
+            'colsample_bytree': 0.9,
+            'min_child_weight': 5,
+            'gamma': 0.1,
+            'alpha': 0.1,
+            'lambda': 0.2,
+            'scale_pos_weight': 50.0
         },
-        'random_forest': {
-            'n_estimators': 100,
-            'max_depth': 10,
-            'min_samples_split': 5,
-            'min_samples_leaf': 2,
-            'random_state': 42,
-            'n_jobs': -1
-        },
-        'neural_network': {
-            'hidden_layer_sizes': (100, 50),
-            'activation': 'relu',
-            'solver': 'adam',
-            'alpha': 0.0001,
-            'learning_rate': 'constant',
+        'logistic': {
+            'C': 1.0,
+            'penalty': 'l2',
+            'solver': 'lbfgs',
             'max_iter': 1000,
+            'class_weight': 'balanced',
             'random_state': 42
         }
     }
     
-    # LightGBM specific settings
-    LIGHTGBM_PARAMS = {
-        'objective': 'binary',
-        'metric': 'binary_logloss',
-        'boosting_type': 'gbdt',
-        'num_leaves': 2047,
-        'learning_rate': 0.01,
-        'feature_fraction': 0.95,
-        'bagging_fraction': 0.85,
-        'bagging_freq': 3,
-        'min_child_samples': 200,
-        'min_child_weight': 10,
-        'lambda_l1': 1.0,
-        'lambda_l2': 1.0,
-        'max_depth': 18,
-        'verbose': -1,
-        'random_state': 42,
-        'n_estimators': 5000,
-        'early_stopping_rounds': 300,
-        'scale_pos_weight': 50,
-        'force_row_wise': True,
-        'max_bin': 255,
-        'num_threads': 12,
-        'device_type': 'cpu'
+    # Feature engineering settings
+    FEATURE_ENGINEERING_CONFIG = {
+        'enable_interaction_features': True,
+        'enable_polynomial_features': False,
+        'enable_binning': True,
+        'enable_target_encoding': True,
+        'enable_frequency_encoding': True,
+        'max_interaction_degree': 2,
+        'binning_strategy': 'quantile',
+        'n_bins': 10,
+        'min_frequency': 5
     }
     
-    # XGBoost specific settings
-    XGBOOST_PARAMS = {
-        'objective': 'binary:logistic',
-        'eval_metric': 'logloss',
-        'tree_method': 'hist',
-        'max_depth': 18,
-        'learning_rate': 0.01,
-        'subsample': 0.85,
-        'colsample_bytree': 0.95,
-        'min_child_weight': 10,
-        'reg_alpha': 1.0,
-        'reg_lambda': 1.0,
-        'random_state': 42,
-        'n_estimators': 5000,
-        'early_stopping_rounds': 300,
-        'scale_pos_weight': 50,
-        'n_jobs': 12
-    }
-    
-    # Model training settings
-    RANDOM_STATE = 42
+    # Cross-validation settings
     CV_FOLDS = 5
-    CV_RANDOM_STATE = 42
     CV_SHUFFLE = True
-    CV_STRATIFY = True
-    VALIDATION_SIZE = 0.15
-    TEST_SIZE = 0.15
-    STRATIFY = True
+    RANDOM_STATE = 42
+    
+    # Early stopping settings
+    EARLY_STOPPING_ROUNDS = 100
+    EARLY_STOPPING_TOLERANCE = 1e-6
+    
+    # Hyperparameter tuning settings  
+    OPTUNA_N_TRIALS = 100
+    OPTUNA_TIMEOUT = 3600  # 1 hour
+    OPTUNA_N_JOBS = 1
+    OPTUNA_VERBOSITY = 1
     
     # Ensemble settings
-    ENSEMBLE_WEIGHTS = {
-        'logistic': 0.2,
-        'lightgbm': 0.4,
-        'xgboost': 0.3,
-        'random_forest': 0.05,
-        'neural_network': 0.05
+    ENSEMBLE_CONFIG = {
+        'voting_weights': {'lightgbm': 0.4, 'xgboost': 0.4, 'logistic': 0.2},
+        'stacking_cv_folds': 3,
+        'blending_ratio': 0.7,
+        'diversity_threshold': 0.1,
+        'performance_threshold': 0.3
     }
     
-    ENSEMBLE_METHODS = ['weighted_average', 'stacking', 'blending']
-    DEFAULT_ENSEMBLE_METHOD = 'weighted_average'
-    
     # Calibration settings
-    CALIBRATION_METHODS = ['platt', 'isotonic']
-    DEFAULT_CALIBRATION_METHOD = 'platt'
+    CALIBRATION_METHOD = 'sigmoid'
     CALIBRATION_CV_FOLDS = 3
     
     # Evaluation configuration
@@ -344,60 +280,4 @@ class Config:
         else:
             print("Requirements not met. Check data files and system resources.")
         
-        print("=== Validation completed ===")
-        
-        return all_met
-    
-    @classmethod
-    def get_gpu_info(cls):
-        """GPU information retrieval"""
-        if not cls.TORCH_AVAILABLE:
-            return {"available": False, "message": "PyTorch not available"}
-        
-        if not torch.cuda.is_available():
-            return {"available": False, "message": "CUDA not available"}
-        
-        gpu_info = {
-            "available": True,
-            "device_count": torch.cuda.device_count(),
-            "current_device": torch.cuda.current_device(),
-            "device_name": torch.cuda.get_device_name(),
-            "memory_allocated": torch.cuda.memory_allocated() / 1024**3,
-            "memory_reserved": torch.cuda.memory_reserved() / 1024**3,
-            "memory_total": torch.cuda.get_device_properties(0).total_memory / 1024**3
-        }
-        
-        return gpu_info
-    
-    @classmethod
-    def validate_config(cls):
-        """Validate configuration settings"""
-        validation_results = {
-            "paths_valid": True,
-            "gpu_valid": True,
-            "memory_valid": True,
-            "issues": []
-        }
-        
-        # Path validation
-        try:
-            cls.verify_paths()
-        except Exception as e:
-            validation_results["paths_valid"] = False
-            validation_results["issues"].append(f"Path validation failed: {e}")
-        
-        # GPU validation
-        try:
-            gpu_info = cls.get_gpu_info()
-            if not gpu_info["available"]:
-                validation_results["issues"].append(f"GPU not available: {gpu_info['message']}")
-        except Exception as e:
-            validation_results["gpu_valid"] = False
-            validation_results["issues"].append(f"GPU validation failed: {e}")
-        
-        # Memory validation
-        if cls.MAX_MEMORY_GB < 16:
-            validation_results["memory_valid"] = False
-            validation_results["issues"].append("Insufficient memory configuration")
-        
-        return validation_results
+        return requirements
