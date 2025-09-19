@@ -259,11 +259,18 @@ def execute_final_pipeline(config, quick_mode: bool = False):
                     logger.warning("Performing simplified feature engineering due to low memory")
                     feature_engineer.set_memory_efficient_mode(True)
             
+            # Separate target column from features
+            if target_col not in train_df.columns:
+                logger.error(f"Target column '{target_col}' not found in training data")
+                raise ValueError(f"Target column '{target_col}' not found")
+            
+            y_train = train_df[target_col].copy()
+            
             # Feature engineering processing
-            X_train, X_test, y_train = feature_engineer.create_ctr_features(
+            X_train, X_test = feature_engineer.create_all_features(
                 train_df=train_df,
                 test_df=test_df,
-                target_column=target_col
+                target_col=target_col
             )
             
             logger.info(f"Feature engineering completed - X_train: {X_train.shape}, X_test: {X_test.shape}")
