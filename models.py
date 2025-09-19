@@ -224,8 +224,8 @@ class CTRCalibrator:
                 best_temp = 1.0
                 best_bias = 0.0
                 
-                for temp in np.logspace(-1, 1, 20):
-                    for bias in np.linspace(-2, 2, 20):
+                for temp in np.logspace(-1, 1, 25):
+                    for bias in np.linspace(-2, 2, 25):
                         loss = temperature_loss([temp, bias])
                         if loss < best_loss:
                             best_loss = loss
@@ -433,12 +433,12 @@ class CTRCalibrator:
 class MemoryMonitor:
     """64GB RAM 환경 최적화 메모리 모니터링"""
     
-    def __init__(self, max_memory_gb: float = 50.0):
+    def __init__(self, max_memory_gb: float = 55.0):
         self.monitoring_enabled = PSUTIL_AVAILABLE
         self.max_memory_gb = max_memory_gb
         self.lock = threading.Lock()
         self._last_check_time = 0
-        self._check_interval = 3.0
+        self._check_interval = 2.0
         
         self.warning_threshold = max_memory_gb * 0.70
         self.critical_threshold = max_memory_gb * 0.80
@@ -448,7 +448,7 @@ class MemoryMonitor:
                    f"위험: {self.critical_threshold:.1f}GB, 중단: {self.abort_threshold:.1f}GB")
         
     def get_memory_usage(self) -> float:
-        """현재 메모리 사용량 (GB)"""
+        """메모리 사용량 (GB)"""
         if not self.monitoring_enabled:
             return 2.0
         
@@ -469,13 +469,13 @@ class MemoryMonitor:
     def get_available_memory(self) -> float:
         """사용 가능한 메모리 (GB)"""
         if not self.monitoring_enabled:
-            return 40.0
+            return 45.0
         
         try:
             with self.lock:
                 return psutil.virtual_memory().available / (1024**3)
         except Exception:
-            return 40.0
+            return 45.0
     
     def check_memory_pressure(self) -> bool:
         """메모리 압박 상태 확인"""
@@ -483,7 +483,7 @@ class MemoryMonitor:
             usage = self.get_memory_usage()
             available = self.get_available_memory()
             
-            return usage > self.critical_threshold or available < 12.0
+            return usage > self.critical_threshold or available < 15.0
         except Exception:
             return False
     
@@ -493,11 +493,11 @@ class MemoryMonitor:
             usage = self.get_memory_usage()
             available = self.get_available_memory()
             
-            if usage > self.abort_threshold or available < 5:
+            if usage > self.abort_threshold or available < 8:
                 level = "abort"
-            elif usage > self.critical_threshold or available < 12:
+            elif usage > self.critical_threshold or available < 15:
                 level = "critical"
-            elif usage > self.warning_threshold or available < 20:
+            elif usage > self.warning_threshold or available < 25:
                 level = "warning"
             else:
                 level = "normal"
@@ -513,7 +513,7 @@ class MemoryMonitor:
         except Exception:
             return {
                 'usage_gb': 2.0,
-                'available_gb': 40.0,
+                'available_gb': 45.0,
                 'level': 'normal',
                 'should_cleanup': False,
                 'should_simplify': False,
@@ -521,21 +521,21 @@ class MemoryMonitor:
             }
     
     def force_memory_cleanup(self, intensive: bool = False):
-        """강화된 메모리 정리"""
+        """메모리 정리"""
         try:
             initial_memory = self.get_memory_usage()
             
-            cleanup_rounds = 12 if intensive else 8
-            sleep_time = 0.3 if intensive else 0.2
+            cleanup_rounds = 15 if intensive else 10
+            sleep_time = 0.2 if intensive else 0.1
             
             for i in range(cleanup_rounds):
                 collected = gc.collect()
                 if sleep_time > 0:
                     time.sleep(sleep_time)
                 
-                if i % 4 == 0:
+                if i % 5 == 0:
                     current_memory = self.get_memory_usage()
-                    if initial_memory - current_memory > 3.0:
+                    if initial_memory - current_memory > 5.0:
                         break
             
             if TORCH_AVAILABLE and torch.cuda.is_available():
@@ -579,7 +579,7 @@ class BaseModel(ABC):
         self.feature_names = None
         self.calibrator = None
         self.is_calibrated = False
-        self.prediction_diversity_threshold = 1000
+        self.prediction_diversity_threshold = 1500
         
         self.memory_monitor = MemoryMonitor()
         
@@ -600,7 +600,7 @@ class BaseModel(ABC):
         return (proba >= 0.5).astype(int)
     
     def apply_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, 
-                         method: str = 'auto', cv_folds: int = 3):
+                         method: str = 'auto', cv_folds: int = 5):
         """캘리브레이션 적용"""
         try:
             logger.info(f"{self.name} 모델에 캘리브레이션 적용: {method}")
@@ -664,13 +664,13 @@ class BaseModel(ABC):
             
             if batch_size is None:
                 if memory_status['level'] == 'abort':
-                    batch_size = 1000
+                    batch_size = 2000
                 elif memory_status['level'] == 'critical':
-                    batch_size = 5000
+                    batch_size = 8000
                 elif memory_status['level'] == 'warning':
-                    batch_size = 15000
+                    batch_size = 20000
                 else:
-                    batch_size = 50000
+                    batch_size = 80000
             
             n_samples = len(X)
             predictions = []
@@ -683,7 +683,7 @@ class BaseModel(ABC):
                     batch_pred = predict_function(batch_X)
                     predictions.append(batch_pred)
                     
-                    if (i // batch_size) % 5 == 0:
+                    if (i // batch_size) % 3 == 0:
                         gc.collect()
                     
                     if self.memory_monitor.check_memory_pressure():
@@ -728,7 +728,7 @@ class BaseModel(ABC):
             unique_predictions = len(np.unique(predictions))
             
             if unique_predictions < self.prediction_diversity_threshold:
-                noise_scale = max(predictions.std() * 0.005, 1e-6)
+                noise_scale = max(predictions.std() * 0.003, 1e-6)
                 noise = np.random.normal(0, noise_scale, len(predictions))
                 
                 predictions = predictions + noise
@@ -740,59 +740,60 @@ class BaseModel(ABC):
             logger.warning(f"예측 다양성 향상 실패: {e}")
             return predictions
 
-class Stage1OptimizedLightGBMModel(BaseModel):
-    """1단계 파라미터 최적화 LightGBM 모델"""
+class Stage2LightGBMModel(BaseModel):
+    """2단계 LightGBM 모델"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not LIGHTGBM_AVAILABLE:
             raise ImportError("LightGBM이 설치되지 않았습니다.")
             
-        # 1단계 최적화 파라미터 (로그 분석 기반)
-        stage1_params = {
+        # 2단계 파라미터
+        stage2_params = {
             'objective': 'binary',
             'metric': 'binary_logloss',
             'boosting_type': 'gbdt',
-            'num_leaves': 1023,
-            'learning_rate': 0.015,
-            'feature_fraction': 0.9,
-            'bagging_fraction': 0.8,
-            'bagging_freq': 5,
-            'min_child_samples': 200,
-            'min_child_weight': 10,
-            'lambda_l1': 2.0,
-            'lambda_l2': 2.0,
-            'max_depth': 15,
+            'num_leaves': 2047,
+            'learning_rate': 0.01,
+            'feature_fraction': 0.95,
+            'bagging_fraction': 0.85,
+            'bagging_freq': 3,
+            'min_child_samples': 100,
+            'min_child_weight': 5,
+            'lambda_l1': 1.0,
+            'lambda_l2': 1.0,
+            'max_depth': 18,
             'verbose': -1,
             'random_state': 42,
-            'n_estimators': 4000,
-            'early_stopping_rounds': 300,
-            'scale_pos_weight': 52.0,  # 1:52 불균형 비율 반영
+            'n_estimators': 5000,
+            'early_stopping_rounds': 500,
+            'scale_pos_weight': 52.0,
             'force_row_wise': True,
             'max_bin': 255,
             'num_threads': 12,
-            'device_type': 'cpu'
+            'device_type': 'cpu',
+            'extra_trees': False
         }
         
         if params:
-            stage1_params.update(params)
+            stage2_params.update(params)
         
-        super().__init__("Stage1OptimizedLightGBM", stage1_params)
-        self.prediction_diversity_threshold = 1500
+        super().__init__("Stage2LightGBM", stage2_params)
+        self.prediction_diversity_threshold = 2000
     
     def _simplify_for_memory(self):
         """메모리 부족 시 파라미터 단순화"""
         self.params.update({
-            'num_leaves': 511,
-            'max_depth': 10,
-            'n_estimators': 2000,
-            'min_child_samples': 300,
+            'num_leaves': 1023,
+            'max_depth': 12,
+            'n_estimators': 3000,
+            'min_child_samples': 200,
             'num_threads': 8
         })
         logger.info(f"{self.name}: 메모리 절약을 위해 파라미터 단순화")
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """1단계 최적화 LightGBM 모델 학습"""
+        """2단계 LightGBM 모델 학습"""
         logger.info(f"{self.name} 모델 학습 시작 (데이터: {len(X_train):,})")
         
         def _fit_internal():
@@ -832,12 +833,12 @@ class Stage1OptimizedLightGBMModel(BaseModel):
                 valid_names.append('valid')
             
             callbacks = []
-            early_stopping = self.params.get('early_stopping_rounds', 300)
+            early_stopping = self.params.get('early_stopping_rounds', 500)
             if early_stopping:
                 callbacks.append(lgb.early_stopping(early_stopping, verbose=False))
             
             def memory_callback(env):
-                if env.iteration % 100 == 0:
+                if env.iteration % 200 == 0:
                     if self.memory_monitor.check_memory_pressure():
                         logger.warning("학습 중 메모리 압박 감지")
                         self.memory_monitor.force_memory_cleanup()
@@ -899,33 +900,34 @@ class Stage1OptimizedLightGBMModel(BaseModel):
         
         return raw_pred
 
-class Stage1OptimizedXGBoostModel(BaseModel):
-    """1단계 파라미터 최적화 XGBoost 모델"""
+class Stage2XGBoostModel(BaseModel):
+    """2단계 XGBoost 모델"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
             raise ImportError("XGBoost가 설치되지 않았습니다.")
         
-        # 1단계 최적화 파라미터
-        stage1_params = {
+        # 2단계 파라미터
+        stage2_params = {
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
             'tree_method': 'hist',
-            'max_depth': 8,
-            'learning_rate': 0.015,
-            'subsample': 0.8,
-            'colsample_bytree': 0.9,
-            'colsample_bylevel': 0.8,
-            'min_child_weight': 15,
-            'reg_alpha': 2.0,
-            'reg_lambda': 2.0,
-            'scale_pos_weight': 52.0,  # 1:52 불균형 비율 반영
+            'max_depth': 10,
+            'learning_rate': 0.01,
+            'subsample': 0.85,
+            'colsample_bytree': 0.95,
+            'colsample_bylevel': 0.85,
+            'min_child_weight': 10,
+            'reg_alpha': 1.0,
+            'reg_lambda': 1.0,
+            'scale_pos_weight': 52.0,
             'random_state': 42,
-            'n_estimators': 4000,
-            'early_stopping_rounds': 300,
+            'n_estimators': 5000,
+            'early_stopping_rounds': 500,
             'max_bin': 255,
             'nthread': 12,
-            'grow_policy': 'lossguide'
+            'grow_policy': 'lossguide',
+            'gamma': 0.0
         }
         
         if rtx_4060ti_detected and TORCH_AVAILABLE:
@@ -938,7 +940,7 @@ class Stage1OptimizedXGBoostModel(BaseModel):
                 memory_status = memory_monitor_temp.get_memory_status()
                 
                 if memory_status['level'] not in ['critical', 'abort']:
-                    stage1_params.update({
+                    stage2_params.update({
                         'tree_method': 'gpu_hist',
                         'gpu_id': 0,
                         'predictor': 'gpu_predictor'
@@ -951,17 +953,17 @@ class Stage1OptimizedXGBoostModel(BaseModel):
                 logger.warning(f"GPU 설정 실패, CPU 모드 사용: {e}")
         
         if params:
-            stage1_params.update(params)
+            stage2_params.update(params)
         
-        super().__init__("Stage1OptimizedXGBoost", stage1_params)
-        self.prediction_diversity_threshold = 1500
+        super().__init__("Stage2XGBoost", stage2_params)
+        self.prediction_diversity_threshold = 2000
     
     def _simplify_for_memory(self):
         """메모리 부족 시 파라미터 단순화"""
         self.params.update({
-            'max_depth': 6,
-            'n_estimators': 2000,
-            'min_child_weight': 20,
+            'max_depth': 8,
+            'n_estimators': 3000,
+            'min_child_weight': 15,
             'nthread': 8,
             'tree_method': 'hist',
         })
@@ -971,7 +973,7 @@ class Stage1OptimizedXGBoostModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """1단계 최적화 XGBoost 모델 학습"""
+        """2단계 XGBoost 모델 학습"""
         logger.info(f"{self.name} 모델 학습 시작 (데이터: {len(X_train):,})")
         
         def _fit_internal():
@@ -1008,7 +1010,7 @@ class Stage1OptimizedXGBoostModel(BaseModel):
                 )
                 evals.append((dval, 'valid'))
             
-            early_stopping = self.params.get('early_stopping_rounds', 300)
+            early_stopping = self.params.get('early_stopping_rounds', 500)
             
             self.model = xgb.train(
                 self.params,
@@ -1075,41 +1077,41 @@ class Stage1OptimizedXGBoostModel(BaseModel):
         
         return raw_pred
 
-class Stage1OptimizedLogisticModel(BaseModel):
-    """1단계 최적화 로지스틱 회귀 모델 - 학습 시간 문제 해결"""
+class Stage2LogisticModel(BaseModel):
+    """2단계 로지스틱 회귀 모델"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not SKLEARN_AVAILABLE:
             raise ImportError("scikit-learn이 설치되지 않았습니다.")
             
-        # 1단계 최적화 파라미터 - 학습 시간 단축
-        stage1_params = {
-            'C': 0.1,  # 더 강한 정규화로 수렴 속도 향상
-            'max_iter': 500,  # 2000 -> 500으로 단축
+        # 2단계 파라미터
+        stage2_params = {
+            'C': 0.05,
+            'max_iter': 800,
             'random_state': 42,
             'class_weight': 'balanced',
-            'solver': 'liblinear',  # 대용량 데이터에 최적화
+            'solver': 'liblinear',
             'penalty': 'l2',
-            'tol': 1e-3,  # 1e-4 -> 1e-3으로 완화
+            'tol': 1e-4,
             'fit_intercept': True,
             'warm_start': False,
             'dual': False
         }
         
         if params:
-            stage1_params.update(params)
+            stage2_params.update(params)
         
-        super().__init__("Stage1OptimizedLogisticRegression", stage1_params)
+        super().__init__("Stage2LogisticRegression", stage2_params)
         
         self.model = LogisticRegression(**self.params)
-        self.prediction_diversity_threshold = 1000
+        self.prediction_diversity_threshold = 1500
     
     def _simplify_for_memory(self):
         """메모리 부족 시 파라미터 단순화"""
         self.params.update({
-            'C': 1.0,
-            'max_iter': 200,  # 더욱 단축
-            'tol': 1e-2,      # 더욱 완화
+            'C': 0.1,
+            'max_iter': 400,
+            'tol': 1e-3,
             'solver': 'liblinear'
         })
         self.model = LogisticRegression(**self.params)
@@ -1117,7 +1119,7 @@ class Stage1OptimizedLogisticModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """1단계 최적화 로지스틱 회귀 모델 학습 - 시간 단축"""
+        """2단계 로지스틱 회귀 모델 학습"""
         logger.info(f"{self.name} 모델 학습 시작 (데이터: {len(X_train):,})")
         
         def _fit_internal():
@@ -1125,17 +1127,15 @@ class Stage1OptimizedLogisticModel(BaseModel):
             
             X_train_clean = X_train.fillna(0)
             
-            # 대용량 데이터 처리를 위한 샘플링 (로지스틱 회귀 학습 시간 단축)
-            if len(X_train_clean) > 2000000:
-                logger.info(f"대용량 데이터 감지, 샘플링 적용 ({len(X_train_clean):,} -> 2,000,000)")
+            # 대용량 데이터 처리를 위한 샘플링
+            if len(X_train_clean) > 3000000:
+                logger.info(f"대용량 데이터 감지, 샘플링 적용 ({len(X_train_clean):,} -> 3,000,000)")
                 
-                # 클래스 비율 유지하면서 샘플링
                 pos_indices = np.where(y_train == 1)[0]
                 neg_indices = np.where(y_train == 0)[0]
                 
-                # 양성 클래스는 모두 포함, 음성 클래스는 비율 맞춰 샘플링
                 n_pos = len(pos_indices)
-                n_neg_target = min(2000000 - n_pos, len(neg_indices))
+                n_neg_target = min(3000000 - n_pos, len(neg_indices))
                 
                 selected_neg = np.random.choice(neg_indices, n_neg_target, replace=False)
                 selected_indices = np.concatenate([pos_indices, selected_neg])
@@ -1161,7 +1161,6 @@ class Stage1OptimizedLogisticModel(BaseModel):
                 
             except Exception as e:
                 logger.warning(f"로지스틱 회귀 학습 실패: {e}")
-                # 더 단순한 설정으로 재시도
                 self._simplify_for_memory()
                 self.model.fit(X_train_clean, y_train_sample)
                 self.is_fitted = True
@@ -1208,31 +1207,31 @@ class Stage1OptimizedLogisticModel(BaseModel):
         return raw_pred
 
 class ModelFactory:
-    """1단계 최적화 CTR 모델 팩토리"""
+    """2단계 CTR 모델 팩토리"""
     
     @staticmethod
     def create_model(model_type: str, **kwargs) -> BaseModel:
-        """1단계 최적화 모델 인스턴스 생성"""
+        """2단계 모델 인스턴스 생성"""
         
         try:
             if model_type.lower() == 'lightgbm':
                 if not LIGHTGBM_AVAILABLE:
                     raise ImportError("LightGBM이 설치되지 않았습니다.")
-                return Stage1OptimizedLightGBMModel(kwargs.get('params'))
+                return Stage2LightGBMModel(kwargs.get('params'))
             
             elif model_type.lower() == 'xgboost':
                 if not XGBOOST_AVAILABLE:
                     raise ImportError("XGBoost가 설치되지 않았습니다.")
-                return Stage1OptimizedXGBoostModel(kwargs.get('params'))
+                return Stage2XGBoostModel(kwargs.get('params'))
             
             elif model_type.lower() == 'logistic':
-                return Stage1OptimizedLogisticModel(kwargs.get('params'))
+                return Stage2LogisticModel(kwargs.get('params'))
             
             else:
                 raise ValueError(f"지원하지 않는 모델 타입: {model_type}")
                 
         except Exception as e:
-            logger.error(f"1단계 최적화 모델 생성 실패 ({model_type}): {e}")
+            logger.error(f"2단계 모델 생성 실패 ({model_type}): {e}")
             raise
     
     @staticmethod
@@ -1251,21 +1250,20 @@ class ModelFactory:
         return available
     
     @staticmethod
-    def get_stage1_optimized_models() -> List[str]:
-        """1단계 최적화 모델 우선순위 리스트"""
-        optimized_order = []
+    def get_stage2_models() -> List[str]:
+        """2단계 모델 우선순위 리스트"""
+        stage2_order = []
         
-        # 성능 및 학습 시간 기준 우선순위
         if LIGHTGBM_AVAILABLE:
-            optimized_order.append('lightgbm')
+            stage2_order.append('lightgbm')
         
         if XGBOOST_AVAILABLE:
-            optimized_order.append('xgboost')
+            stage2_order.append('xgboost')
             
         if SKLEARN_AVAILABLE:
-            optimized_order.append('logistic')
+            stage2_order.append('logistic')
         
-        return optimized_order
+        return stage2_order
     
     @staticmethod
     def select_models_by_memory_status() -> List[str]:
@@ -1289,6 +1287,6 @@ class ModelFactory:
             return ModelFactory.get_available_models()
 
 # 기존 코드와의 호환성을 위한 별칭
-LightGBMModel = Stage1OptimizedLightGBMModel
-XGBoostModel = Stage1OptimizedXGBoostModel
-LogisticModel = Stage1OptimizedLogisticModel
+LightGBMModel = Stage2LightGBMModel
+XGBoostModel = Stage2XGBoostModel
+LogisticModel = Stage2LogisticModel
