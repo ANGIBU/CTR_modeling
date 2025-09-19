@@ -532,9 +532,9 @@ class MemoryMonitor:
         self._last_check_time = 0
         self._check_interval = 2.0
         
-        self.warning_threshold = max_memory_gb * 0.65
-        self.critical_threshold = max_memory_gb * 0.75
-        self.abort_threshold = max_memory_gb * 0.85
+        self.warning_threshold = max_memory_gb * 0.70
+        self.critical_threshold = max_memory_gb * 0.80
+        self.abort_threshold = max_memory_gb * 0.90
         
         logger.info(f"메모리 임계값 - 경고: {self.warning_threshold:.1f}GB, "
                    f"위험: {self.critical_threshold:.1f}GB, 중단: {self.abort_threshold:.1f}GB")
@@ -672,6 +672,7 @@ class BaseModel(ABC):
         self.calibrator = None
         self.is_calibrated = False
         self.prediction_diversity_threshold = 2000
+        self.calibration_applied = False  # 캘리브레이션 적용 추적
         
         self.memory_monitor = MemoryMonitor()
         
@@ -693,20 +694,22 @@ class BaseModel(ABC):
     
     def apply_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, 
                          method: str = 'auto', cv_folds: int = 5):
-        """캘리브레이션 적용"""
+        """캘리브레이션 강제 적용"""
         try:
-            logger.info(f"{self.name} 모델에 캘리브레이션 적용: {method}")
+            logger.info(f"{self.name} 모델에 캘리브레이션 강제 적용: {method}")
             
             if not self.is_fitted:
                 logger.warning("모델이 학습되지 않아 캘리브레이션을 건너뜁니다")
                 return
             
+            # 캘리브레이션 강제 실행
             raw_predictions = self.predict_proba_raw(X_val)
             
             self.calibrator = CTRCalibrator()
             self.calibrator.fit(y_val.values, raw_predictions)
             
             self.is_calibrated = True
+            self.calibration_applied = True
             
             calibrated_predictions = self.calibrator.predict(raw_predictions)
             
@@ -714,12 +717,16 @@ class BaseModel(ABC):
             calibrated_ctr = calibrated_predictions.mean()
             actual_ctr = y_val.mean()
             
-            logger.info(f"캘리브레이션 결과 - 원본 CTR: {original_ctr:.4f}, "
-                       f"캘리브레이션 CTR: {calibrated_ctr:.4f}, 실제 CTR: {actual_ctr:.4f}")
+            logger.info(f"캘리브레이션 강제 적용 완료")
+            logger.info(f"  - 원본 CTR: {original_ctr:.4f}")
+            logger.info(f"  - 캘리브레이션 CTR: {calibrated_ctr:.4f}")
+            logger.info(f"  - 실제 CTR: {actual_ctr:.4f}")
+            logger.info(f"  - 최적 방법: {self.calibrator.best_method}")
             
         except Exception as e:
-            logger.error(f"캘리브레이션 적용 실패: {e}")
+            logger.error(f"캘리브레이션 강제 적용 실패: {e}")
             self.is_calibrated = False
+            self.calibration_applied = False
     
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
         """캘리브레이션 이전 원본 예측"""
@@ -832,14 +839,14 @@ class BaseModel(ABC):
             logger.warning(f"예측 다양성 향상 실패: {e}")
             return predictions
 
-class FinalLightGBMModel(BaseModel):
-    """최종 완성 LightGBM 모델"""
+class LightGBMModel(BaseModel):
+    """LightGBM 모델 (캘리브레이션 강제 적용)"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not LIGHTGBM_AVAILABLE:
             raise ImportError("LightGBM이 설치되지 않았습니다.")
             
-        final_params = {
+        default_params = {
             'objective': 'binary',
             'metric': 'binary_logloss',
             'boosting_type': 'gbdt',
@@ -867,9 +874,9 @@ class FinalLightGBMModel(BaseModel):
         }
         
         if params:
-            final_params.update(params)
+            default_params.update(params)
         
-        super().__init__("FinalLightGBM", final_params)
+        super().__init__("LightGBM", default_params)
         self.prediction_diversity_threshold = 2500
     
     def _simplify_for_memory(self):
@@ -886,7 +893,7 @@ class FinalLightGBMModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """최종 완성 LightGBM 모델 학습"""
+        """LightGBM 모델 학습 (캘리브레이션 강제 적용)"""
         logger.info(f"{self.name} 모델 학습 시작 (데이터: {len(X_train):,})")
         
         def _fit_internal():
@@ -948,6 +955,15 @@ class FinalLightGBMModel(BaseModel):
             
             self.is_fitted = True
             
+            # 모든 LightGBM 모델에 캘리브레이션 강제 적용
+            if X_val_clean is not None and y_val is not None:
+                logger.info(f"{self.name}: 캘리브레이션 강제 적용 시작")
+                self.apply_calibration(X_val_clean, y_val, method='auto')
+                if self.is_calibrated:
+                    logger.info(f"{self.name}: 캘리브레이션 강제 적용 완료")
+                else:
+                    logger.warning(f"{self.name}: 캘리브레이션 강제 적용 실패")
+            
             del train_data
             if 'val_data' in locals():
                 del val_data
@@ -988,19 +1004,19 @@ class FinalLightGBMModel(BaseModel):
             try:
                 calibrated_pred = self.calibrator.predict(raw_pred)
                 return np.clip(calibrated_pred, 1e-15, 1 - 1e-15)
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"{self.name} 캘리브레이션 예측 실패: {e}")
         
         return raw_pred
 
-class FinalXGBoostModel(BaseModel):
-    """최종 완성 XGBoost 모델"""
+class XGBoostModel(BaseModel):
+    """XGBoost 모델 (캘리브레이션 강제 적용)"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
             raise ImportError("XGBoost가 설치되지 않았습니다.")
         
-        final_params = {
+        default_params = {
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
             'tree_method': 'hist',
@@ -1033,7 +1049,7 @@ class FinalXGBoostModel(BaseModel):
                 memory_status = memory_monitor_temp.get_memory_status()
                 
                 if memory_status['level'] not in ['critical', 'abort']:
-                    final_params.update({
+                    default_params.update({
                         'tree_method': 'gpu_hist',
                         'gpu_id': 0,
                         'predictor': 'gpu_predictor'
@@ -1046,9 +1062,9 @@ class FinalXGBoostModel(BaseModel):
                 logger.warning(f"GPU 설정 실패, CPU 모드 사용: {e}")
         
         if params:
-            final_params.update(params)
+            default_params.update(params)
         
-        super().__init__("FinalXGBoost", final_params)
+        super().__init__("XGBoost", default_params)
         self.prediction_diversity_threshold = 2500
     
     def _simplify_for_memory(self):
@@ -1068,7 +1084,7 @@ class FinalXGBoostModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """최종 완성 XGBoost 모델 학습"""
+        """XGBoost 모델 학습 (캘리브레이션 강제 적용)"""
         logger.info(f"{self.name} 모델 학습 시작 (데이터: {len(X_train):,})")
         
         def _fit_internal():
@@ -1116,6 +1132,15 @@ class FinalXGBoostModel(BaseModel):
             )
             
             self.is_fitted = True
+            
+            # 모든 XGBoost 모델에 캘리브레이션 강제 적용
+            if X_val_clean is not None and y_val is not None:
+                logger.info(f"{self.name}: 캘리브레이션 강제 적용 시작")
+                self.apply_calibration(X_val_clean, y_val, method='auto')
+                if self.is_calibrated:
+                    logger.info(f"{self.name}: 캘리브레이션 강제 적용 완료")
+                else:
+                    logger.warning(f"{self.name}: 캘리브레이션 강제 적용 실패")
             
             del dtrain
             if dval is not None:
@@ -1167,19 +1192,19 @@ class FinalXGBoostModel(BaseModel):
             try:
                 calibrated_pred = self.calibrator.predict(raw_pred)
                 return np.clip(calibrated_pred, 1e-15, 1 - 1e-15)
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"{self.name} 캘리브레이션 예측 실패: {e}")
         
         return raw_pred
 
-class FinalLogisticModel(BaseModel):
-    """최종 완성 로지스틱 회귀 모델"""
+class LogisticModel(BaseModel):
+    """로지스틱 회귀 모델 (캘리브레이션 강제 적용)"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not SKLEARN_AVAILABLE:
             raise ImportError("scikit-learn이 설치되지 않았습니다.")
             
-        final_params = {
+        default_params = {
             'C': 0.03,
             'max_iter': 1200,
             'random_state': 42,
@@ -1193,9 +1218,9 @@ class FinalLogisticModel(BaseModel):
         }
         
         if params:
-            final_params.update(params)
+            default_params.update(params)
         
-        super().__init__("FinalLogisticRegression", final_params)
+        super().__init__("LogisticRegression", default_params)
         
         self.model = LogisticRegression(**self.params)
         self.prediction_diversity_threshold = 2000
@@ -1213,7 +1238,7 @@ class FinalLogisticModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """최종 완성 로지스틱 회귀 모델 학습"""
+        """로지스틱 회귀 모델 학습 (캘리브레이션 강제 적용)"""
         logger.info(f"{self.name} 모델 학습 시작 (데이터: {len(X_train):,})")
         
         def _fit_internal():
@@ -1257,6 +1282,15 @@ class FinalLogisticModel(BaseModel):
                 self.model.fit(X_train_clean, y_train_sample)
                 self.is_fitted = True
             
+            # 모든 로지스틱 회귀 모델에 캘리브레이션 강제 적용
+            if X_val is not None and y_val is not None:
+                logger.info(f"{self.name}: 캘리브레이션 강제 적용 시작")
+                self.apply_calibration(X_val, y_val, method='auto')
+                if self.is_calibrated:
+                    logger.info(f"{self.name}: 캘리브레이션 강제 적용 완료")
+                else:
+                    logger.warning(f"{self.name}: 캘리브레이션 강제 적용 실패")
+            
             del X_train_clean
             
             return self
@@ -1293,37 +1327,42 @@ class FinalLogisticModel(BaseModel):
             try:
                 calibrated_pred = self.calibrator.predict(raw_pred)
                 return np.clip(calibrated_pred, 1e-15, 1 - 1e-15)
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"{self.name} 캘리브레이션 예측 실패: {e}")
         
         return raw_pred
 
 class ModelFactory:
-    """최종 완성 CTR 모델 팩토리"""
+    """CTR 모델 팩토리 (캘리브레이션 강제 적용)"""
     
     @staticmethod
     def create_model(model_type: str, **kwargs) -> BaseModel:
-        """최종 완성 모델 인스턴스 생성"""
+        """모델 인스턴스 생성 (캘리브레이션 강제 적용)"""
         
         try:
+            logger.info(f"모델 생성: {model_type} (캘리브레이션 강제 적용 설정)")
+            
             if model_type.lower() == 'lightgbm':
                 if not LIGHTGBM_AVAILABLE:
                     raise ImportError("LightGBM이 설치되지 않았습니다.")
-                return FinalLightGBMModel(kwargs.get('params'))
-            
+                model = LightGBMModel(kwargs.get('params'))
+                
             elif model_type.lower() == 'xgboost':
                 if not XGBOOST_AVAILABLE:
                     raise ImportError("XGBoost가 설치되지 않았습니다.")
-                return FinalXGBoostModel(kwargs.get('params'))
-            
+                model = XGBoostModel(kwargs.get('params'))
+                
             elif model_type.lower() == 'logistic':
-                return FinalLogisticModel(kwargs.get('params'))
-            
+                model = LogisticModel(kwargs.get('params'))
+                
             else:
                 raise ValueError(f"지원하지 않는 모델 타입: {model_type}")
+            
+            logger.info(f"{model_type} 모델 생성 완료 - 캘리브레이션 강제 적용 보장")
+            return model
                 
         except Exception as e:
-            logger.error(f"최종 완성 모델 생성 실패 ({model_type}): {e}")
+            logger.error(f"모델 생성 실패 ({model_type}): {e}")
             raise
     
     @staticmethod
@@ -1338,24 +1377,24 @@ class ModelFactory:
         if XGBOOST_AVAILABLE:
             available.append('xgboost')
         
-        logger.info(f"사용 가능한 모델: {available}")
+        logger.info(f"사용 가능한 모델: {available} (모든 모델에 캘리브레이션 강제 적용)")
         return available
     
     @staticmethod
-    def get_final_models() -> List[str]:
-        """최종 완성 모델 우선순위 리스트"""
-        final_order = []
+    def get_model_priority() -> List[str]:
+        """모델 우선순위 리스트"""
+        priority_order = []
         
         if LIGHTGBM_AVAILABLE:
-            final_order.append('lightgbm')
+            priority_order.append('lightgbm')
         
         if XGBOOST_AVAILABLE:
-            final_order.append('xgboost')
+            priority_order.append('xgboost')
             
         if SKLEARN_AVAILABLE:
-            final_order.append('logistic')
+            priority_order.append('logistic')
         
-        return final_order
+        return priority_order
     
     @staticmethod
     def select_models_by_memory_status() -> List[str]:
@@ -1378,6 +1417,6 @@ class ModelFactory:
         else:
             return ModelFactory.get_available_models()
 
-LightGBMModel = FinalLightGBMModel
-XGBoostModel = FinalXGBoostModel
-LogisticModel = FinalLogisticModel
+FinalLightGBMModel = LightGBMModel
+FinalXGBoostModel = XGBoostModel  
+FinalLogisticModel = LogisticModel

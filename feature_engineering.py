@@ -40,15 +40,16 @@ logger = get_safe_logger(__name__)
 class MemoryMonitor:
     """메모리 모니터링"""
     
-    def __init__(self, max_memory_gb: float = 50.0):
+    def __init__(self, max_memory_gb: float = 60.0):
         self.monitoring_enabled = PSUTIL_AVAILABLE
         self.lock = threading.Lock()
         self._last_check_time = 0
         self._check_interval = 3.0
         self.max_memory_gb = max_memory_gb
         
-        self.warning_threshold = max_memory_gb * 0.75
-        self.critical_threshold = max_memory_gb * 0.85
+        # 64GB 환경에 최적화된 임계값
+        self.warning_threshold = max_memory_gb * 0.80
+        self.critical_threshold = max_memory_gb * 0.90
         self.abort_threshold = max_memory_gb * 0.95
     
     def get_memory_usage(self) -> float:
@@ -73,13 +74,13 @@ class MemoryMonitor:
     def get_available_memory(self) -> float:
         """사용 가능 메모리 (GB)"""
         if not self.monitoring_enabled:
-            return 35.0
+            return 45.0
         
         try:
             with self.lock:
                 return psutil.virtual_memory().available / (1024**3)
         except Exception:
-            return 35.0
+            return 45.0
     
     def check_memory_pressure(self) -> bool:
         """메모리 압박 확인"""
@@ -87,7 +88,8 @@ class MemoryMonitor:
             usage = self.get_memory_usage()
             available = self.get_available_memory()
             
-            return usage > self.critical_threshold or available < 10.0
+            # 64GB 환경에서 더 관대한 기준
+            return usage > self.critical_threshold or available < 15.0
         except Exception:
             return False
     
@@ -97,11 +99,11 @@ class MemoryMonitor:
             usage = self.get_memory_usage()
             available = self.get_available_memory()
             
-            if usage > self.abort_threshold or available < 5:
+            if usage > self.abort_threshold or available < 8:
                 level = "abort"
-            elif usage > self.critical_threshold or available < 10:
+            elif usage > self.critical_threshold or available < 15:
                 level = "critical"
-            elif usage > self.warning_threshold or available < 15:
+            elif usage > self.warning_threshold or available < 25:
                 level = "warning"
             else:
                 level = "normal"
@@ -111,12 +113,12 @@ class MemoryMonitor:
                 'available_gb': available,
                 'level': level,
                 'should_cleanup': level in ['warning', 'critical', 'abort'],
-                'should_simplify': level in ['critical', 'abort']
+                'should_simplify': level in ['abort']  # 64GB 환경에서 완화
             }
         except Exception:
             return {
                 'usage_gb': 2.0,
-                'available_gb': 35.0,
+                'available_gb': 45.0,
                 'level': 'normal',
                 'should_cleanup': False,
                 'should_simplify': False
@@ -125,7 +127,7 @@ class MemoryMonitor:
     def force_memory_cleanup(self):
         """메모리 정리"""
         try:
-            for _ in range(10):
+            for _ in range(15):
                 gc.collect()
                 time.sleep(0.1)
             
@@ -156,6 +158,7 @@ class CTRFeatureEngineer:
     def __init__(self, config: Config = Config):
         self.config = config
         self.memory_monitor = MemoryMonitor()
+        self.memory_efficient_mode = False  # 64GB 환경에서 기본 비활성화
         
         # 피처 엔지니어링 상태
         self.target_encoders = {}
@@ -170,7 +173,7 @@ class CTRFeatureEngineer:
         self.final_feature_columns = []
         self.original_feature_order = []
         
-        # 강화된 피처 엔지니어링
+        # 피처 생성 카운터
         self.interaction_features = []
         self.target_encoding_features = []
         self.statistical_features = []
@@ -189,12 +192,18 @@ class CTRFeatureEngineer:
         
         logger.info("CTR 피처 엔지니어 초기화 완료")
     
+    def set_memory_efficient_mode(self, enabled: bool):
+        """메모리 효율 모드 설정"""
+        self.memory_efficient_mode = enabled
+        mode_text = "활성화" if enabled else "비활성화"
+        logger.info(f"메모리 효율 모드 {mode_text}")
+    
     def create_all_features(self, 
                           train_df: pd.DataFrame, 
                           test_df: pd.DataFrame, 
                           target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """2단계 피처 엔지니어링 파이프라인"""
-        logger.info("=== 2단계 피처 엔지니어링 시작 ===")
+        """전체 피처 엔지니어링 파이프라인"""
+        logger.info("=== 피처 엔지니어링 시작 ===")
         
         try:
             self._initialize_processing(train_df, test_df, target_col)
@@ -211,16 +220,16 @@ class CTRFeatureEngineer:
             # 4. 기본 피처 정리
             X_train, X_test = self._clean_basic_features(X_train, X_test)
             
-            # 5. 교차 피처 생성
+            # 5. 교차 피처 생성 (64GB 환경에서 적극적 생성)
             X_train, X_test = self._create_interaction_features(X_train, X_test, y_train)
             
-            # 6. 타겟 인코딩
+            # 6. 타겟 인코딩 (64GB 환경에서 더 많은 피처 생성)
             X_train, X_test = self._create_target_encoding_features(X_train, X_test, y_train)
             
             # 7. 시간 기반 피처
             X_train, X_test = self._create_temporal_features(X_train, X_test)
             
-            # 8. 통계 피처
+            # 8. 통계 피처 (64GB 환경에서 모든 피처 생성)
             X_train, X_test = self._create_statistical_features(X_train, X_test)
             
             # 9. 빈도 기반 피처
@@ -237,7 +246,7 @@ class CTRFeatureEngineer:
             
             self._finalize_processing(X_train, X_test)
             
-            logger.info(f"=== 2단계 피처 엔지니어링 완료: {X_train.shape} ===")
+            logger.info(f"=== 피처 엔지니어링 완료: {X_train.shape} ===")
             
             return X_train, X_test
             
@@ -345,7 +354,7 @@ class CTRFeatureEngineer:
             common_columns = list(set(X_train.columns) & set(X_test.columns))
             processed_count = 0
             
-            batch_size = 15
+            batch_size = 20  # 64GB 환경에서 더 큰 배치
             
             for i in range(0, len(common_columns), batch_size):
                 batch_cols = common_columns[i:i + batch_size]
@@ -393,7 +402,7 @@ class CTRFeatureEngineer:
                         except Exception:
                             pass
                 
-                if i % (batch_size * 2) == 0:
+                if i % (batch_size * 3) == 0:
                     self.memory_monitor.force_memory_cleanup()
             
             logger.info(f"데이터 타입 통일 완료: {processed_count}/{len(common_columns)}개 컬럼")
@@ -457,7 +466,7 @@ class CTRFeatureEngineer:
         try:
             cols_to_remove = []
             
-            batch_size = 25
+            batch_size = 30  # 64GB 환경에서 더 큰 배치
             for i in range(0, len(X_train.columns), batch_size):
                 batch_cols = X_train.columns[i:i + batch_size]
                 
@@ -490,14 +499,15 @@ class CTRFeatureEngineer:
         
         try:
             memory_status = self.memory_monitor.get_memory_status()
-            max_interactions = 8 if memory_status['should_cleanup'] else 15
+            # 64GB 환경에서 더 많은 교차 피처 생성
+            max_interactions = 20 if not memory_status['should_simplify'] else 12
             
             # 중요한 피처들 식별
             important_features = []
             
             # feat_으로 시작하는 피처들 우선
             for prefix in ['feat_e', 'feat_d', 'feat_c', 'feat_b']:
-                prefix_features = [col for col in X_train.columns if col.startswith(prefix)][:3]
+                prefix_features = [col for col in X_train.columns if col.startswith(prefix)][:4]
                 important_features.extend(prefix_features)
             
             # 범주형 피처들
@@ -505,11 +515,11 @@ class CTRFeatureEngineer:
             for col in X_train.columns:
                 if col not in important_features and X_train[col].nunique() < 100:
                     categorical_features.append(col)
-                    if len(categorical_features) >= 3:
+                    if len(categorical_features) >= 4:
                         break
             
-            important_features.extend(categorical_features[:3])
-            important_features = important_features[:8]
+            important_features.extend(categorical_features[:4])
+            important_features = important_features[:12]
             
             interaction_count = 0
             for i, feat1 in enumerate(important_features):
@@ -534,7 +544,7 @@ class CTRFeatureEngineer:
                     except Exception as e:
                         logger.warning(f"교차 피처 {feat1} x {feat2} 생성 실패: {e}")
                     
-                    if interaction_count % 3 == 0:
+                    if interaction_count % 5 == 0:
                         self.memory_monitor.force_memory_cleanup()
             
             logger.info(f"교차 피처 {len(self.interaction_features)}개 생성")
@@ -551,13 +561,14 @@ class CTRFeatureEngineer:
         
         try:
             memory_status = self.memory_monitor.get_memory_status()
-            max_target_features = 5 if memory_status['should_cleanup'] else 10
+            # 64GB 환경에서 더 많은 타겟 인코딩 피처 생성
+            max_target_features = 15 if not memory_status['should_simplify'] else 8
             
             # 범주형 피처들 선택
             categorical_candidates = []
             for col in X_train.columns:
                 unique_count = X_train[col].nunique()
-                if 2 <= unique_count <= 500:  # 적절한 카디널리티
+                if 2 <= unique_count <= 500:
                     categorical_candidates.append(col)
             
             categorical_candidates = categorical_candidates[:max_target_features]
@@ -572,7 +583,7 @@ class CTRFeatureEngineer:
                     group_stats['count'] = X_train[col].value_counts()
                     group_stats['mean'] = X_train.groupby(col)[y_train.name if hasattr(y_train, 'name') else 0].agg(lambda x: y_train.iloc[x.index].mean())
                     
-                    # 베이지안 평활화 (alpha=100)
+                    # 베이지안 평활화
                     alpha = 100
                     group_stats['target_encoded'] = (group_stats['mean'] * group_stats['count'] + target_mean * alpha) / (group_stats['count'] + alpha)
                     
@@ -590,7 +601,7 @@ class CTRFeatureEngineer:
                 except Exception as e:
                     logger.warning(f"타겟 인코딩 {col} 실패: {e}")
                 
-                if len(self.target_encoding_features) % 3 == 0:
+                if len(self.target_encoding_features) % 5 == 0:
                     self.memory_monitor.force_memory_cleanup()
             
             logger.info(f"타겟 인코딩 피처 {len(self.target_encoding_features)}개 생성")
@@ -624,7 +635,22 @@ class CTRFeatureEngineer:
             X_train['time_cos'] = np.cos(2 * np.pi * X_train['time_index']).astype('float32')
             X_test['time_cos'] = np.cos(2 * np.pi * X_test['time_index']).astype('float32')
             
-            temporal_features = ['time_index', 'time_quartile', 'time_decile', 'time_sin', 'time_cos']
+            # 64GB 환경에서 추가 시간 피처
+            memory_status = self.memory_monitor.get_memory_status()
+            if not memory_status['should_simplify']:
+                # 시간 구간별 상대적 위치
+                X_train['time_relative_pos'] = ((X_train.index % 1000) / 1000).astype('float32')
+                X_test['time_relative_pos'] = ((X_test.index % 1000) / 1000).astype('float32')
+                
+                # 시간 기반 순환 피처
+                X_train['time_cycle'] = (X_train.index % 5000 / 5000).astype('float32')
+                X_test['time_cycle'] = (X_test.index % 5000 / 5000).astype('float32')
+                
+                temporal_features = ['time_index', 'time_quartile', 'time_decile', 'time_sin', 'time_cos', 
+                                   'time_relative_pos', 'time_cycle']
+            else:
+                temporal_features = ['time_index', 'time_quartile', 'time_decile', 'time_sin', 'time_cos']
+            
             self.temporal_features.extend(temporal_features)
             self.generated_features.extend(temporal_features)
             
@@ -644,10 +670,10 @@ class CTRFeatureEngineer:
             
             # 피처 그룹별 통계
             feature_groups = {
-                'feat_e': [col for col in X_train.columns if col.startswith('feat_e')][:5],
-                'feat_d': [col for col in X_train.columns if col.startswith('feat_d')][:5],
-                'feat_c': [col for col in X_train.columns if col.startswith('feat_c')][:5],
-                'feat_b': [col for col in X_train.columns if col.startswith('feat_b')][:5]
+                'feat_e': [col for col in X_train.columns if col.startswith('feat_e')][:6],
+                'feat_d': [col for col in X_train.columns if col.startswith('feat_d')][:6],
+                'feat_c': [col for col in X_train.columns if col.startswith('feat_c')][:6],
+                'feat_b': [col for col in X_train.columns if col.startswith('feat_b')][:6]
             }
             
             for group_name, group_cols in feature_groups.items():
@@ -663,7 +689,8 @@ class CTRFeatureEngineer:
                         X_train[mean_feature] = X_train[group_cols].mean(axis=1).astype('float32')
                         X_test[mean_feature] = X_test[group_cols].mean(axis=1).astype('float32')
                         
-                        if not memory_status['should_cleanup']:
+                        # 64GB 환경에서 추가 통계 피처
+                        if not memory_status['should_simplify']:
                             # 그룹 표준편차
                             std_feature = f'{group_name}_std'
                             X_train[std_feature] = X_train[group_cols].std(axis=1).fillna(0).astype('float32')
@@ -674,7 +701,12 @@ class CTRFeatureEngineer:
                             X_train[max_feature] = X_train[group_cols].max(axis=1).astype('float32')
                             X_test[max_feature] = X_test[group_cols].max(axis=1).astype('float32')
                             
-                            group_features = [sum_feature, mean_feature, std_feature, max_feature]
+                            # 그룹 최소값
+                            min_feature = f'{group_name}_min'
+                            X_train[min_feature] = X_train[group_cols].min(axis=1).astype('float32')
+                            X_test[min_feature] = X_test[group_cols].min(axis=1).astype('float32')
+                            
+                            group_features = [sum_feature, mean_feature, std_feature, max_feature, min_feature]
                         else:
                             group_features = [sum_feature, mean_feature]
                         
@@ -684,7 +716,7 @@ class CTRFeatureEngineer:
                     except Exception as e:
                         logger.warning(f"{group_name} 그룹 통계 생성 실패: {e}")
                 
-                if len(self.statistical_features) % 4 == 0:
+                if len(self.statistical_features) % 5 == 0:
                     self.memory_monitor.force_memory_cleanup()
             
             logger.info(f"통계 피처 {len(self.statistical_features)}개 생성")
@@ -700,7 +732,8 @@ class CTRFeatureEngineer:
         
         try:
             memory_status = self.memory_monitor.get_memory_status()
-            max_freq_features = 5 if memory_status['should_cleanup'] else 8
+            # 64GB 환경에서 더 많은 빈도 피처 생성
+            max_freq_features = 12 if not memory_status['should_simplify'] else 6
             
             # 빈도 인코딩할 피처들 선택
             freq_candidates = []
@@ -722,7 +755,7 @@ class CTRFeatureEngineer:
                     X_train[freq_feature] = X_train[col].map(freq_map).fillna(0).astype('int32')
                     X_test[freq_feature] = X_test[col].map(freq_map).fillna(0).astype('int32')
                     
-                    # 희귀도 피처 (빈도의 역수)
+                    # 희귀도 피처
                     rarity_feature = f'{col}_rarity'
                     max_freq = max(freq_map.values())
                     rarity_map = {k: max_freq / v for k, v in freq_map.items()}
@@ -737,7 +770,7 @@ class CTRFeatureEngineer:
                 except Exception as e:
                     logger.warning(f"빈도 피처 {col} 생성 실패: {e}")
                 
-                if len(self.frequency_features) % 4 == 0:
+                if len(self.frequency_features) % 6 == 0:
                     self.memory_monitor.force_memory_cleanup()
             
             logger.info(f"빈도 기반 피처 {len(self.frequency_features)}개 생성")
@@ -766,7 +799,8 @@ class CTRFeatureEngineer:
         
         try:
             memory_status = self.memory_monitor.get_memory_status()
-            max_categorical = 8 if memory_status['should_cleanup'] else 12
+            # 64GB 환경에서 더 많은 범주형 피처 처리
+            max_categorical = 15 if not memory_status['should_simplify'] else 8
             
             for col in current_categorical_cols[:max_categorical]:
                 try:
@@ -775,7 +809,7 @@ class CTRFeatureEngineer:
                     
                     # 고카디널리티 처리
                     unique_count = len(train_values.unique())
-                    max_categories = 20 if memory_status['should_cleanup'] else 40
+                    max_categories = 50 if not memory_status['should_simplify'] else 30
                     
                     if unique_count > max_categories:
                         top_categories = train_values.value_counts().head(max_categories).index
@@ -808,7 +842,7 @@ class CTRFeatureEngineer:
                 except Exception as e:
                     logger.warning(f"범주형 피처 {col} 처리 실패: {e}")
                 
-                if len(self.generated_features) % 4 == 0:
+                if len(self.generated_features) % 5 == 0:
                     self.memory_monitor.force_memory_cleanup()
             
             # 원본 범주형 컬럼 제거
@@ -842,11 +876,12 @@ class CTRFeatureEngineer:
             
             memory_status = self.memory_monitor.get_memory_status()
             feature_count = 0
-            max_features = 5 if memory_status['should_cleanup'] else 12
+            # 64GB 환경에서 더 많은 수치형 피처 변환
+            max_features = 18 if not memory_status['should_simplify'] else 8
             
-            for col in current_numeric_cols[:10]:
+            for col in current_numeric_cols[:15]:
                 try:
-                    if memory_status['should_cleanup'] and feature_count >= 3:
+                    if feature_count >= max_features:
                         break
                     
                     # 로그 변환
@@ -864,7 +899,7 @@ class CTRFeatureEngineer:
                             logger.warning(f"{col} 로그 변환 실패: {e}")
                     
                     # 제곱근 변환
-                    if not memory_status['should_cleanup'] and feature_count < max_features:
+                    if feature_count < max_features:
                         train_non_negative = (X_train[col] >= 0) & X_train[col].notna()
                         test_non_negative = (X_test[col] >= 0) & X_test[col].notna()
                         
@@ -901,9 +936,9 @@ class CTRFeatureEngineer:
             X_train = X_train[common_columns]
             X_test = X_test[common_columns]
             
-            # 컬럼 수 제한
+            # 컬럼 수 제한 (64GB 환경에서 더 많은 컬럼 허용)
             memory_status = self.memory_monitor.get_memory_status()
-            max_cols = 150 if memory_status['should_cleanup'] else 300
+            max_cols = 250 if not memory_status['should_simplify'] else 150
             
             if len(common_columns) > max_cols:
                 logger.warning(f"컬럼 수가 많아 {max_cols}개로 제한")
@@ -995,8 +1030,8 @@ class CTRFeatureEngineer:
     
     def _create_basic_features_only(self, train_df: pd.DataFrame, test_df: pd.DataFrame,
                                   target_col: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """최소한의 기본 피처만 생성"""
-        logger.warning("최소한의 기본 피처만 생성")
+        """기본 피처만 생성"""
+        logger.warning("기본 피처만 생성")
         
         try:
             # 수치형 컬럼만 선택
@@ -1006,11 +1041,11 @@ class CTRFeatureEngineer:
                                                                 'uint8', 'uint16', 'uint32', 'uint64',
                                                                 'float16', 'float32', 'float64']:
                     numeric_cols.append(col)
-                    if len(numeric_cols) >= 50:
+                    if len(numeric_cols) >= 100:
                         break
             
             if not numeric_cols:
-                numeric_cols = [col for col in train_df.columns if col != target_col][:50]
+                numeric_cols = [col for col in train_df.columns if col != target_col][:100]
             
             X_train = train_df[numeric_cols].copy()
             X_test = test_df[numeric_cols].copy() if set(numeric_cols).issubset(test_df.columns) else test_df.iloc[:, :len(numeric_cols)].copy()
