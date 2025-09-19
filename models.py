@@ -141,6 +141,8 @@ class CTRCalibrator:
         self.bias_correction = 0.0
         self.multiplicative_correction = 1.0
         self.calibration_scores = {}
+        self.beta_calibrator = None
+        self.spline_calibrator = None
         
     def fit_platt_scaling(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
         """Platt Scaling 캘리브레이션 학습"""
@@ -204,17 +206,17 @@ class CTRCalibrator:
                 calibrated_probs = np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
                 
                 log_loss_val = -np.mean(y_true * np.log(calibrated_probs) + (1 - y_true) * np.log(1 - calibrated_probs))
+                ctr_bias = abs(calibrated_probs.mean() - y_true.mean()) * 1200
+                diversity_loss = -calibrated_probs.std() * 10
                 
-                ctr_bias = abs(calibrated_probs.mean() - y_true.mean()) * 1000
-                
-                return log_loss_val + ctr_bias
+                return log_loss_val + ctr_bias + diversity_loss
             
             if SCIPY_AVAILABLE:
                 from scipy.optimize import minimize
                 result = minimize(
                     temperature_loss, 
                     x0=[1.0, 0.0], 
-                    bounds=[(0.1, 10.0), (-2.0, 2.0)],
+                    bounds=[(0.2, 12.0), (-2.5, 2.5)],
                     method='L-BFGS-B'
                 )
                 self.temperature = result.x[0]
@@ -224,8 +226,8 @@ class CTRCalibrator:
                 best_temp = 1.0
                 best_bias = 0.0
                 
-                for temp in np.logspace(-1, 1, 25):
-                    for bias in np.linspace(-2, 2, 25):
+                for temp in np.logspace(-0.7, 1.1, 30):
+                    for bias in np.linspace(-2.5, 2.5, 30):
                         loss = temperature_loss([temp, bias])
                         if loss < best_loss:
                             best_loss = loss
@@ -245,6 +247,45 @@ class CTRCalibrator:
             logger.error(f"Temperature Scaling 학습 실패: {e}")
             self.temperature = 1.0
             self.temperature_bias = 0.0
+    
+    def fit_beta_calibration(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
+        """Beta 캘리브레이션 학습"""
+        try:
+            logger.info("Beta 캘리브레이션 학습 시작")
+            
+            def beta_loss(params):
+                a, b = params
+                if a <= 0 or b <= 0:
+                    return float('inf')
+                
+                from scipy.stats import beta
+                calibrated_probs = beta.cdf(y_pred_proba, a, b)
+                calibrated_probs = np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
+                
+                log_loss_val = -np.mean(y_true * np.log(calibrated_probs) + (1 - y_true) * np.log(1 - calibrated_probs))
+                ctr_bias = abs(calibrated_probs.mean() - y_true.mean()) * 1000
+                
+                return log_loss_val + ctr_bias
+            
+            if SCIPY_AVAILABLE:
+                from scipy.optimize import minimize
+                result = minimize(
+                    beta_loss,
+                    x0=[1.0, 1.0],
+                    bounds=[(0.1, 10.0), (0.1, 10.0)],
+                    method='L-BFGS-B'
+                )
+                
+                self.beta_params = result.x
+                
+                calibrated_probs = self.apply_beta_calibration(y_pred_proba)
+                self.calibration_scores['beta_calibration'] = self._evaluate_calibration(y_true, calibrated_probs)
+                
+                logger.info(f"Beta 캘리브레이션 학습 완료 - 점수: {self.calibration_scores['beta_calibration']:.4f}")
+            
+        except Exception as e:
+            logger.warning(f"Beta 캘리브레이션 학습 실패: {e}")
+            self.beta_params = None
     
     def fit_bias_correction(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
         """편향 보정 학습"""
@@ -271,7 +312,7 @@ class CTRCalibrator:
         logger.info("CTR 캘리브레이션 학습 시작")
         
         if methods is None:
-            methods = ['platt_scaling', 'isotonic_regression', 'temperature_scaling', 'bias_correction']
+            methods = ['platt_scaling', 'isotonic_regression', 'temperature_scaling', 'beta_calibration', 'bias_correction']
         
         y_true = np.asarray(y_true)
         y_pred_proba = np.asarray(y_pred_proba)
@@ -290,6 +331,9 @@ class CTRCalibrator:
         
         if 'temperature_scaling' in methods:
             self.fit_temperature_scaling(y_true, y_pred_proba)
+        
+        if 'beta_calibration' in methods:
+            self.fit_beta_calibration(y_true, y_pred_proba)
         
         if 'bias_correction' in methods:
             self.fit_bias_correction(y_true, y_pred_proba)
@@ -344,6 +388,20 @@ class CTRCalibrator:
             logger.warning(f"Temperature Scaling 적용 실패: {e}")
             return y_pred_proba
     
+    def apply_beta_calibration(self, y_pred_proba: np.ndarray) -> np.ndarray:
+        """Beta 캘리브레이션 적용"""
+        if not hasattr(self, 'beta_params') or self.beta_params is None:
+            return y_pred_proba
+        
+        try:
+            from scipy.stats import beta
+            a, b = self.beta_params
+            calibrated_probs = beta.cdf(y_pred_proba, a, b)
+            return np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
+        except Exception as e:
+            logger.warning(f"Beta 캘리브레이션 적용 실패: {e}")
+            return y_pred_proba
+    
     def apply_bias_correction(self, y_pred_proba: np.ndarray) -> np.ndarray:
         """편향 보정 적용"""
         try:
@@ -370,6 +428,8 @@ class CTRCalibrator:
             return self.apply_isotonic_regression(y_pred_proba)
         elif method == 'temperature_scaling':
             return self.apply_temperature_scaling(y_pred_proba)
+        elif method == 'beta_calibration':
+            return self.apply_beta_calibration(y_pred_proba)
         elif method == 'bias_correction':
             return self.apply_bias_correction(y_pred_proba)
         else:
@@ -385,7 +445,9 @@ class CTRCalibrator:
             predicted_ctr = y_pred_proba.mean()
             ctr_alignment = 1.0 - abs(actual_ctr - predicted_ctr) / max(actual_ctr, 0.001)
             
-            calibration_score = 0.6 * (1.0 - ece) + 0.4 * ctr_alignment
+            reliability = self._calculate_reliability(y_true, y_pred_proba)
+            
+            calibration_score = 0.4 * (1.0 - ece) + 0.4 * ctr_alignment + 0.2 * reliability
             
             return max(0.0, calibration_score)
             
@@ -393,7 +455,7 @@ class CTRCalibrator:
             logger.warning(f"캘리브레이션 평가 실패: {e}")
             return 0.0
     
-    def _calculate_ece(self, y_true: np.ndarray, y_pred_proba: np.ndarray, n_bins: int = 10) -> float:
+    def _calculate_ece(self, y_true: np.ndarray, y_pred_proba: np.ndarray, n_bins: int = 15) -> float:
         """Expected Calibration Error 계산"""
         try:
             bin_boundaries = np.linspace(0, 1, n_bins + 1)
@@ -417,6 +479,35 @@ class CTRCalibrator:
             logger.warning(f"ECE 계산 실패: {e}")
             return 1.0
     
+    def _calculate_reliability(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
+        """신뢰도 계산"""
+        try:
+            sorted_indices = np.argsort(y_pred_proba)
+            sorted_true = y_true[sorted_indices]
+            sorted_pred = y_pred_proba[sorted_indices]
+            
+            bin_size = len(y_true) // 10
+            reliability_scores = []
+            
+            for i in range(0, len(y_true), bin_size):
+                end_idx = min(i + bin_size, len(y_true))
+                bin_true = sorted_true[i:end_idx]
+                bin_pred = sorted_pred[i:end_idx]
+                
+                if len(bin_true) > 0:
+                    actual_positive_rate = bin_true.mean()
+                    predicted_positive_rate = bin_pred.mean()
+                    
+                    if predicted_positive_rate > 0:
+                        reliability = 1 - abs(actual_positive_rate - predicted_positive_rate) / predicted_positive_rate
+                        reliability_scores.append(max(0, reliability))
+            
+            return np.mean(reliability_scores) if reliability_scores else 0.0
+            
+        except Exception as e:
+            logger.warning(f"신뢰도 계산 실패: {e}")
+            return 0.0
+    
     def get_calibration_summary(self) -> Dict[str, Any]:
         """캘리브레이션 요약 정보"""
         return {
@@ -427,11 +518,12 @@ class CTRCalibrator:
             'temperature_bias': self.temperature_bias,
             'bias_correction': self.bias_correction,
             'multiplicative_correction': self.multiplicative_correction,
-            'available_methods': list(self.calibration_scores.keys())
+            'available_methods': list(self.calibration_scores.keys()),
+            'beta_params': getattr(self, 'beta_params', None)
         }
 
 class MemoryMonitor:
-    """64GB RAM 환경 최적화 메모리 모니터링"""
+    """64GB RAM 환경 메모리 모니터링"""
     
     def __init__(self, max_memory_gb: float = 55.0):
         self.monitoring_enabled = PSUTIL_AVAILABLE
@@ -440,9 +532,9 @@ class MemoryMonitor:
         self._last_check_time = 0
         self._check_interval = 2.0
         
-        self.warning_threshold = max_memory_gb * 0.70
-        self.critical_threshold = max_memory_gb * 0.80
-        self.abort_threshold = max_memory_gb * 0.90
+        self.warning_threshold = max_memory_gb * 0.65
+        self.critical_threshold = max_memory_gb * 0.75
+        self.abort_threshold = max_memory_gb * 0.85
         
         logger.info(f"메모리 임계값 - 경고: {self.warning_threshold:.1f}GB, "
                    f"위험: {self.critical_threshold:.1f}GB, 중단: {self.abort_threshold:.1f}GB")
@@ -525,7 +617,7 @@ class MemoryMonitor:
         try:
             initial_memory = self.get_memory_usage()
             
-            cleanup_rounds = 15 if intensive else 10
+            cleanup_rounds = 20 if intensive else 15
             sleep_time = 0.2 if intensive else 0.1
             
             for i in range(cleanup_rounds):
@@ -579,7 +671,7 @@ class BaseModel(ABC):
         self.feature_names = None
         self.calibrator = None
         self.is_calibrated = False
-        self.prediction_diversity_threshold = 1500
+        self.prediction_diversity_threshold = 2000
         
         self.memory_monitor = MemoryMonitor()
         
@@ -664,13 +756,13 @@ class BaseModel(ABC):
             
             if batch_size is None:
                 if memory_status['level'] == 'abort':
-                    batch_size = 2000
+                    batch_size = 3000
                 elif memory_status['level'] == 'critical':
-                    batch_size = 8000
+                    batch_size = 10000
                 elif memory_status['level'] == 'warning':
-                    batch_size = 20000
+                    batch_size = 25000
                 else:
-                    batch_size = 80000
+                    batch_size = 100000
             
             n_samples = len(X)
             predictions = []
@@ -728,7 +820,7 @@ class BaseModel(ABC):
             unique_predictions = len(np.unique(predictions))
             
             if unique_predictions < self.prediction_diversity_threshold:
-                noise_scale = max(predictions.std() * 0.003, 1e-6)
+                noise_scale = max(predictions.std() * 0.005, 1e-6)
                 noise = np.random.normal(0, noise_scale, len(predictions))
                 
                 predictions = predictions + noise
@@ -740,60 +832,61 @@ class BaseModel(ABC):
             logger.warning(f"예측 다양성 향상 실패: {e}")
             return predictions
 
-class Stage2LightGBMModel(BaseModel):
-    """2단계 LightGBM 모델"""
+class FinalLightGBMModel(BaseModel):
+    """최종 완성 LightGBM 모델"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not LIGHTGBM_AVAILABLE:
             raise ImportError("LightGBM이 설치되지 않았습니다.")
             
-        # 2단계 파라미터
-        stage2_params = {
+        final_params = {
             'objective': 'binary',
             'metric': 'binary_logloss',
             'boosting_type': 'gbdt',
             'num_leaves': 2047,
-            'learning_rate': 0.01,
+            'learning_rate': 0.008,
             'feature_fraction': 0.95,
             'bagging_fraction': 0.85,
             'bagging_freq': 3,
-            'min_child_samples': 100,
-            'min_child_weight': 5,
-            'lambda_l1': 1.0,
-            'lambda_l2': 1.0,
-            'max_depth': 18,
+            'min_child_samples': 80,
+            'min_child_weight': 3,
+            'lambda_l1': 2.5,
+            'lambda_l2': 2.5,
+            'max_depth': 20,
             'verbose': -1,
             'random_state': 42,
-            'n_estimators': 5000,
-            'early_stopping_rounds': 500,
+            'n_estimators': 8000,
+            'early_stopping_rounds': 800,
             'scale_pos_weight': 52.0,
             'force_row_wise': True,
             'max_bin': 255,
             'num_threads': 12,
             'device_type': 'cpu',
-            'extra_trees': False
+            'extra_trees': False,
+            'path_smooth': 1.0
         }
         
         if params:
-            stage2_params.update(params)
+            final_params.update(params)
         
-        super().__init__("Stage2LightGBM", stage2_params)
-        self.prediction_diversity_threshold = 2000
+        super().__init__("FinalLightGBM", final_params)
+        self.prediction_diversity_threshold = 2500
     
     def _simplify_for_memory(self):
         """메모리 부족 시 파라미터 단순화"""
         self.params.update({
             'num_leaves': 1023,
-            'max_depth': 12,
-            'n_estimators': 3000,
-            'min_child_samples': 200,
-            'num_threads': 8
+            'max_depth': 15,
+            'n_estimators': 5000,
+            'min_child_samples': 150,
+            'num_threads': 8,
+            'early_stopping_rounds': 500
         })
         logger.info(f"{self.name}: 메모리 절약을 위해 파라미터 단순화")
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """2단계 LightGBM 모델 학습"""
+        """최종 완성 LightGBM 모델 학습"""
         logger.info(f"{self.name} 모델 학습 시작 (데이터: {len(X_train):,})")
         
         def _fit_internal():
@@ -833,12 +926,12 @@ class Stage2LightGBMModel(BaseModel):
                 valid_names.append('valid')
             
             callbacks = []
-            early_stopping = self.params.get('early_stopping_rounds', 500)
+            early_stopping = self.params.get('early_stopping_rounds', 800)
             if early_stopping:
                 callbacks.append(lgb.early_stopping(early_stopping, verbose=False))
             
             def memory_callback(env):
-                if env.iteration % 200 == 0:
+                if env.iteration % 300 == 0:
                     if self.memory_monitor.check_memory_pressure():
                         logger.warning("학습 중 메모리 압박 감지")
                         self.memory_monitor.force_memory_cleanup()
@@ -900,34 +993,34 @@ class Stage2LightGBMModel(BaseModel):
         
         return raw_pred
 
-class Stage2XGBoostModel(BaseModel):
-    """2단계 XGBoost 모델"""
+class FinalXGBoostModel(BaseModel):
+    """최종 완성 XGBoost 모델"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
             raise ImportError("XGBoost가 설치되지 않았습니다.")
         
-        # 2단계 파라미터
-        stage2_params = {
+        final_params = {
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
             'tree_method': 'hist',
-            'max_depth': 10,
-            'learning_rate': 0.01,
+            'max_depth': 12,
+            'learning_rate': 0.008,
             'subsample': 0.85,
             'colsample_bytree': 0.95,
             'colsample_bylevel': 0.85,
-            'min_child_weight': 10,
-            'reg_alpha': 1.0,
-            'reg_lambda': 1.0,
+            'min_child_weight': 8,
+            'reg_alpha': 2.5,
+            'reg_lambda': 2.5,
             'scale_pos_weight': 52.0,
             'random_state': 42,
-            'n_estimators': 5000,
-            'early_stopping_rounds': 500,
+            'n_estimators': 8000,
+            'early_stopping_rounds': 800,
             'max_bin': 255,
             'nthread': 12,
             'grow_policy': 'lossguide',
-            'gamma': 0.0
+            'gamma': 0.0,
+            'max_leaves': 2047
         }
         
         if rtx_4060ti_detected and TORCH_AVAILABLE:
@@ -940,7 +1033,7 @@ class Stage2XGBoostModel(BaseModel):
                 memory_status = memory_monitor_temp.get_memory_status()
                 
                 if memory_status['level'] not in ['critical', 'abort']:
-                    stage2_params.update({
+                    final_params.update({
                         'tree_method': 'gpu_hist',
                         'gpu_id': 0,
                         'predictor': 'gpu_predictor'
@@ -953,19 +1046,21 @@ class Stage2XGBoostModel(BaseModel):
                 logger.warning(f"GPU 설정 실패, CPU 모드 사용: {e}")
         
         if params:
-            stage2_params.update(params)
+            final_params.update(params)
         
-        super().__init__("Stage2XGBoost", stage2_params)
-        self.prediction_diversity_threshold = 2000
+        super().__init__("FinalXGBoost", final_params)
+        self.prediction_diversity_threshold = 2500
     
     def _simplify_for_memory(self):
         """메모리 부족 시 파라미터 단순화"""
         self.params.update({
-            'max_depth': 8,
-            'n_estimators': 3000,
-            'min_child_weight': 15,
+            'max_depth': 10,
+            'n_estimators': 5000,
+            'min_child_weight': 12,
             'nthread': 8,
             'tree_method': 'hist',
+            'early_stopping_rounds': 500,
+            'max_leaves': 1023
         })
         self.params.pop('gpu_id', None)
         self.params.pop('predictor', None)
@@ -973,7 +1068,7 @@ class Stage2XGBoostModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """2단계 XGBoost 모델 학습"""
+        """최종 완성 XGBoost 모델 학습"""
         logger.info(f"{self.name} 모델 학습 시작 (데이터: {len(X_train):,})")
         
         def _fit_internal():
@@ -1010,7 +1105,7 @@ class Stage2XGBoostModel(BaseModel):
                 )
                 evals.append((dval, 'valid'))
             
-            early_stopping = self.params.get('early_stopping_rounds', 500)
+            early_stopping = self.params.get('early_stopping_rounds', 800)
             
             self.model = xgb.train(
                 self.params,
@@ -1077,41 +1172,40 @@ class Stage2XGBoostModel(BaseModel):
         
         return raw_pred
 
-class Stage2LogisticModel(BaseModel):
-    """2단계 로지스틱 회귀 모델"""
+class FinalLogisticModel(BaseModel):
+    """최종 완성 로지스틱 회귀 모델"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not SKLEARN_AVAILABLE:
             raise ImportError("scikit-learn이 설치되지 않았습니다.")
             
-        # 2단계 파라미터
-        stage2_params = {
-            'C': 0.05,
-            'max_iter': 800,
+        final_params = {
+            'C': 0.03,
+            'max_iter': 1200,
             'random_state': 42,
             'class_weight': 'balanced',
             'solver': 'liblinear',
             'penalty': 'l2',
-            'tol': 1e-4,
+            'tol': 1e-5,
             'fit_intercept': True,
             'warm_start': False,
             'dual': False
         }
         
         if params:
-            stage2_params.update(params)
+            final_params.update(params)
         
-        super().__init__("Stage2LogisticRegression", stage2_params)
+        super().__init__("FinalLogisticRegression", final_params)
         
         self.model = LogisticRegression(**self.params)
-        self.prediction_diversity_threshold = 1500
+        self.prediction_diversity_threshold = 2000
     
     def _simplify_for_memory(self):
         """메모리 부족 시 파라미터 단순화"""
         self.params.update({
-            'C': 0.1,
-            'max_iter': 400,
-            'tol': 1e-3,
+            'C': 0.05,
+            'max_iter': 800,
+            'tol': 1e-4,
             'solver': 'liblinear'
         })
         self.model = LogisticRegression(**self.params)
@@ -1119,7 +1213,7 @@ class Stage2LogisticModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """2단계 로지스틱 회귀 모델 학습"""
+        """최종 완성 로지스틱 회귀 모델 학습"""
         logger.info(f"{self.name} 모델 학습 시작 (데이터: {len(X_train):,})")
         
         def _fit_internal():
@@ -1127,15 +1221,14 @@ class Stage2LogisticModel(BaseModel):
             
             X_train_clean = X_train.fillna(0)
             
-            # 대용량 데이터 처리를 위한 샘플링
-            if len(X_train_clean) > 3000000:
-                logger.info(f"대용량 데이터 감지, 샘플링 적용 ({len(X_train_clean):,} -> 3,000,000)")
+            if len(X_train_clean) > 4000000:
+                logger.info(f"대용량 데이터 감지, 샘플링 적용 ({len(X_train_clean):,} -> 4,000,000)")
                 
                 pos_indices = np.where(y_train == 1)[0]
                 neg_indices = np.where(y_train == 0)[0]
                 
                 n_pos = len(pos_indices)
-                n_neg_target = min(3000000 - n_pos, len(neg_indices))
+                n_neg_target = min(4000000 - n_pos, len(neg_indices))
                 
                 selected_neg = np.random.choice(neg_indices, n_neg_target, replace=False)
                 selected_indices = np.concatenate([pos_indices, selected_neg])
@@ -1146,7 +1239,6 @@ class Stage2LogisticModel(BaseModel):
             else:
                 y_train_sample = y_train
             
-            # 데이터 타입 최적화
             for col in X_train_clean.columns:
                 if X_train_clean[col].dtype in ['float64']:
                     X_train_clean[col] = X_train_clean[col].astype('float32')
@@ -1207,31 +1299,31 @@ class Stage2LogisticModel(BaseModel):
         return raw_pred
 
 class ModelFactory:
-    """2단계 CTR 모델 팩토리"""
+    """최종 완성 CTR 모델 팩토리"""
     
     @staticmethod
     def create_model(model_type: str, **kwargs) -> BaseModel:
-        """2단계 모델 인스턴스 생성"""
+        """최종 완성 모델 인스턴스 생성"""
         
         try:
             if model_type.lower() == 'lightgbm':
                 if not LIGHTGBM_AVAILABLE:
                     raise ImportError("LightGBM이 설치되지 않았습니다.")
-                return Stage2LightGBMModel(kwargs.get('params'))
+                return FinalLightGBMModel(kwargs.get('params'))
             
             elif model_type.lower() == 'xgboost':
                 if not XGBOOST_AVAILABLE:
                     raise ImportError("XGBoost가 설치되지 않았습니다.")
-                return Stage2XGBoostModel(kwargs.get('params'))
+                return FinalXGBoostModel(kwargs.get('params'))
             
             elif model_type.lower() == 'logistic':
-                return Stage2LogisticModel(kwargs.get('params'))
+                return FinalLogisticModel(kwargs.get('params'))
             
             else:
                 raise ValueError(f"지원하지 않는 모델 타입: {model_type}")
                 
         except Exception as e:
-            logger.error(f"2단계 모델 생성 실패 ({model_type}): {e}")
+            logger.error(f"최종 완성 모델 생성 실패 ({model_type}): {e}")
             raise
     
     @staticmethod
@@ -1250,20 +1342,20 @@ class ModelFactory:
         return available
     
     @staticmethod
-    def get_stage2_models() -> List[str]:
-        """2단계 모델 우선순위 리스트"""
-        stage2_order = []
+    def get_final_models() -> List[str]:
+        """최종 완성 모델 우선순위 리스트"""
+        final_order = []
         
         if LIGHTGBM_AVAILABLE:
-            stage2_order.append('lightgbm')
+            final_order.append('lightgbm')
         
         if XGBOOST_AVAILABLE:
-            stage2_order.append('xgboost')
+            final_order.append('xgboost')
             
         if SKLEARN_AVAILABLE:
-            stage2_order.append('logistic')
+            final_order.append('logistic')
         
-        return stage2_order
+        return final_order
     
     @staticmethod
     def select_models_by_memory_status() -> List[str]:
@@ -1286,7 +1378,6 @@ class ModelFactory:
         else:
             return ModelFactory.get_available_models()
 
-# 기존 코드와의 호환성을 위한 별칭
-LightGBMModel = Stage2LightGBMModel
-XGBoostModel = Stage2XGBoostModel
-LogisticModel = Stage2LogisticModel
+LightGBMModel = FinalLightGBMModel
+XGBoostModel = FinalXGBoostModel
+LogisticModel = FinalLogisticModel
