@@ -72,12 +72,19 @@ class Config:
     PREFETCH_FACTOR = 2
     NUM_WORKERS = 6
     
-    # Memory thresholds
-    MEMORY_WARNING_THRESHOLD = 35
-    MEMORY_CRITICAL_THRESHOLD = 45
-    MEMORY_SAFE_THRESHOLD = 30
+    # Memory thresholds (adjusted for better performance)
+    MEMORY_WARNING_THRESHOLD = 25  # 25GB threshold (more lenient)
+    MEMORY_CRITICAL_THRESHOLD = 35  # 35GB threshold
+    MEMORY_SAFE_THRESHOLD = 20     # 20GB safe threshold
+    MEMORY_ABORT_THRESHOLD = 40     # 40GB abort threshold
     MAX_TRAIN_SIZE = 12000000
     MAX_TEST_SIZE = 2000000
+    
+    # Data processing strategy
+    TARGET_DATA_USAGE_RATIO = 1.0
+    MIN_TRAIN_SIZE = 100000
+    MIN_TEST_SIZE = 50000
+    FORCE_FULL_TEST_PROCESSING = True
     
     # Feature engineering settings
     FEATURE_SELECTION_METHODS = ['correlation', 'mutual_info', 'chi2']
@@ -86,6 +93,13 @@ class Config:
     CATEGORICAL_ENCODING = 'target'
     INTERACTION_FEATURES = True
     POLYNOMIAL_FEATURES = False
+    MAX_FEATURES = 500
+    MAX_INTERACTION_FEATURES = 100
+    MAX_TARGET_ENCODING_FEATURES = 50
+    FEATURE_SELECTION_K = 200
+    ENABLE_FEATURE_INTERACTION = True
+    ENABLE_TARGET_ENCODING = True
+    FEATURE_ENGINEERING_THREADS = 4
     
     # Model-specific settings
     MODEL_CONFIG = {
@@ -138,11 +152,60 @@ class Config:
         }
     }
     
-    # Cross-validation settings
+    # LightGBM specific settings
+    LIGHTGBM_PARAMS = {
+        'objective': 'binary',
+        'metric': 'binary_logloss',
+        'boosting_type': 'gbdt',
+        'num_leaves': 2047,
+        'learning_rate': 0.01,
+        'feature_fraction': 0.95,
+        'bagging_fraction': 0.85,
+        'bagging_freq': 3,
+        'min_child_samples': 200,
+        'min_child_weight': 10,
+        'lambda_l1': 1.0,
+        'lambda_l2': 1.0,
+        'max_depth': 18,
+        'verbose': -1,
+        'random_state': 42,
+        'n_estimators': 5000,
+        'early_stopping_rounds': 300,
+        'scale_pos_weight': 50,
+        'force_row_wise': True,
+        'max_bin': 255,
+        'num_threads': 12,
+        'device_type': 'cpu'
+    }
+    
+    # XGBoost specific settings
+    XGBOOST_PARAMS = {
+        'objective': 'binary:logistic',
+        'eval_metric': 'logloss',
+        'tree_method': 'hist',
+        'max_depth': 18,
+        'learning_rate': 0.01,
+        'subsample': 0.85,
+        'colsample_bytree': 0.95,
+        'min_child_weight': 10,
+        'reg_alpha': 1.0,
+        'reg_lambda': 1.0,
+        'random_state': 42,
+        'n_estimators': 5000,
+        'early_stopping_rounds': 300,
+        'scale_pos_weight': 50,
+        'n_jobs': 12
+    }
+    
+    # Model training settings
+    RANDOM_STATE = 42
     CV_FOLDS = 5
     CV_RANDOM_STATE = 42
     CV_SHUFFLE = True
     CV_STRATIFY = True
+    VALIDATION_SIZE = 0.15
+    TEST_SIZE = 0.15
+    STRATIFY = True
     
     # Ensemble settings
     ENSEMBLE_WEIGHTS = {
