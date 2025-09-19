@@ -24,20 +24,20 @@ try:
             torch.cuda.empty_cache()
             TORCH_AVAILABLE = True
         except Exception as e:
-            logging.warning(f"GPU 테스트 실패: {e}. CPU 모드만 사용")
+            logging.warning(f"GPU test failed: {e}. Using CPU mode only")
             TORCH_AVAILABLE = True
     else:
         TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-    logging.warning("PyTorch가 설치되지 않았습니다. GPU 기능이 비활성화됩니다.")
+    logging.warning("PyTorch is not installed. GPU functionality will be disabled.")
 
 try:
     import psutil
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
-    logging.warning("psutil이 설치되지 않았습니다. 메모리 모니터링 기능이 제한됩니다.")
+    logging.warning("psutil is not installed. Memory monitoring functionality will be limited.")
 
 from sklearn.model_selection import TimeSeriesSplit, StratifiedKFold
 from sklearn.metrics import make_scorer
@@ -49,7 +49,7 @@ try:
     OPTUNA_AVAILABLE = True
 except ImportError:
     OPTUNA_AVAILABLE = False
-    logging.warning("Optuna가 설치되지 않았습니다. 하이퍼파라미터 튜닝 기능이 비활성화됩니다.")
+    logging.warning("Optuna is not installed. Hyperparameter tuning functionality will be disabled.")
 
 from config import Config
 from models import ModelFactory, BaseModel, CTRCalibrator
@@ -58,11 +58,11 @@ from evaluation import CTRMetrics
 logger = logging.getLogger(__name__)
 
 class LargeDataMemoryTracker:
-    """대용량 데이터 메모리 추적 (64GB 환경 최적화)"""
+    """Large data memory tracker (optimized for 64GB environment)"""
     
     @staticmethod
     def get_memory_usage() -> float:
-        """메모리 사용량 (GB)"""
+        """Memory usage (GB)"""
         if PSUTIL_AVAILABLE:
             try:
                 process = psutil.Process()
@@ -73,7 +73,7 @@ class LargeDataMemoryTracker:
     
     @staticmethod
     def get_available_memory() -> float:
-        """사용 가능한 메모리 (GB)"""
+        """Available memory (GB)"""
         if PSUTIL_AVAILABLE:
             try:
                 available = psutil.virtual_memory().available / (1024**3)
@@ -84,7 +84,7 @@ class LargeDataMemoryTracker:
     
     @staticmethod
     def get_gpu_memory_usage() -> Dict[str, float]:
-        """GPU 메모리 사용량"""
+        """GPU memory usage"""
         if TORCH_AVAILABLE and torch.cuda.is_available():
             try:
                 total_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
@@ -100,13 +100,13 @@ class LargeDataMemoryTracker:
                     'utilization': (cached_memory / total_memory) * 100
                 }
             except Exception as e:
-                logger.warning(f"GPU 메모리 정보 조회 실패: {e}")
+                logger.warning(f"Failed to get GPU memory info: {e}")
         
         return {'total': 16.0, 'allocated': 0.0, 'cached': 0.0, 'free': 16.0, 'utilization': 0.0}
     
     @staticmethod
     def force_cleanup():
-        """메모리 정리"""
+        """Memory cleanup"""
         try:
             gc.collect()
             if TORCH_AVAILABLE and torch.cuda.is_available():
@@ -114,11 +114,11 @@ class LargeDataMemoryTracker:
                 torch.cuda.synchronize()
                 torch.cuda.ipc_collect()
         except Exception as e:
-            logger.warning(f"메모리 정리 실패: {e}")
+            logger.warning(f"Memory cleanup failed: {e}")
     
     @staticmethod
     def optimize_for_large_data():
-        """대용량 데이터 처리를 위한 메모리 최적화"""
+        """Memory optimization for large data processing"""
         try:
             os.environ['MALLOC_TRIM_THRESHOLD_'] = '0'
             os.environ['MALLOC_MMAP_THRESHOLD_'] = '131072'
@@ -129,15 +129,15 @@ class LargeDataMemoryTracker:
                 torch.backends.cuda.matmul.allow_tf32 = True
                 torch.backends.cudnn.allow_tf32 = True
                 
-                logger.info("GPU 메모리 최적화 완료: RTX 4060 Ti 16GB 90% 활용")
+                logger.info("GPU memory optimization complete: RTX 4060 Ti 16GB 90% utilization")
             
-            logger.info("대용량 데이터 메모리 최적화 완료")
+            logger.info("Large data memory optimization complete")
             
         except Exception as e:
-            logger.warning(f"메모리 최적화 실패: {e}")
+            logger.warning(f"Memory optimization failed: {e}")
 
 class CTRModelTrainer:
-    """CTR 모델 학습 클래스 (64GB 환경 최적화)"""
+    """CTR model trainer class (optimized for 64GB environment)"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -167,15 +167,15 @@ class CTRModelTrainer:
                 
                 self.memory_tracker.optimize_for_large_data()
                 
-                logger.info(f"GPU 학습 환경: {gpu_name}")
-                logger.info(f"GPU 메모리: {gpu_memory_gb:.1f}GB")
-                logger.info(f"RTX 4060 Ti 최적화: {self.rtx_4060ti_optimized}")
+                logger.info(f"GPU training environment: {gpu_name}")
+                logger.info(f"GPU memory: {gpu_memory_gb:.1f}GB")
+                logger.info(f"RTX 4060 Ti optimization: {self.rtx_4060ti_optimized}")
                 
             except Exception as e:
-                logger.warning(f"GPU 초기화 실패: {e}. CPU 모드 사용")
+                logger.warning(f"GPU initialization failed: {e}. Using CPU mode")
                 self.gpu_available = False
         else:
-            logger.info("CPU 학습 환경 - Ryzen 5 5600X 6코어 12스레드")
+            logger.info("CPU training environment - Ryzen 5 5600X 6 cores 12 threads")
     
     def train_single_model_stage2(self, 
                                  model_type: str,
@@ -185,9 +185,9 @@ class CTRModelTrainer:
                                  y_val: Optional[pd.Series] = None,
                                  params: Optional[Dict[str, Any]] = None,
                                  apply_calibration: bool = True) -> BaseModel:
-        """모델 학습 (64GB 환경 최적화)"""
+        """Model training (optimized for 64GB environment)"""
         
-        logger.info(f"{model_type} 모델 학습 시작 (데이터 크기: {len(X_train):,})")
+        logger.info(f"{model_type} model training started (data size: {len(X_train):,})")
         start_time = time.time()
         memory_before = self.memory_tracker.get_memory_usage()
         gpu_info_before = self.memory_tracker.get_gpu_memory_usage()
@@ -197,11 +197,11 @@ class CTRModelTrainer:
             gpu_memory = self.memory_tracker.get_gpu_memory_usage()
             
             data_size_gb = (X_train.memory_usage(deep=True).sum() + y_train.memory_usage(deep=True)) / (1024**3)
-            logger.info(f"데이터 크기: {data_size_gb:.2f}GB, 사용가능 메모리: {available_memory:.2f}GB")
+            logger.info(f"Data size: {data_size_gb:.2f}GB, available memory: {available_memory:.2f}GB")
             
-            # 64GB 환경에서 더 관대한 메모리 사용
+            # More lenient memory usage in 64GB environment
             if available_memory < data_size_gb * 1.8:
-                logger.warning(f"메모리 부족 위험. 메모리 효율 처리 적용")
+                logger.warning(f"Memory shortage risk. Applying memory efficient processing")
                 X_train, y_train, X_val, y_val = self._apply_memory_efficient_sampling(
                     X_train, y_train, X_val, y_val, available_memory
                 )
@@ -219,23 +219,23 @@ class CTRModelTrainer:
             
             model.fit(X_train, y_train, X_val, y_val)
             
-            # 모든 모델에 강제 캘리브레이션 적용
+            # Force calibration application for all models
             if apply_calibration and X_val is not None and y_val is not None:
                 current_memory = self.memory_tracker.get_available_memory()
-                # 64GB 환경에서 더 낮은 임계값
+                # Lower threshold in 64GB environment
                 if current_memory > 8:
                     self._apply_stage2_calibration(model, X_val, y_val)
-                    logger.info(f"{model_type} 캘리브레이션 적용 완료")
+                    logger.info(f"{model_type} calibration applied successfully")
                 else:
-                    logger.warning("메모리 부족으로 캘리브레이션 생략")
+                    logger.warning("Skipping calibration due to memory shortage")
             
             training_time = time.time() - start_time
             memory_after = self.memory_tracker.get_memory_usage()
             gpu_info_after = self.memory_tracker.get_gpu_memory_usage()
             
-            logger.info(f"{model_type} 모델 학습 완료 (소요시간: {training_time:.2f}초)")
-            logger.info(f"메모리 사용량: {memory_before:.2f}GB → {memory_after:.2f}GB")
-            logger.info(f"GPU 메모리 사용률: {gpu_info_before['utilization']:.1f}% → {gpu_info_after['utilization']:.1f}%")
+            logger.info(f"{model_type} model training complete (time taken: {training_time:.2f}s)")
+            logger.info(f"Memory usage: {memory_before:.2f}GB → {memory_after:.2f}GB")
+            logger.info(f"GPU memory utilization: {gpu_info_before['utilization']:.1f}% → {gpu_info_after['utilization']:.1f}%")
             
             self.trained_models[model_type] = {
                 'model': model,
@@ -254,25 +254,25 @@ class CTRModelTrainer:
             return model
             
         except Exception as e:
-            logger.error(f"{model_type} 모델 학습 실패: {str(e)}")
+            logger.error(f"{model_type} model training failed: {str(e)}")
             self._cleanup_memory_after_training(model_type)
             raise
     
     def _apply_memory_efficient_sampling(self, X_train: pd.DataFrame, y_train: pd.Series, 
                                        X_val: Optional[pd.DataFrame], y_val: Optional[pd.Series],
                                        available_memory: float) -> Tuple:
-        """메모리 효율적인 데이터 샘플링 (64GB 환경 최적화)"""
+        """Memory efficient data sampling (optimized for 64GB environment)"""
         
         data_size_gb = (X_train.memory_usage(deep=True).sum() + y_train.memory_usage(deep=True)) / (1024**3)
         
-        # 64GB 환경에서 더 적극적인 메모리 사용
+        # More aggressive memory usage in 64GB environment
         if data_size_gb > available_memory * 0.5:
             ratio = (available_memory * 0.45) / data_size_gb
             max_samples = int(len(X_train) * ratio)
             max_samples = max(max_samples, 6000000)
             
             if max_samples < len(X_train):
-                logger.info(f"메모리 최적화를 위해 데이터 크기 조정: {len(X_train):,} → {max_samples:,}")
+                logger.info(f"Adjusting data size for memory optimization: {len(X_train):,} → {max_samples:,}")
                 
                 pos_indices = np.where(y_train == 1)[0]
                 neg_indices = np.where(y_train == 0)[0]
@@ -290,7 +290,7 @@ class CTRModelTrainer:
                 X_train = X_train.iloc[selected_indices].copy()
                 y_train = y_train.iloc[selected_indices].copy()
                 
-                # 64GB 환경에서 검증 데이터도 더 많이 사용
+                # Use more validation data in 64GB environment
                 if X_val is not None and y_val is not None and len(X_val) > 1500000:
                     val_indices = np.random.choice(len(X_val), 1500000, replace=False)
                     X_val = X_val.iloc[val_indices].copy()
@@ -299,14 +299,14 @@ class CTRModelTrainer:
         return X_train, y_train, X_val, y_val
     
     def _validate_and_apply_stage2_params(self, model_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """파라미터 적용 및 검증 (64GB 환경 최적화)"""
+        """Parameter validation and application (optimized for 64GB environment)"""
         optimized_params = params.copy()
         
         try:
             if model_type.lower() == 'lightgbm':
                 if 'is_unbalance' in optimized_params and 'scale_pos_weight' in optimized_params:
                     optimized_params.pop('is_unbalance', None)
-                    logger.info("LightGBM: is_unbalance 제거하여 충돌 방지")
+                    logger.info("LightGBM: removed is_unbalance to prevent conflict")
                 
                 optimized_params.setdefault('objective', 'binary')
                 optimized_params.setdefault('metric', 'binary_logloss')
@@ -320,7 +320,7 @@ class CTRModelTrainer:
                 optimized_params['n_estimators'] = optimized_params.get('n_estimators', 5000)
                 
                 optimized_params['max_bin'] = min(optimized_params.get('max_bin', 255), 255)
-                # 64GB 환경에서 더 많은 스레드 사용
+                # Use more threads in 64GB environment
                 optimized_params['num_threads'] = min(optimized_params.get('num_threads', 12), 12)
                 optimized_params['force_row_wise'] = True
                 
@@ -354,7 +354,7 @@ class CTRModelTrainer:
                 optimized_params['n_estimators'] = optimized_params.get('n_estimators', 5000)
                 
                 optimized_params['max_bin'] = min(optimized_params.get('max_bin', 255), 255)
-                # 64GB 환경에서 더 많은 스레드 사용
+                # Use more threads in 64GB environment
                 optimized_params['nthread'] = min(optimized_params.get('nthread', 12), 12)
                 optimized_params['scale_pos_weight'] = optimized_params.get('scale_pos_weight', 52.0)
                 
@@ -366,20 +366,20 @@ class CTRModelTrainer:
                 optimized_params['subsample'] = optimized_params.get('subsample', 0.85)
                 
         except Exception as e:
-            logger.warning(f"파라미터 최적화 실패: {e}")
+            logger.warning(f"Parameter optimization failed: {e}")
         
         return optimized_params
     
     def _apply_stage2_calibration(self, model: BaseModel, X_val: pd.DataFrame, y_val: pd.Series):
-        """CTR 캘리브레이션 적용 (강제 실행)"""
+        """Apply CTR calibration (forced execution)"""
         try:
-            logger.info(f"{model.name} 캘리브레이션 적용 시작")
+            logger.info(f"{model.name} calibration application started")
             
             if self.memory_tracker.get_available_memory() < 5:
-                logger.warning("메모리 부족으로 캘리브레이션 생략")
+                logger.warning("Skipping calibration due to memory shortage")
                 return
             
-            # 64GB 환경에서 더 큰 검증 샘플 사용
+            # Use larger validation sample in 64GB environment
             val_size = min(len(X_val), 150000)
             if len(X_val) > val_size:
                 sample_indices = np.random.choice(len(X_val), val_size, replace=False)
@@ -401,22 +401,22 @@ class CTRModelTrainer:
                 calibrated_ctr = calibrated_predictions.mean()
                 actual_ctr = y_val_sample.mean()
                 
-                logger.info(f"CTR 캘리브레이션 결과")
-                logger.info(f"  - 원본 CTR: {original_ctr:.4f}")
-                logger.info(f"  - 캘리브레이션 CTR: {calibrated_ctr:.4f}")
-                logger.info(f"  - 실제 CTR: {actual_ctr:.4f}")
-                logger.info(f"  - 캘리브레이션 방법: {model.calibrator.best_method}")
+                logger.info(f"CTR calibration results")
+                logger.info(f"  - Original CTR: {original_ctr:.4f}")
+                logger.info(f"  - Calibrated CTR: {calibrated_ctr:.4f}")
+                logger.info(f"  - Actual CTR: {actual_ctr:.4f}")
+                logger.info(f"  - Calibration method: {model.calibrator.best_method}")
                 
                 calibration_summary = model.calibrator.get_calibration_summary()
                 if calibration_summary['calibration_scores']:
                     best_score = max(calibration_summary['calibration_scores'].values())
-                    logger.info(f"  - 캘리브레이션 품질: {best_score:.4f}")
+                    logger.info(f"  - Calibration quality: {best_score:.4f}")
             
             del raw_predictions, calibrated_predictions
             LargeDataMemoryTracker.force_cleanup()
             
         except Exception as e:
-            logger.error(f"CTR 캘리브레이션 적용 실패 ({model.name}): {str(e)}")
+            logger.error(f"CTR calibration application failed ({model.name}): {str(e)}")
             model.is_calibrated = False
             model.calibrator = None
     
@@ -426,17 +426,17 @@ class CTRModelTrainer:
                                    y: pd.Series,
                                    cv_folds: int = None,
                                    params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """모델 교차검증 (64GB 환경 최적화)"""
+        """Model cross-validation (optimized for 64GB environment)"""
         
         if cv_folds is None:
             cv_folds = min(6, self.config.N_SPLITS)
         
-        logger.info(f"{model_type} 모델 {cv_folds}폴드 교차검증 시작 (데이터: {len(X):,})")
+        logger.info(f"{model_type} model {cv_folds}-fold cross-validation started (data: {len(X):,})")
         
         available_memory = self.memory_tracker.get_available_memory()
         original_size = len(X)
         
-        # 64GB 환경에서 더 적극적인 메모리 사용
+        # More aggressive memory usage in 64GB environment
         if available_memory < 25:
             max_samples = min(len(X), int(available_memory * 200000))
             if max_samples < len(X):
@@ -456,7 +456,7 @@ class CTRModelTrainer:
                 X = X.iloc[selected_indices].copy()
                 y = y.iloc[selected_indices].copy()
                 
-                logger.info(f"메모리 최적화를 위해 CV 데이터 축소: {original_size:,} → {len(X):,}")
+                logger.info(f"CV data reduced for memory optimization: {original_size:,} → {len(X):,}")
         
         try:
             if params:
@@ -481,7 +481,7 @@ class CTRModelTrainer:
             metrics_calculator = CTRMetrics()
             
             for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
-                logger.info(f"폴드 {fold + 1}/{cv_folds} 시작")
+                logger.info(f"Fold {fold + 1}/{cv_folds} started")
                 
                 try:
                     memory_before = self.memory_tracker.get_memory_usage()
@@ -504,7 +504,7 @@ class CTRModelTrainer:
                     
                     unique_predictions = len(np.unique(y_pred_proba))
                     if unique_predictions < 300:
-                        logger.warning(f"폴드 {fold + 1}: 예측값 다양성 부족 (고유값: {unique_predictions})")
+                        logger.warning(f"Fold {fold + 1}: insufficient prediction diversity (unique values: {unique_predictions})")
                     
                     ap_score = metrics_calculator.average_precision(y_val_fold, y_pred_proba)
                     wll_score = metrics_calculator.weighted_log_loss(y_val_fold, y_pred_proba)
@@ -535,16 +535,16 @@ class CTRModelTrainer:
                     cv_scores['memory_usage'].append(memory_after - memory_before)
                     cv_scores['gpu_memory_usage'].append(gpu_after['allocated'] - gpu_before['allocated'])
                     
-                    logger.info(f"폴드 {fold + 1} 완료")
+                    logger.info(f"Fold {fold + 1} complete")
                     logger.info(f"AP: {ap_score:.4f}, WLL: {wll_score:.4f}, Combined: {combined_score:.4f}")
-                    logger.info(f"CTR최적화: {ctr_optimized_score:.4f}, CTR편향: {ctr_bias:.4f}")
-                    logger.info(f"캘리브레이션: {calibration_score:.4f}")
+                    logger.info(f"CTR optimized: {ctr_optimized_score:.4f}, CTR bias: {ctr_bias:.4f}")
+                    logger.info(f"Calibration: {calibration_score:.4f}")
                     
                     del X_train_fold, X_val_fold, y_train_fold, y_val_fold, model, y_pred_proba
                     LargeDataMemoryTracker.force_cleanup()
                     
                 except Exception as e:
-                    logger.error(f"폴드 {fold + 1} 실행 실패: {str(e)}")
+                    logger.error(f"Fold {fold + 1} execution failed: {str(e)}")
                     cv_scores['ap_scores'].append(0.0)
                     cv_scores['wll_scores'].append(float('inf'))
                     cv_scores['combined_scores'].append(0.0)
@@ -562,7 +562,7 @@ class CTRModelTrainer:
             valid_calibration_scores = [s for s in cv_scores['calibration_scores'] if s > 0]
             
             if not valid_combined_scores:
-                logger.warning(f"{model_type} 모든 폴드가 실패했습니다")
+                logger.warning(f"{model_type} all folds failed")
                 cv_results = {
                     'model_type': model_type,
                     'combined_mean': 0.0,
@@ -599,17 +599,17 @@ class CTRModelTrainer:
             if model_type in self.trained_models:
                 self.trained_models[model_type]['cv_result'] = cv_results
             
-            logger.info(f"{model_type} 교차검증 완료")
-            logger.info(f"평균 Combined Score: {cv_results['combined_mean']:.4f} (±{cv_results['combined_std']:.4f})")
-            logger.info(f"평균 CTR 최적화: {cv_results['ctr_optimized_mean']:.4f}")
-            logger.info(f"평균 CTR 편향: {cv_results['ctr_bias_mean']:.4f}")
-            logger.info(f"평균 캘리브레이션: {cv_results['calibration_mean']:.4f}")
-            logger.info(f"성공한 폴드: {cv_results['successful_folds']}/{cv_folds}")
+            logger.info(f"{model_type} cross-validation complete")
+            logger.info(f"Average Combined Score: {cv_results['combined_mean']:.4f} (±{cv_results['combined_std']:.4f})")
+            logger.info(f"Average CTR optimization: {cv_results['ctr_optimized_mean']:.4f}")
+            logger.info(f"Average CTR bias: {cv_results['ctr_bias_mean']:.4f}")
+            logger.info(f"Average calibration: {cv_results['calibration_mean']:.4f}")
+            logger.info(f"Successful folds: {cv_results['successful_folds']}/{cv_folds}")
             
             return cv_results
             
         except Exception as e:
-            logger.error(f"{model_type} 교차검증 실패: {str(e)}")
+            logger.error(f"{model_type} cross-validation failed: {str(e)}")
             LargeDataMemoryTracker.force_cleanup()
             raise
     
@@ -619,10 +619,10 @@ class CTRModelTrainer:
                                            y: pd.Series,
                                            n_trials: int = None,
                                            cv_folds: int = 3) -> Dict[str, Any]:
-        """하이퍼파라미터 튜닝 (64GB 환경 최적화)"""
+        """Hyperparameter tuning (optimized for 64GB environment)"""
         
         if not OPTUNA_AVAILABLE:
-            logger.warning("Optuna가 설치되지 않았습니다. 기본 파라미터 사용")
+            logger.warning("Optuna is not installed. Using default parameters")
             best_params = self._get_stage2_params(model_type)
             self.best_params[model_type] = best_params
             return {
@@ -638,7 +638,7 @@ class CTRModelTrainer:
         gpu_memory = self.memory_tracker.get_gpu_memory_usage()
         
         if n_trials is None:
-            # 64GB 환경에서 더 많은 trial 수행
+            # Perform more trials in 64GB environment
             if available_memory > 45 and gpu_memory['free'] > 14:
                 n_trials = min(120, self.config.TUNING_CONFIG['n_trials'])
             elif available_memory > 40:
@@ -648,11 +648,11 @@ class CTRModelTrainer:
             else:
                 n_trials = min(60, self.config.TUNING_CONFIG['n_trials'])
         
-        logger.info(f"{model_type} 하이퍼파라미터 튜닝 시작")
-        logger.info(f"Trials: {n_trials}, 메모리: {available_memory:.1f}GB, GPU메모리: {gpu_memory['free']:.1f}GB")
+        logger.info(f"{model_type} hyperparameter tuning started")
+        logger.info(f"Trials: {n_trials}, Memory: {available_memory:.1f}GB, GPU Memory: {gpu_memory['free']:.1f}GB")
         
         original_size = len(X)
-        # 64GB 환경에서 더 큰 샘플 사용
+        # Use larger sample in 64GB environment
         if available_memory < 30 and len(X) > 7000000:
             sample_size = min(7000000, int(available_memory * 200000))
             pos_indices = np.where(y == 1)[0]
@@ -671,12 +671,12 @@ class CTRModelTrainer:
             X = X.iloc[selected_indices].copy()
             y = y.iloc[selected_indices].copy()
             
-            logger.info(f"메모리 최적화를 위해 튜닝 데이터 축소: {original_size:,} → {len(X):,}")
+            logger.info(f"Tuning data reduced for memory optimization: {original_size:,} → {len(X):,}")
         
         def stage2_objective(trial):
             try:
                 if self.memory_tracker.get_available_memory() < 8:
-                    logger.warning("메모리 부족으로 trial 중단")
+                    logger.warning("Trial aborted due to memory shortage")
                     return 0.0
                 
                 if model_type.lower() == 'lightgbm':
@@ -765,7 +765,7 @@ class CTRModelTrainer:
                 return final_score if final_score > 0 else 0.0
             
             except Exception as e:
-                logger.error(f"Trial 실행 실패: {str(e)}")
+                logger.error(f"Trial execution failed: {str(e)}")
                 LargeDataMemoryTracker.force_cleanup()
                 return 0.0
         
@@ -785,14 +785,14 @@ class CTRModelTrainer:
             )
             
         except KeyboardInterrupt:
-            logger.info("하이퍼파라미터 튜닝이 중단되었습니다.")
+            logger.info("Hyperparameter tuning was interrupted.")
         except Exception as e:
-            logger.error(f"하이퍼파라미터 튜닝 중 오류 발생: {str(e)}")
+            logger.error(f"Error during hyperparameter tuning: {str(e)}")
         finally:
             LargeDataMemoryTracker.force_cleanup()
         
         if not hasattr(study, 'best_value') or study.best_value is None or study.best_value <= 0:
-            logger.warning(f"{model_type} 하이퍼파라미터 튜닝에서 유효한 결과를 얻지 못했습니다.")
+            logger.warning(f"{model_type} hyperparameter tuning did not produce valid results.")
             best_params = self._get_stage2_params(model_type)
         else:
             best_params = study.best_params
@@ -808,9 +808,9 @@ class CTRModelTrainer:
         
         self.best_params[model_type] = best_params
         
-        logger.info(f"{model_type} 하이퍼파라미터 튜닝 완료")
-        logger.info(f"최적 점수: {tuning_results['best_score']:.4f}")
-        logger.info(f"수행된 trials: {tuning_results['n_trials']}/{n_trials}")
+        logger.info(f"{model_type} hyperparameter tuning complete")
+        logger.info(f"Best score: {tuning_results['best_score']:.4f}")
+        logger.info(f"Trials completed: {tuning_results['n_trials']}/{n_trials}")
         
         return tuning_results
     
@@ -820,16 +820,16 @@ class CTRModelTrainer:
                                X_val: Optional[pd.DataFrame] = None,
                                y_val: Optional[pd.Series] = None,
                                model_types: Optional[List[str]] = None) -> Dict[str, BaseModel]:
-        """모든 모델 학습 (64GB 환경 최적화)"""
+        """Train all models (optimized for 64GB environment)"""
         
         if model_types is None:
             available_models = ModelFactory.get_available_models()
             model_types = [m for m in ['lightgbm', 'xgboost', 'logistic'] if m in available_models]
         
-        logger.info(f"모든 모델 학습 시작: {model_types}")
-        logger.info(f"데이터 크기: {len(X_train):,}")
-        logger.info(f"사용 가능 메모리: {self.memory_tracker.get_available_memory():.2f}GB")
-        logger.info(f"GPU 메모리: {self.memory_tracker.get_gpu_memory_usage()['free']:.2f}GB")
+        logger.info(f"Training all models started: {model_types}")
+        logger.info(f"Data size: {len(X_train):,}")
+        logger.info(f"Available memory: {self.memory_tracker.get_available_memory():.2f}GB")
+        logger.info(f"GPU memory: {self.memory_tracker.get_gpu_memory_usage()['free']:.2f}GB")
         
         trained_models = {}
         
@@ -838,13 +838,13 @@ class CTRModelTrainer:
                 available_memory = self.memory_tracker.get_available_memory()
                 gpu_memory = self.memory_tracker.get_gpu_memory_usage()
                 
-                # 64GB 환경에서 더 낮은 메모리 임계값
+                # Lower memory threshold in 64GB environment
                 if available_memory < 8:
-                    logger.warning(f"메모리 부족으로 {model_type} 모델 학습 생략")
+                    logger.warning(f"Skipping {model_type} model training due to memory shortage")
                     continue
                 
-                logger.info(f"{model_type} 모델 학습 시작")
-                logger.info(f"메모리: {available_memory:.2f}GB, GPU: {gpu_memory['free']:.2f}GB")
+                logger.info(f"{model_type} model training started")
+                logger.info(f"Memory: {available_memory:.2f}GB, GPU: {gpu_memory['free']:.2f}GB")
                 
                 if model_type in self.best_params:
                     params = self.best_params[model_type]
@@ -857,26 +857,26 @@ class CTRModelTrainer:
                 
                 trained_models[model_type] = model
                 
-                logger.info(f"{model_type} 모델 학습 완료")
-                logger.info(f"캘리브레이션 적용: {model.is_calibrated}")
+                logger.info(f"{model_type} model training complete")
+                logger.info(f"Calibration applied: {model.is_calibrated}")
                 
                 self._cleanup_memory_after_training(model_type)
                 
                 current_memory = self.memory_tracker.get_available_memory()
                 current_gpu = self.memory_tracker.get_gpu_memory_usage()
-                logger.info(f"{model_type} 학습 후 - 메모리: {current_memory:.2f}GB, GPU: {current_gpu['free']:.2f}GB")
+                logger.info(f"After {model_type} training - Memory: {current_memory:.2f}GB, GPU: {current_gpu['free']:.2f}GB")
                 
             except Exception as e:
-                logger.error(f"{model_type} 모델 학습 실패: {str(e)}")
+                logger.error(f"{model_type} model training failed: {str(e)}")
                 self._cleanup_memory_after_training(model_type)
                 continue
         
-        logger.info(f"모든 모델 학습 완료. 성공한 모델: {list(trained_models.keys())}")
+        logger.info(f"All model training complete. Successful models: {list(trained_models.keys())}")
         
         return trained_models
     
     def _get_stage2_params(self, model_type: str) -> Dict[str, Any]:
-        """기본 파라미터 (64GB 환경 최적화)"""
+        """Default parameters (optimized for 64GB environment)"""
         
         if model_type.lower() == 'lightgbm':
             params = {
@@ -954,7 +954,7 @@ class CTRModelTrainer:
             return {}
     
     def _cleanup_memory_after_training(self, model_type: str):
-        """모델별 메모리 정리"""
+        """Memory cleanup per model"""
         try:
             gc.collect()
             
@@ -972,17 +972,17 @@ class CTRModelTrainer:
                 pass
                 
         except Exception as e:
-            logger.warning(f"메모리 정리 실패: {e}")
+            logger.warning(f"Memory cleanup failed: {e}")
     
     def save_models(self, output_dir: Path = None):
-        """모델 저장"""
+        """Save models"""
         if output_dir is None:
             output_dir = self.config.MODEL_DIR
         
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        logger.info(f"모델 저장 시작: {output_dir}")
+        logger.info(f"Model saving started: {output_dir}")
         
         for model_name, model_info in self.trained_models.items():
             try:
@@ -1010,45 +1010,45 @@ class CTRModelTrainer:
                 with open(metadata_path, 'w', encoding='utf-8') as f:
                     json.dump(metadata, f, indent=2, default=str, ensure_ascii=False)
                 
-                logger.info(f"{model_name} 모델 저장 완료: {model_path}")
+                logger.info(f"{model_name} model saved successfully: {model_path}")
                 
             except Exception as e:
-                logger.error(f"{model_name} 모델 저장 실패: {str(e)}")
+                logger.error(f"{model_name} model save failed: {str(e)}")
         
         if self.calibrators:
             calibrator_path = output_dir / "stage2_ctr_calibrators.pkl"
             try:
                 with open(calibrator_path, 'wb') as f:
                     pickle.dump(self.calibrators, f, protocol=pickle.HIGHEST_PROTOCOL)
-                logger.info(f"CTR 캘리브레이터 저장 완료: {calibrator_path}")
+                logger.info(f"CTR calibrators saved successfully: {calibrator_path}")
             except Exception as e:
-                logger.error(f"CTR 캘리브레이터 저장 실패: {str(e)}")
+                logger.error(f"CTR calibrators save failed: {str(e)}")
         
         if self.cv_results:
             cv_results_path = output_dir / "stage2_cv_results.json"
             try:
                 with open(cv_results_path, 'w', encoding='utf-8') as f:
                     json.dump(self.cv_results, f, indent=2, default=str, ensure_ascii=False)
-                logger.info(f"CV 결과 저장 완료: {cv_results_path}")
+                logger.info(f"CV results saved successfully: {cv_results_path}")
             except Exception as e:
-                logger.error(f"CV 결과 저장 실패: {str(e)}")
+                logger.error(f"CV results save failed: {str(e)}")
         
         if self.best_params:
             best_params_path = output_dir / "stage2_best_params.json"
             try:
                 with open(best_params_path, 'w', encoding='utf-8') as f:
                     json.dump(self.best_params, f, indent=2, default=str, ensure_ascii=False)
-                logger.info(f"최적 파라미터 저장 완료: {best_params_path}")
+                logger.info(f"Best parameters saved successfully: {best_params_path}")
             except Exception as e:
-                logger.error(f"최적 파라미터 저장 실패: {str(e)}")
+                logger.error(f"Best parameters save failed: {str(e)}")
     
     def load_models(self, input_dir: Path = None) -> Dict[str, BaseModel]:
-        """저장된 모델 로딩"""
+        """Load saved models"""
         if input_dir is None:
             input_dir = self.config.MODEL_DIR
         
         input_dir = Path(input_dir)
-        logger.info(f"모델 로딩 시작: {input_dir}")
+        logger.info(f"Model loading started: {input_dir}")
         
         loaded_models = {}
         
@@ -1062,7 +1062,7 @@ class CTRModelTrainer:
                     model = pickle.load(f)
                 
                 loaded_models[model_name] = model
-                logger.info(f"{model_name} 모델 로딩 완료")
+                logger.info(f"{model_name} model loaded successfully")
                 
                 metadata_file = input_dir / f"{model_name}_stage2_metadata.json"
                 if metadata_file.exists():
@@ -1083,42 +1083,42 @@ class CTRModelTrainer:
                         }
                         
                     except Exception as e:
-                        logger.warning(f"{model_name} 메타데이터 로딩 실패: {e}")
+                        logger.warning(f"{model_name} metadata loading failed: {e}")
                 
             except Exception as e:
-                logger.error(f"{model_file} 모델 로딩 실패: {str(e)}")
+                logger.error(f"{model_file} model loading failed: {str(e)}")
         
         calibrator_path = input_dir / "stage2_ctr_calibrators.pkl"
         if calibrator_path.exists():
             try:
                 with open(calibrator_path, 'rb') as f:
                     self.calibrators = pickle.load(f)
-                logger.info("CTR 캘리브레이터 로딩 완료")
+                logger.info("CTR calibrators loaded successfully")
             except Exception as e:
-                logger.error(f"CTR 캘리브레이터 로딩 실패: {str(e)}")
+                logger.error(f"CTR calibrators loading failed: {str(e)}")
         
         cv_results_path = input_dir / "stage2_cv_results.json"
         if cv_results_path.exists():
             try:
                 with open(cv_results_path, 'r', encoding='utf-8') as f:
                     self.cv_results = json.load(f)
-                logger.info("CV 결과 로딩 완료")
+                logger.info("CV results loaded successfully")
             except Exception as e:
-                logger.error(f"CV 결과 로딩 실패: {str(e)}")
+                logger.error(f"CV results loading failed: {str(e)}")
         
         best_params_path = input_dir / "stage2_best_params.json"
         if best_params_path.exists():
             try:
                 with open(best_params_path, 'r', encoding='utf-8') as f:
                     self.best_params = json.load(f)
-                logger.info("최적 파라미터 로딩 완료")
+                logger.info("Best parameters loaded successfully")
             except Exception as e:
-                logger.error(f"최적 파라미터 로딩 실패: {str(e)}")
+                logger.error(f"Best parameters loading failed: {str(e)}")
         
         return loaded_models
     
     def get_training_summary(self) -> Dict[str, Any]:
-        """학습 결과 요약"""
+        """Training results summary"""
         summary = {
             'trained_models': list(self.trained_models.keys()),
             'cv_results': self.cv_results,
@@ -1166,7 +1166,7 @@ class CTRModelTrainer:
 ModelTrainer = CTRModelTrainer
 
 class TrainingPipeline:
-    """CTR 전체 학습 파이프라인 (64GB 환경 최적화)"""
+    """CTR complete training pipeline (optimized for 64GB environment)"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -1180,13 +1180,13 @@ class TrainingPipeline:
                            y_val: Optional[pd.Series] = None,
                            tune_hyperparameters: bool = True,
                            n_trials: int = None) -> Dict[str, Any]:
-        """전체 학습 파이프라인 실행 (64GB 환경 최적화)"""
+        """Execute complete training pipeline (optimized for 64GB environment)"""
         
-        logger.info("전체 학습 파이프라인 시작")
-        logger.info(f"데이터 크기: {len(X_train):,}행")
-        logger.info(f"초기 메모리 상태: {self.memory_tracker.get_available_memory():.2f}GB")
-        logger.info(f"GPU 메모리: {self.memory_tracker.get_gpu_memory_usage()['free']:.2f}GB")
-        logger.info(f"캘리브레이션 적용: True")
+        logger.info("Complete training pipeline started")
+        logger.info(f"Data size: {len(X_train):,} rows")
+        logger.info(f"Initial memory status: {self.memory_tracker.get_available_memory():.2f}GB")
+        logger.info(f"GPU memory: {self.memory_tracker.get_gpu_memory_usage()['free']:.2f}GB")
+        logger.info(f"Calibration applied: True")
         
         pipeline_start_time = time.time()
         
@@ -1198,7 +1198,7 @@ class TrainingPipeline:
             gpu_memory = self.memory_tracker.get_gpu_memory_usage()
             
             if n_trials is None:
-                # 64GB 환경에서 더 많은 trial 수행
+                # Perform more trials in 64GB environment
                 if available_memory > 50 and gpu_memory['free'] > 14:
                     n_trials = 120
                 elif available_memory > 45:
@@ -1209,17 +1209,17 @@ class TrainingPipeline:
                     n_trials = 60
             
             if tune_hyperparameters and OPTUNA_AVAILABLE:
-                logger.info("하이퍼파라미터 튜닝 단계")
+                logger.info("Hyperparameter tuning stage")
                 for model_type in model_types:
                     try:
-                        # 64GB 환경에서 더 낮은 메모리 임계값
+                        # Lower memory threshold in 64GB environment
                         if self.memory_tracker.get_available_memory() < 10:
-                            logger.warning(f"메모리 부족으로 {model_type} 튜닝 생략")
+                            logger.warning(f"Skipping {model_type} tuning due to memory shortage")
                             continue
                         
                         current_trials = n_trials
                         
-                        logger.info(f"{model_type} 하이퍼파라미터 튜닝 시작 (trials: {current_trials})")
+                        logger.info(f"{model_type} hyperparameter tuning started (trials: {current_trials})")
                         
                         self.trainer.hyperparameter_tuning_stage2_optuna(
                             model_type, X_train, y_train, n_trials=current_trials, cv_folds=3
@@ -1228,24 +1228,24 @@ class TrainingPipeline:
                         LargeDataMemoryTracker.force_cleanup()
                         
                     except Exception as e:
-                        logger.error(f"{model_type} 하이퍼파라미터 튜닝 실패: {str(e)}")
+                        logger.error(f"{model_type} hyperparameter tuning failed: {str(e)}")
                         LargeDataMemoryTracker.force_cleanup()
             else:
-                logger.info("하이퍼파라미터 튜닝 생략")
+                logger.info("Hyperparameter tuning skipped")
             
-            logger.info("교차검증 평가 단계")
+            logger.info("Cross-validation evaluation stage")
             for model_type in model_types:
                 try:
-                    # 64GB 환경에서 더 낮은 메모리 임계값
+                    # Lower memory threshold in 64GB environment
                     if self.memory_tracker.get_available_memory() < 8:
-                        logger.warning(f"메모리 부족으로 {model_type} 교차검증 생략")
+                        logger.warning(f"Skipping {model_type} cross-validation due to memory shortage")
                         continue
                     
                     params = self.trainer.best_params.get(model_type, None)
                     if params is None:
                         params = self.trainer._get_stage2_params(model_type)
                     
-                    logger.info(f"{model_type} 교차검증 시작")
+                    logger.info(f"{model_type} cross-validation started")
                     
                     self.trainer.cross_validate_stage2_model(
                         model_type, X_train, y_train, cv_folds=6, params=params
@@ -1254,23 +1254,23 @@ class TrainingPipeline:
                     LargeDataMemoryTracker.force_cleanup()
                     
                 except Exception as e:
-                    logger.error(f"{model_type} 교차검증 실패: {str(e)}")
+                    logger.error(f"{model_type} cross-validation failed: {str(e)}")
                     LargeDataMemoryTracker.force_cleanup()
             
-            logger.info("최종 모델 학습 단계")
-            logger.info(f"학습 전 메모리 상태: {self.memory_tracker.get_available_memory():.2f}GB")
+            logger.info("Final model training stage")
+            logger.info(f"Memory status before training: {self.memory_tracker.get_available_memory():.2f}GB")
             
             trained_models = self.trainer.train_all_stage2_models(
                 X_train, y_train, X_val, y_val, model_types
             )
             
-            logger.info(f"학습 후 메모리 상태: {self.memory_tracker.get_available_memory():.2f}GB")
+            logger.info(f"Memory status after training: {self.memory_tracker.get_available_memory():.2f}GB")
             
             try:
                 self.trainer.save_models()
-                logger.info("모델 저장 완료")
+                logger.info("Model saving complete")
             except Exception as e:
-                logger.warning(f"모델 저장 실패: {str(e)}")
+                logger.warning(f"Model saving failed: {str(e)}")
             
             pipeline_time = time.time() - pipeline_start_time
             summary = self.trainer.get_training_summary()
@@ -1281,20 +1281,20 @@ class TrainingPipeline:
             summary['stage2_pipeline'] = True
             summary['calibration_pipeline'] = True
             
-            logger.info(f"전체 학습 파이프라인 완료 (소요시간: {pipeline_time:.2f}초)")
-            logger.info(f"최종 메모리 상태: {summary['memory_available_end']:.2f}GB")
-            logger.info(f"캘리브레이션 적용 모델 수: {len(summary['calibrated_models'])}")
+            logger.info(f"Complete training pipeline finished (time taken: {pipeline_time:.2f}s)")
+            logger.info(f"Final memory status: {summary['memory_available_end']:.2f}GB")
+            logger.info(f"Calibrated model count: {len(summary['calibrated_models'])}")
             
             if 'best_model' in summary:
                 best_score = summary['best_model']['combined_score']
                 calibration_score = summary['best_model'].get('calibration_score', 0.0)
-                logger.info(f"최고 Combined Score: {best_score:.4f}")
-                logger.info(f"최고 Calibration Score: {calibration_score:.4f}")
+                logger.info(f"Best Combined Score: {best_score:.4f}")
+                logger.info(f"Best Calibration Score: {calibration_score:.4f}")
             
             return summary
             
         except Exception as e:
-            logger.error(f"파이프라인 실행 실패: {str(e)}")
+            logger.error(f"Pipeline execution failed: {str(e)}")
             LargeDataMemoryTracker.force_cleanup()
             raise
         finally:

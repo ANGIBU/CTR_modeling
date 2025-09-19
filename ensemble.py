@@ -26,7 +26,7 @@ try:
     OPTUNA_AVAILABLE = True
 except ImportError:
     OPTUNA_AVAILABLE = False
-    logging.warning("Optuna가 설치되지 않았습니다. 하이퍼파라미터 튜닝 기능이 비활성화됩니다.")
+    logging.warning("Optuna not installed. Hyperparameter tuning functionality will be disabled.")
 
 from config import Config
 from models import BaseModel, CTRCalibrator
@@ -35,7 +35,7 @@ from evaluation import CTRMetrics
 logger = logging.getLogger(__name__)
 
 class BaseEnsemble(ABC):
-    """앙상블 모델 기본 클래스"""
+    """Base ensemble model class"""
     
     def __init__(self, name: str):
         self.name = name
@@ -47,45 +47,45 @@ class BaseEnsemble(ABC):
         
     @abstractmethod
     def fit(self, X: pd.DataFrame, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
-        """앙상블 모델 학습"""
+        """Train ensemble model"""
         pass
     
     @abstractmethod
     def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """앙상블 예측"""
+        """Ensemble prediction"""
         pass
     
     def add_base_model(self, name: str, model: BaseModel):
-        """기본 모델 추가"""
+        """Add base model"""
         self.base_models[name] = model
     
     def get_base_predictions(self, X: pd.DataFrame) -> Dict[str, np.ndarray]:
-        """모든 기본 모델의 예측 수집"""
+        """Collect predictions from all base models"""
         predictions = {}
         
         for name, model in self.base_models.items():
             try:
                 if hasattr(model, 'is_calibrated') and model.is_calibrated:
                     pred = model.predict_proba(X)
-                    logger.info(f"{name} 모델: 캘리브레이션 적용된 예측 사용")
+                    logger.info(f"{name} model: Using calibrated predictions")
                 else:
                     pred = model.predict_proba(X)
                     
                 predictions[name] = pred
             except Exception as e:
-                logger.error(f"{name} 모델 예측 실패: {str(e)}")
+                logger.error(f"{name} model prediction failed: {str(e)}")
                 predictions[name] = np.full(len(X), 0.0201)
         
         return predictions
     
     def apply_ensemble_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, 
                                  ensemble_predictions: np.ndarray, method: str = 'auto'):
-        """앙상블 수준 캘리브레이션 적용"""
+        """Apply ensemble-level calibration"""
         try:
-            logger.info(f"{self.name} 앙상블에 캘리브레이션 적용: {method}")
+            logger.info(f"Applying calibration to {self.name} ensemble: {method}")
             
             if len(ensemble_predictions) != len(y_val):
-                logger.warning("앙상블 캘리브레이션: 크기 불일치")
+                logger.warning("Ensemble calibration: Size mismatch")
                 return
             
             self.ensemble_calibrator = CTRCalibrator(target_ctr=0.0201, method=method)
@@ -99,18 +99,18 @@ class BaseEnsemble(ABC):
             calibrated_ctr = calibrated_predictions.mean()
             actual_ctr = y_val.mean()
             
-            logger.info(f"앙상블 캘리브레이션 결과:")
-            logger.info(f"  - 원본 CTR: {original_ctr:.4f}")
-            logger.info(f"  - 캘리브레이션 CTR: {calibrated_ctr:.4f}")
-            logger.info(f"  - 실제 CTR: {actual_ctr:.4f}")
-            logger.info(f"  - 최적 방법: {self.ensemble_calibrator.best_method}")
+            logger.info(f"Ensemble calibration results:")
+            logger.info(f"  - Original CTR: {original_ctr:.4f}")
+            logger.info(f"  - Calibrated CTR: {calibrated_ctr:.4f}")
+            logger.info(f"  - Actual CTR: {actual_ctr:.4f}")
+            logger.info(f"  - Best method: {self.ensemble_calibrator.best_method}")
             
         except Exception as e:
-            logger.error(f"앙상블 캘리브레이션 적용 실패: {e}")
+            logger.error(f"Ensemble calibration application failed: {e}")
             self.is_calibrated = False
     
     def predict_proba_calibrated(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """캘리브레이션이 적용된 앙상블 예측"""
+        """Calibrated ensemble prediction"""
         raw_prediction = self.predict_proba(base_predictions)
         
         if self.is_calibrated and self.ensemble_calibrator is not None:
@@ -118,17 +118,17 @@ class BaseEnsemble(ABC):
                 calibrated_prediction = self.ensemble_calibrator.predict(raw_prediction)
                 return np.clip(calibrated_prediction, 1e-15, 1 - 1e-15)
             except Exception as e:
-                logger.warning(f"앙상블 캘리브레이션 예측 실패: {e}")
+                logger.warning(f"Ensemble calibration prediction failed: {e}")
         
         return raw_prediction
     
     def _enhance_ensemble_diversity(self, predictions: np.ndarray) -> np.ndarray:
-        """앙상블 예측 다양성 향상"""
+        """Enhance ensemble prediction diversity"""
         try:
             unique_count = len(np.unique(predictions))
             
             if unique_count < len(predictions) // 100:
-                logger.info(f"{self.name}: 앙상블 예측 다양성 향상 적용")
+                logger.info(f"{self.name}: Applying ensemble prediction diversity enhancement")
                 
                 noise_scale = max(predictions.std() * 0.005, 1e-7)
                 noise = np.random.normal(0, noise_scale, len(predictions))
@@ -139,11 +139,11 @@ class BaseEnsemble(ABC):
             return predictions
             
         except Exception as e:
-            logger.warning(f"앙상블 다양성 향상 실패: {e}")
+            logger.warning(f"Ensemble diversity enhancement failed: {e}")
             return predictions
 
 class CTRMainEnsemble(BaseEnsemble):
-    """CTR 예측 메인 앙상블"""
+    """CTR prediction main ensemble"""
     
     def __init__(self, target_ctr: float = 0.0201, optimization_method: str = 'final_combined'):
         super().__init__("CTRMainEnsemble")
@@ -159,44 +159,44 @@ class CTRMainEnsemble(BaseEnsemble):
         self.target_combined_score = 0.35
         self.meta_learner = None
         self.stacking_weights = {}
-        self.ensemble_execution_guaranteed = True  # 앙상블 실행 보장 플래그
+        self.ensemble_execution_guaranteed = True  # Ensemble execution guarantee flag
         
     def fit(self, X: pd.DataFrame, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
-        """메인 앙상블 학습"""
-        logger.info(f"CTR 메인 앙상블 학습 시작 - 목표: Combined Score 0.35+")
+        """Main ensemble training"""
+        logger.info(f"CTR main ensemble training started - Target: Combined Score 0.35+")
         
         available_models = list(base_predictions.keys())
-        logger.info(f"사용 가능한 모델: {available_models}")
+        logger.info(f"Available models: {available_models}")
         
         if len(available_models) < 2:
-            logger.warning("앙상블을 위한 모델이 부족합니다")
+            logger.warning("Insufficient models for ensemble")
             if available_models:
                 self.final_weights = {available_models[0]: 1.0}
             self.is_fitted = True
             return
         
         try:
-            # 1단계: 기본 가중치 계산
-            logger.info("1단계: 기본 가중치 계산")
+            # Stage 1: Calculate base weights
+            logger.info("Stage 1: Calculating base weights")
             self.final_weights = self._calculate_base_weights(base_predictions, y)
             
-            # 2단계: 가중 앙상블 생성
+            # Stage 2: Create weighted ensemble
             ensemble_pred = self._create_weighted_ensemble(base_predictions)
             
-            # 3단계: CTR 후처리
-            logger.info("3단계: CTR 후처리")
+            # Stage 3: CTR post-processing
+            logger.info("Stage 3: CTR post-processing")
             self._apply_ctr_postprocessing(ensemble_pred, y)
             
-            # 4단계: 메타 학습 적용
-            logger.info("4단계: 메타 학습 적용")
+            # Stage 4: Apply meta learning
+            logger.info("Stage 4: Applying meta learning")
             self._apply_meta_learning(base_predictions, y)
             
-            # 5단계: 스택킹 레이어 추가
-            logger.info("5단계: 스택킹 레이어 추가")
+            # Stage 5: Add stacking layer
+            logger.info("Stage 5: Adding stacking layer")
             self._apply_stacking_layer(base_predictions, y)
             
-            # 6단계: 앙상블 캘리브레이션 적용
-            logger.info("6단계: 앙상블 캘리브레이션 적용")
+            # Stage 6: Apply ensemble calibration
+            logger.info("Stage 6: Applying ensemble calibration")
             try:
                 split_idx = int(len(X) * 0.8)
                 X_cal = X.iloc[split_idx:]
@@ -213,10 +213,10 @@ class CTRMainEnsemble(BaseEnsemble):
                 self.apply_ensemble_calibration(X_cal, y_cal, cal_ensemble_pred, method='auto')
                 
             except Exception as e:
-                logger.warning(f"앙상블 캘리브레이션 적용 실패: {e}")
+                logger.warning(f"Ensemble calibration application failed: {e}")
             
-            # 7단계: 최종 검증 및 조정
-            logger.info("7단계: 최종 검증 및 조정")
+            # Stage 7: Final validation and adjustment
+            logger.info("Stage 7: Final validation and adjustment")
             final_pred = self._apply_all_corrections(ensemble_pred)
             
             if self.is_calibrated and self.ensemble_calibrator:
@@ -227,26 +227,26 @@ class CTRMainEnsemble(BaseEnsemble):
             
             final_score = self.metrics_calculator.combined_score(y, final_pred)
             
-            logger.info(f"메인 앙상블 Combined Score: {final_score:.4f}")
-            logger.info(f"앙상블 캘리브레이션 적용: {'Yes' if self.is_calibrated else 'No'}")
+            logger.info(f"Main ensemble Combined Score: {final_score:.4f}")
+            logger.info(f"Ensemble calibration applied: {'Yes' if self.is_calibrated else 'No'}")
             
             self.is_fitted = True
             self.ensemble_execution_guaranteed = True
-            logger.info("CTR 메인 앙상블 학습 완료")
+            logger.info("CTR main ensemble training completed")
             
         except Exception as e:
-            logger.error(f"앙상블 학습 실패: {e}")
-            # 실패 시에도 기본 가중치로 앙상블 보장
+            logger.error(f"Ensemble training failed: {e}")
+            # Guarantee ensemble even on failure with default weights
             self._create_fallback_ensemble(available_models)
             self.is_fitted = True
             self.ensemble_execution_guaranteed = True
     
     def _calculate_base_weights(self, base_predictions: Dict[str, np.ndarray], y: pd.Series) -> Dict[str, float]:
-        """기본 가중치 계산"""
+        """Calculate base weights"""
         
         model_names = list(base_predictions.keys())
         
-        # Layer 1: 개별 모델 성능 평가
+        # Layer 1: Individual model performance evaluation
         individual_scores = {}
         ctr_alignment_scores = {}
         diversity_scores = {}
@@ -279,14 +279,14 @@ class CTRMainEnsemble(BaseEnsemble):
             diversity_scores[name] = diversity
             calibration_scores[name] = calibration_quality
         
-        # Layer 2: 가중치 계산
+        # Layer 2: Weight calculation
         if OPTUNA_AVAILABLE:
             try:
                 optimized_weights = self._optuna_weight_optimization(
                     base_predictions, y, individual_scores, calibration_scores
                 )
             except Exception as e:
-                logger.warning(f"Optuna 가중치 튜닝 실패: {e}")
+                logger.warning(f"Optuna weight tuning failed: {e}")
                 optimized_weights = self._fallback_weight_calculation(
                     individual_scores, ctr_alignment_scores, diversity_scores, calibration_scores
                 )
@@ -295,14 +295,14 @@ class CTRMainEnsemble(BaseEnsemble):
                 individual_scores, ctr_alignment_scores, diversity_scores, calibration_scores
             )
         
-        logger.info(f"기본 가중치: {optimized_weights}")
+        logger.info(f"Base weights: {optimized_weights}")
         return optimized_weights
     
     def _optuna_weight_optimization(self, base_predictions: Dict[str, np.ndarray], 
                                    y: pd.Series, 
                                    individual_scores: Dict[str, float],
                                    calibration_scores: Dict[str, float]) -> Dict[str, float]:
-        """Optuna 가중치 튜닝"""
+        """Optuna weight tuning"""
         
         model_names = list(base_predictions.keys())
         
@@ -358,7 +358,7 @@ class CTRMainEnsemble(BaseEnsemble):
                 if total_weight > 0:
                     ensemble_pred /= total_weight
             
-            # Temperature 적용
+            # Apply temperature
             if ensemble_method != 'rank_weighted':
                 try:
                     logits = np.log(np.clip(ensemble_pred, 1e-15, 1-1e-15) / (1 - np.clip(ensemble_pred, 1e-15, 1-1e-15)))
@@ -406,8 +406,8 @@ class CTRMainEnsemble(BaseEnsemble):
         if total_weight > 0:
             optimized_weights = {k: v/total_weight for k, v in optimized_weights.items()}
         
-        logger.info(f"Optuna 가중치 튜닝 완료 - 최고 점수: {study.best_value:.4f}")
-        logger.info(f"앙상블 방법: {self.ensemble_method}, Temperature: {self.temperature:.3f}")
+        logger.info(f"Optuna weight tuning completed - Best score: {study.best_value:.4f}")
+        logger.info(f"Ensemble method: {self.ensemble_method}, Temperature: {self.temperature:.3f}")
         
         return optimized_weights
     
@@ -415,7 +415,7 @@ class CTRMainEnsemble(BaseEnsemble):
                                    ctr_alignment_scores: Dict[str, float],
                                    diversity_scores: Dict[str, float],
                                    calibration_scores: Dict[str, float]) -> Dict[str, float]:
-        """대체 가중치 계산"""
+        """Fallback weight calculation"""
         
         weights = {}
         for name in individual_scores.keys():
@@ -438,8 +438,8 @@ class CTRMainEnsemble(BaseEnsemble):
         return weights
     
     def _apply_ctr_postprocessing(self, predictions: np.ndarray, y: pd.Series):
-        """CTR 후처리"""
-        logger.info("CTR 후처리 시작")
+        """CTR post-processing"""
+        logger.info("CTR post-processing started")
         
         try:
             predicted_ctr = predictions.mean()
@@ -454,12 +454,12 @@ class CTRMainEnsemble(BaseEnsemble):
             self._fit_temperature_scaling(predictions, y)
             self._fit_quantile_corrections(predictions, y)
             
-            logger.info(f"CTR 후처리 완료")
-            logger.info(f"편향 보정: {self.bias_correction:.4f}, 승수 보정: {self.multiplicative_correction:.4f}")
+            logger.info(f"CTR post-processing completed")
+            logger.info(f"Bias correction: {self.bias_correction:.4f}, Multiplicative correction: {self.multiplicative_correction:.4f}")
             logger.info(f"Temperature: {self.temperature:.3f}")
             
         except Exception as e:
-            logger.error(f"CTR 후처리 실패: {e}")
+            logger.error(f"CTR post-processing failed: {e}")
             self.bias_correction = 0.0
             self.multiplicative_correction = 1.0
             self.temperature = 1.0
@@ -498,12 +498,12 @@ class CTRMainEnsemble(BaseEnsemble):
             self.logit_shift = result.x[1]
             
         except Exception as e:
-            logger.warning(f"Temperature scaling 실패: {e}")
+            logger.warning(f"Temperature scaling failed: {e}")
             self.temperature = 1.0
             self.logit_shift = 0.0
     
     def _fit_quantile_corrections(self, predictions: np.ndarray, y: pd.Series):
-        """분위수 기반 보정"""
+        """Quantile-based corrections"""
         try:
             quantiles = [0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
             
@@ -526,15 +526,15 @@ class CTRMainEnsemble(BaseEnsemble):
                         'sample_size': mask.sum()
                     }
             
-            logger.info(f"분위수 보정 완료: {len(self.quantile_corrections)}개 구간")
+            logger.info(f"Quantile correction completed: {len(self.quantile_corrections)} segments")
             
         except Exception as e:
-            logger.warning(f"분위수 보정 실패: {e}")
+            logger.warning(f"Quantile correction failed: {e}")
     
     def _apply_meta_learning(self, base_predictions: Dict[str, np.ndarray], y: pd.Series):
-        """메타 학습 적용"""
+        """Apply meta learning"""
         try:
-            logger.info("메타 학습 레이어 구성")
+            logger.info("Configuring meta learning layer")
             
             meta_features = []
             for name, pred in base_predictions.items():
@@ -555,16 +555,16 @@ class CTRMainEnsemble(BaseEnsemble):
             )
             
             self.meta_learner.fit(X_meta, y)
-            logger.info("메타 학습 완료")
+            logger.info("Meta learning completed")
             
         except Exception as e:
-            logger.warning(f"메타 학습 실패: {e}")
+            logger.warning(f"Meta learning failed: {e}")
             self.meta_learner = None
     
     def _apply_stacking_layer(self, base_predictions: Dict[str, np.ndarray], y: pd.Series):
-        """스택킹 레이어 추가"""
+        """Add stacking layer"""
         try:
-            logger.info("스택킹 레이어 구성")
+            logger.info("Configuring stacking layer")
             
             from sklearn.model_selection import cross_val_predict
             from sklearn.linear_model import LogisticRegression
@@ -591,14 +591,14 @@ class CTRMainEnsemble(BaseEnsemble):
             self.stacking_regressor.fit(stacking_features, y)
             
             stacking_score = self.metrics_calculator.combined_score(y, oof_predictions)
-            logger.info(f"스택킹 점수: {stacking_score:.4f}")
+            logger.info(f"Stacking score: {stacking_score:.4f}")
             
         except Exception as e:
-            logger.warning(f"스택킹 레이어 실패: {e}")
+            logger.warning(f"Stacking layer failed: {e}")
             self.stacking_regressor = None
     
     def _create_weighted_ensemble(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """가중 앙상블 생성"""
+        """Create weighted ensemble"""
         ensemble_pred = np.zeros(len(list(base_predictions.values())[0]))
         
         if hasattr(self, 'ensemble_method') and self.ensemble_method == 'power_weighted':
@@ -623,7 +623,7 @@ class CTRMainEnsemble(BaseEnsemble):
         return ensemble_pred
     
     def _create_final_ensemble(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """최종 앙상블 생성"""
+        """Create final ensemble"""
         base_ensemble = self._create_weighted_ensemble(base_predictions)
         
         if self.meta_learner is not None:
@@ -641,7 +641,7 @@ class CTRMainEnsemble(BaseEnsemble):
                 
                 base_ensemble = 0.7 * base_ensemble + 0.3 * meta_pred
             except Exception as e:
-                logger.warning(f"메타 학습 예측 실패: {e}")
+                logger.warning(f"Meta learning prediction failed: {e}")
         
         if hasattr(self, 'stacking_regressor') and self.stacking_regressor is not None:
             try:
@@ -653,12 +653,12 @@ class CTRMainEnsemble(BaseEnsemble):
                 
                 base_ensemble = 0.6 * base_ensemble + 0.4 * stacking_pred
             except Exception as e:
-                logger.warning(f"스택킹 예측 실패: {e}")
+                logger.warning(f"Stacking prediction failed: {e}")
         
         return base_ensemble
     
     def _apply_all_corrections(self, predictions: np.ndarray) -> np.ndarray:
-        """모든 보정 기법 적용"""
+        """Apply all correction techniques"""
         try:
             corrected = predictions.copy()
             
@@ -686,60 +686,60 @@ class CTRMainEnsemble(BaseEnsemble):
             return corrected
             
         except Exception as e:
-            logger.warning(f"전체 보정 적용 실패: {e}")
+            logger.warning(f"All corrections application failed: {e}")
             return np.clip(predictions, 1e-15, 1 - 1e-15)
     
     def _create_fallback_ensemble(self, available_models: List[str]):
-        """앙상블 실패 시 대체 방법"""
+        """Create fallback ensemble on failure"""
         try:
-            logger.info("앙상블 대체 방법 생성")
+            logger.info("Creating fallback ensemble")
             
-            # 동등 가중치 사용
+            # Use equal weights
             equal_weight = 1.0 / len(available_models)
             self.final_weights = {model: equal_weight for model in available_models}
             
-            # 기본 보정값 설정
+            # Set default correction values
             self.bias_correction = 0.0
             self.multiplicative_correction = 1.0
             self.temperature = 1.0
             self.logit_shift = 0.0
             self.quantile_corrections = {}
             
-            logger.info(f"대체 앙상블 생성 완료: 동등 가중치 {equal_weight:.3f}")
+            logger.info(f"Fallback ensemble created successfully: equal weight {equal_weight:.3f}")
             
         except Exception as e:
-            logger.error(f"대체 앙상블 생성 실패: {e}")
+            logger.error(f"Fallback ensemble creation failed: {e}")
     
     def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """메인 앙상블 예측 - 실행 보장"""
+        """Main ensemble prediction - execution guaranteed"""
         if not self.is_fitted:
-            logger.error("앙상블 모델이 학습되지 않았습니다")
-            # 학습되지 않았어도 기본 앙상블 제공
+            logger.error("Ensemble model not trained")
+            # Provide default ensemble even when not trained
             if base_predictions:
                 return np.mean(list(base_predictions.values()), axis=0)
             else:
-                raise ValueError("앙상블 모델이 학습되지 않았고 기본 예측도 없습니다")
+                raise ValueError("Ensemble model not trained and no default predictions available")
         
         try:
-            # 앙상블 실행 보장
-            logger.info("앙상블 예측 실행 시작")
+            # Guarantee ensemble execution
+            logger.info("Ensemble prediction execution started")
             
-            # 모든 모델이 정상 작동하는지 확인
+            # Check if all models are working properly
             valid_predictions = {}
             for name, pred in base_predictions.items():
                 if pred is not None and len(pred) > 0 and not np.all(np.isnan(pred)):
                     valid_predictions[name] = pred
                 else:
-                    logger.warning(f"{name} 모델 예측이 유효하지 않음")
+                    logger.warning(f"{name} model prediction is invalid")
             
             if len(valid_predictions) < 2:
-                logger.warning("유효한 모델이 부족하여 단일 모델 사용")
+                logger.warning("Insufficient valid models, using single model")
                 if valid_predictions:
                     return list(valid_predictions.values())[0]
                 else:
                     return np.full(len(list(base_predictions.values())[0]), 0.0201)
             
-            # 최종 앙상블 생성
+            # Create final ensemble
             final_pred = self._create_final_ensemble(valid_predictions)
             final_pred = self._apply_all_corrections(final_pred)
             
@@ -748,23 +748,23 @@ class CTRMainEnsemble(BaseEnsemble):
                     final_pred = self.ensemble_calibrator.predict(final_pred)
                     final_pred = np.clip(final_pred, 1e-15, 1 - 1e-15)
                 except Exception as e:
-                    logger.warning(f"앙상블 캘리브레이션 예측 실패: {e}")
+                    logger.warning(f"Ensemble calibration prediction failed: {e}")
             
-            logger.info("앙상블 예측 실행 완료")
+            logger.info("Ensemble prediction execution completed")
             return final_pred
             
         except Exception as e:
-            logger.error(f"앙상블 예측 실행 실패: {e}")
-            # 실패해도 기본 가중 평균 제공하여 앙상블 보장
+            logger.error(f"Ensemble prediction execution failed: {e}")
+            # Provide basic weighted average even on failure to guarantee ensemble
             try:
-                logger.info("앙상블 대체 예측 실행")
+                logger.info("Executing fallback ensemble prediction")
                 return np.mean(list(base_predictions.values()), axis=0)
             except Exception as e2:
-                logger.error(f"앙상블 대체 예측도 실패: {e2}")
+                logger.error(f"Fallback ensemble prediction also failed: {e2}")
                 return np.full(len(list(base_predictions.values())[0]), 0.0201)
 
 class CTRStabilizedEnsemble(BaseEnsemble):
-    """CTR 예측 안정화 앙상블"""
+    """CTR prediction stabilized ensemble"""
     
     def __init__(self, diversification_method: str = 'rank_weighted'):
         super().__init__("CTRStabilizedEnsemble")
@@ -778,13 +778,13 @@ class CTRStabilizedEnsemble(BaseEnsemble):
         self.ensemble_execution_guaranteed = True
         
     def fit(self, X: pd.DataFrame, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
-        """안정화 앙상블 학습"""
-        logger.info(f"CTR 안정화 앙상블 학습 시작 - 방법: {self.diversification_method}")
+        """Stabilized ensemble training"""
+        logger.info(f"CTR stabilized ensemble training started - Method: {self.diversification_method}")
         
         available_models = list(base_predictions.keys())
         
         if len(available_models) < 2:
-            logger.warning("앙상블을 위한 모델이 부족합니다")
+            logger.warning("Insufficient models for ensemble")
             if available_models:
                 self.final_weights = {available_models[0]: 1.0}
             self.is_fitted = True
@@ -815,16 +815,16 @@ class CTRStabilizedEnsemble(BaseEnsemble):
                 self.apply_ensemble_calibration(X_cal, y_cal, cal_ensemble_pred, method='auto')
                 
             except Exception as e:
-                logger.warning(f"안정화 앙상블 캘리브레이션 적용 실패: {e}")
+                logger.warning(f"Stabilized ensemble calibration application failed: {e}")
             
             self.is_fitted = True
             self.ensemble_execution_guaranteed = True
-            logger.info(f"CTR 안정화 앙상블 학습 완료 - 최종 가중치: {self.final_weights}")
-            logger.info(f"앙상블 캘리브레이션 적용: {'Yes' if self.is_calibrated else 'No'}")
+            logger.info(f"CTR stabilized ensemble training completed - Final weights: {self.final_weights}")
+            logger.info(f"Ensemble calibration applied: {'Yes' if self.is_calibrated else 'No'}")
             
         except Exception as e:
-            logger.error(f"안정화 앙상블 학습 실패: {e}")
-            # 실패 시 동등 가중치로 대체
+            logger.error(f"Stabilized ensemble training failed: {e}")
+            # Use equal weights as fallback
             equal_weight = 1.0 / len(available_models)
             self.final_weights = {model: equal_weight for model in available_models}
             self.is_fitted = True
@@ -832,7 +832,7 @@ class CTRStabilizedEnsemble(BaseEnsemble):
     
     def _evaluate_individual_performance(self, base_predictions: Dict[str, np.ndarray], 
                                        y: pd.Series) -> Dict[str, float]:
-        """개별 모델 성능 평가"""
+        """Evaluate individual model performance"""
         
         performance_weights = {}
         
@@ -870,18 +870,18 @@ class CTRStabilizedEnsemble(BaseEnsemble):
                 
                 performance_weights[name] = max(performance_score, 0.02)
                 
-                logger.info(f"{name} - Combined: {combined_score:.4f}, CTR편향: {ctr_bias:.4f}, "
-                          f"품질: {quality_score:.4f}, 캘리브레이션 보너스: {calibration_bonus:.2f}x, "
-                          f"최종: {performance_score:.4f}")
+                logger.info(f"{name} - Combined: {combined_score:.4f}, CTR bias: {ctr_bias:.4f}, "
+                          f"Quality: {quality_score:.4f}, Calibration bonus: {calibration_bonus:.2f}x, "
+                          f"Final: {performance_score:.4f}")
                 
             except Exception as e:
-                logger.warning(f"{name} 성능 평가 실패: {e}")
+                logger.warning(f"{name} performance evaluation failed: {e}")
                 performance_weights[name] = 0.02
         
         return performance_weights
     
     def _calculate_calibration_weights(self) -> Dict[str, float]:
-        """캘리브레이션 가중치 계산"""
+        """Calculate calibration weights"""
         calibration_weights = {}
         
         for name, model in self.base_models.items():
@@ -897,19 +897,19 @@ class CTRStabilizedEnsemble(BaseEnsemble):
                             calibration_quality = max(calibration_summary['calibration_scores'].values())
                             calibration_weight = 0.5 + 0.7 * calibration_quality
                             
-                            logger.info(f"{name} 캘리브레이션 품질: {calibration_quality:.4f}, "
-                                      f"가중치: {calibration_weight:.4f}")
+                            logger.info(f"{name} calibration quality: {calibration_quality:.4f}, "
+                                      f"Weight: {calibration_weight:.4f}")
                 
                 calibration_weights[name] = calibration_weight
                 
             except Exception as e:
-                logger.warning(f"{name} 캘리브레이션 가중치 계산 실패: {e}")
+                logger.warning(f"{name} calibration weight calculation failed: {e}")
                 calibration_weights[name] = 0.5
         
         return calibration_weights
     
     def _calculate_diversity_weights(self, base_predictions: Dict[str, np.ndarray]) -> Dict[str, float]:
-        """다양성 가중치 계산"""
+        """Calculate diversity weights"""
         
         model_names = list(base_predictions.keys())
         diversity_weights = {}
@@ -957,11 +957,11 @@ class CTRStabilizedEnsemble(BaseEnsemble):
         else:
             diversity_weights = {name: 1.0 for name in model_names}
         
-        logger.info(f"다양성 가중치: {diversity_weights}")
+        logger.info(f"Diversity weights: {diversity_weights}")
         return diversity_weights
     
     def _calculate_correlation_matrix(self, base_predictions: Dict[str, np.ndarray]) -> Dict[str, Dict[str, float]]:
-        """상관관계 행렬 계산"""
+        """Calculate correlation matrix"""
         
         model_names = list(base_predictions.keys())
         correlation_matrix = {}
@@ -992,13 +992,13 @@ class CTRStabilizedEnsemble(BaseEnsemble):
                         correlation_matrix[name1][name2] = combined_corr if not np.isnan(combined_corr) else 0.0
                         
                     except Exception as e:
-                        logger.warning(f"상관관계 계산 실패 ({name1}, {name2}): {e}")
+                        logger.warning(f"Correlation calculation failed ({name1}, {name2}): {e}")
                         correlation_matrix[name1][name2] = 0.0
         
         return correlation_matrix
     
     def _calculate_distance_matrix(self, base_predictions: Dict[str, np.ndarray]) -> Dict[str, Dict[str, float]]:
-        """거리 행렬 계산"""
+        """Calculate distance matrix"""
         
         model_names = list(base_predictions.keys())
         distance_matrix = {}
@@ -1023,13 +1023,13 @@ class CTRStabilizedEnsemble(BaseEnsemble):
                         distance_matrix[name1][name2] = combined_distance
                         
                     except Exception as e:
-                        logger.warning(f"거리 계산 실패 ({name1}, {name2}): {e}")
+                        logger.warning(f"Distance calculation failed ({name1}, {name2}): {e}")
                         distance_matrix[name1][name2] = 1.0
         
         return distance_matrix
     
     def _calculate_stability_weights(self, base_predictions: Dict[str, np.ndarray], y: pd.Series) -> Dict[str, float]:
-        """안정성 가중치 계산"""
+        """Calculate stability weights"""
         
         stability_weights = {}
         
@@ -1055,16 +1055,16 @@ class CTRStabilizedEnsemble(BaseEnsemble):
                 else:
                     stability_weights[name] = 0.5
                 
-                logger.info(f"{name} 안정성 점수: {stability_weights[name]:.4f}")
+                logger.info(f"{name} stability score: {stability_weights[name]:.4f}")
                 
             except Exception as e:
-                logger.warning(f"{name} 안정성 계산 실패: {e}")
+                logger.warning(f"{name} stability calculation failed: {e}")
                 stability_weights[name] = 0.5
         
         return stability_weights
     
     def _combine_weights_with_calibration(self) -> Dict[str, float]:
-        """가중치 결합"""
+        """Combine weights with calibration consideration"""
         
         combined_weights = {}
         model_names = list(self.model_weights.keys())
@@ -1110,7 +1110,7 @@ class CTRStabilizedEnsemble(BaseEnsemble):
         return combined_weights
     
     def _create_stabilized_ensemble(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """안정화된 앙상블 생성"""
+        """Create stabilized ensemble"""
         ensemble_pred = np.zeros(len(list(base_predictions.values())[0]))
         
         for name, weight in self.final_weights.items():
@@ -1122,16 +1122,16 @@ class CTRStabilizedEnsemble(BaseEnsemble):
         return ensemble_pred
     
     def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """안정화된 앙상블 예측 - 실행 보장"""
+        """Stabilized ensemble prediction - execution guaranteed"""
         if not self.is_fitted:
-            logger.error("앙상블 모델이 학습되지 않았습니다")
+            logger.error("Ensemble model not trained")
             if base_predictions:
                 return np.mean(list(base_predictions.values()), axis=0)
             else:
-                raise ValueError("앙상블 모델이 학습되지 않았고 기본 예측도 없습니다")
+                raise ValueError("Ensemble model not trained and no default predictions available")
         
         try:
-            logger.info("안정화 앙상블 예측 실행 시작")
+            logger.info("Stabilized ensemble prediction execution started")
             
             ensemble_pred = self._create_stabilized_ensemble(base_predictions)
             
@@ -1140,23 +1140,23 @@ class CTRStabilizedEnsemble(BaseEnsemble):
                     ensemble_pred = self.ensemble_calibrator.predict(ensemble_pred)
                     ensemble_pred = np.clip(ensemble_pred, 1e-15, 1 - 1e-15)
                 except Exception as e:
-                    logger.warning(f"안정화 앙상블 캘리브레이션 예측 실패: {e}")
+                    logger.warning(f"Stabilized ensemble calibration prediction failed: {e}")
             
-            logger.info("안정화 앙상블 예측 실행 완료")
+            logger.info("Stabilized ensemble prediction execution completed")
             return ensemble_pred
             
         except Exception as e:
-            logger.error(f"안정화 앙상블 예측 실행 실패: {e}")
-            # 실패해도 기본 가중 평균 제공
+            logger.error(f"Stabilized ensemble prediction execution failed: {e}")
+            # Provide basic weighted average even on failure
             try:
-                logger.info("안정화 앙상블 대체 예측 실행")
+                logger.info("Executing stabilized ensemble fallback prediction")
                 return np.mean(list(base_predictions.values()), axis=0)
             except Exception as e2:
-                logger.error(f"안정화 앙상블 대체 예측도 실패: {e2}")
+                logger.error(f"Stabilized ensemble fallback prediction also failed: {e2}")
                 return np.full(len(list(base_predictions.values())[0]), 0.0201)
 
 class CTRSuperEnsembleManager:
-    """CTR 특화 앙상블 관리 클래스"""
+    """CTR specialized ensemble management class"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -1168,10 +1168,10 @@ class CTRSuperEnsembleManager:
         self.final_ensemble = None
         self.target_combined_score = 0.35
         self.calibration_manager = {}
-        self.ensemble_execution_status = {}  # 앙상블 실행 상태 추적
+        self.ensemble_execution_status = {}  # Track ensemble execution status
         
     def add_base_model(self, name: str, model: BaseModel):
-        """기본 모델 추가"""
+        """Add base model"""
         self.base_models[name] = model
         
         calibration_status = "No"
@@ -1181,10 +1181,10 @@ class CTRSuperEnsembleManager:
                 calibration_method = getattr(model.calibrator, 'best_method', 'unknown')
                 calibration_status = f"Yes ({calibration_method})"
         
-        logger.info(f"기본 모델 추가: {name} - Calibration: {calibration_status}")
+        logger.info(f"Base model added: {name} - Calibration: {calibration_status}")
     
     def create_ensemble(self, ensemble_type: str, **kwargs) -> BaseEnsemble:
-        """CTR 특화 앙상블 생성"""
+        """Create CTR specialized ensemble"""
         
         try:
             if ensemble_type == 'final_ensemble':
@@ -1198,30 +1198,30 @@ class CTRSuperEnsembleManager:
                 ensemble = CTRStabilizedEnsemble(diversification_method)
             
             else:
-                raise ValueError(f"지원하지 않는 앙상블 타입: {ensemble_type}")
+                raise ValueError(f"Unsupported ensemble type: {ensemble_type}")
             
             for name, model in self.base_models.items():
                 ensemble.add_base_model(name, model)
             
             self.ensembles[ensemble_type] = ensemble
             self.ensemble_execution_status[ensemble_type] = {'created': True, 'fitted': False, 'error': None}
-            logger.info(f"앙상블 생성: {ensemble_type}")
+            logger.info(f"Ensemble created: {ensemble_type}")
             
             return ensemble
             
         except Exception as e:
-            logger.error(f"앙상블 생성 실패 ({ensemble_type}): {e}")
+            logger.error(f"Ensemble creation failed ({ensemble_type}): {e}")
             self.ensemble_execution_status[ensemble_type] = {'created': False, 'fitted': False, 'error': str(e)}
             raise
     
     def train_all_ensembles(self, X: pd.DataFrame, y: pd.Series):
-        """모든 앙상블 학습 - 실행 보장"""
-        logger.info("모든 앙상블 학습 시작 - 실행 보장")
+        """Train all ensembles - execution guaranteed"""
+        logger.info("All ensemble training started - execution guaranteed")
         
         base_predictions = {}
         calibration_info = {}
         
-        # 모든 기본 모델의 예측 수집
+        # Collect predictions from all base models
         for name, model in self.base_models.items():
             try:
                 start_time = time.time()
@@ -1235,37 +1235,37 @@ class CTRSuperEnsembleManager:
                 
                 prediction_time = time.time() - start_time
                 
-                # 예측 유효성 검증
+                # Validate prediction
                 if pred is None or len(pred) == 0 or np.all(np.isnan(pred)):
-                    logger.error(f"{name} 모델 예측이 유효하지 않음")
+                    logger.error(f"{name} model prediction is invalid")
                     pred = np.full(len(X), 0.0201)
                 
                 base_predictions[name] = pred
-                logger.info(f"{name} 모델 예측 완료 ({prediction_time:.2f}초) - "
+                logger.info(f"{name} model prediction completed ({prediction_time:.2f}s) - "
                           f"Calibration: {'Yes' if calibration_info[name]['calibrated'] else 'No'}")
                 
             except Exception as e:
-                logger.error(f"{name} 모델 예측 실패: {str(e)}")
+                logger.error(f"{name} model prediction failed: {str(e)}")
                 base_predictions[name] = np.full(len(X), 0.0201)
                 calibration_info[name] = {'calibrated': False, 'method': 'error'}
         
-        # 최소한 1개의 유효한 예측이 있는지 확인
+        # Ensure at least one valid prediction exists
         if not base_predictions:
-            logger.error("모든 기본 모델 예측 실패")
+            logger.error("All base model predictions failed")
             base_predictions['dummy'] = np.full(len(X), 0.0201)
             calibration_info['dummy'] = {'calibrated': False, 'method': 'dummy'}
         
-        # 각 앙상블 학습 - 실행 보장
+        # Train each ensemble - execution guaranteed
         for ensemble_type, ensemble in self.ensembles.items():
             try:
-                logger.info(f"{ensemble_type} 앙상블 학습 시작 - 실행 보장")
+                logger.info(f"{ensemble_type} ensemble training started - execution guaranteed")
                 start_time = time.time()
                 
-                # 앙상블 학습 실행
+                # Execute ensemble training
                 ensemble.fit(X, y, base_predictions)
                 training_time = time.time() - start_time
                 
-                # 실행 상태 업데이트
+                # Update execution status
                 self.ensemble_execution_status[ensemble_type].update({
                     'fitted': True,
                     'training_time': training_time,
@@ -1273,22 +1273,22 @@ class CTRSuperEnsembleManager:
                 })
                 
                 calibration_status = "Yes" if ensemble.is_calibrated else "No"
-                logger.info(f"{ensemble_type} 앙상블 학습 완료 ({training_time:.2f}초) - "
+                logger.info(f"{ensemble_type} ensemble training completed ({training_time:.2f}s) - "
                           f"Ensemble Calibration: {calibration_status}, "
                           f"Execution Guaranteed: {self.ensemble_execution_status[ensemble_type]['ensemble_guaranteed']}")
                 
             except Exception as e:
-                logger.error(f"{ensemble_type} 앙상블 학습 실패: {str(e)}")
-                # 실행 상태 업데이트
+                logger.error(f"{ensemble_type} ensemble training failed: {str(e)}")
+                # Update execution status
                 self.ensemble_execution_status[ensemble_type].update({
                     'fitted': False,
                     'error': str(e),
                     'ensemble_guaranteed': False
                 })
                 
-                # 실패해도 기본 앙상블 보장
+                # Guarantee basic ensemble even on failure
                 try:
-                    logger.info(f"{ensemble_type} 앙상블 대체 방법 적용")
+                    logger.info(f"{ensemble_type} ensemble applying fallback method")
                     if hasattr(ensemble, '_create_fallback_ensemble'):
                         ensemble._create_fallback_ensemble(list(base_predictions.keys()))
                         ensemble.is_fitted = True
@@ -1297,21 +1297,21 @@ class CTRSuperEnsembleManager:
                             'fallback_used': True,
                             'ensemble_guaranteed': True
                         })
-                        logger.info(f"{ensemble_type} 앙상블 대체 방법 성공")
+                        logger.info(f"{ensemble_type} ensemble fallback method successful")
                 except Exception as fallback_error:
-                    logger.error(f"{ensemble_type} 앙상블 대체 방법도 실패: {fallback_error}")
+                    logger.error(f"{ensemble_type} ensemble fallback method also failed: {fallback_error}")
         
         self.calibration_manager = calibration_info
         gc.collect()
         
-        # 앙상블 실행 보장 상태 로깅
-        logger.info("앙상블 실행 보장 상태:")
+        # Log ensemble execution guarantee status
+        logger.info("Ensemble execution guarantee status:")
         for ensemble_type, status in self.ensemble_execution_status.items():
             logger.info(f"  - {ensemble_type}: {status}")
     
     def evaluate_ensembles(self, X_val: pd.DataFrame, y_val: pd.Series) -> Dict[str, float]:
-        """앙상블 성능 평가 - 실행 보장"""
-        logger.info("앙상블 성능 평가 시작 - 실행 보장")
+        """Evaluate ensemble performance - execution guaranteed"""
+        logger.info("Ensemble performance evaluation started - execution guaranteed")
         
         results = {}
         
@@ -1320,9 +1320,9 @@ class CTRSuperEnsembleManager:
             try:
                 pred = model.predict_proba(X_val)
                 
-                # 예측 유효성 검증
+                # Validate prediction
                 if pred is None or len(pred) == 0 or np.all(np.isnan(pred)):
-                    logger.warning(f"{name} 모델 검증 예측이 유효하지 않음")
+                    logger.warning(f"{name} model validation prediction is invalid")
                     pred = np.full(len(X_val), 0.0201)
                 
                 base_predictions[name] = pred
@@ -1341,22 +1341,22 @@ class CTRSuperEnsembleManager:
                             raw_score = self.metrics_calculator.combined_score(y_val, raw_pred)
                             calibration_improvement = score - raw_score
                             results[f"base_{name}_calibration_improvement"] = calibration_improvement
-                            logger.info(f"{name} 캘리브레이션 효과: {calibration_improvement:+.4f}")
+                            logger.info(f"{name} calibration effect: {calibration_improvement:+.4f}")
                         except:
                             pass
                 
             except Exception as e:
-                logger.error(f"{name} 모델 검증 예측 실패: {str(e)}")
+                logger.error(f"{name} model validation prediction failed: {str(e)}")
                 results[f"base_{name}"] = 0.0
                 results[f"base_{name}_ctr_optimized"] = 0.0
         
-        # 각 앙상블 평가 - 실행 보장
+        # Evaluate each ensemble - execution guaranteed
         for ensemble_type, ensemble in self.ensembles.items():
             if ensemble.is_fitted:
                 try:
-                    logger.info(f"{ensemble_type} 앙상블 평가 시작 - 실행 보장")
+                    logger.info(f"{ensemble_type} ensemble evaluation started - execution guaranteed")
                     
-                    # 앙상블 예측 실행 보장
+                    # Guarantee ensemble prediction execution
                     try:
                         raw_ensemble_pred = ensemble.predict_proba(base_predictions)
                         
@@ -1365,15 +1365,15 @@ class CTRSuperEnsembleManager:
                         else:
                             calibrated_ensemble_pred = raw_ensemble_pred
                         
-                        # 예측 유효성 검증
+                        # Validate prediction
                         if (calibrated_ensemble_pred is None or len(calibrated_ensemble_pred) == 0 or 
                             np.all(np.isnan(calibrated_ensemble_pred))):
-                            logger.warning(f"{ensemble_type} 앙상블 예측이 유효하지 않음")
+                            logger.warning(f"{ensemble_type} ensemble prediction is invalid")
                             calibrated_ensemble_pred = np.full(len(X_val), 0.0201)
                         
                     except Exception as pred_error:
-                        logger.error(f"{ensemble_type} 앙상블 예측 실패: {pred_error}")
-                        # 예측 실패 시 기본값 사용
+                        logger.error(f"{ensemble_type} ensemble prediction failed: {pred_error}")
+                        # Use default value on prediction failure
                         calibrated_ensemble_pred = np.full(len(X_val), 0.0201)
                         raw_ensemble_pred = calibrated_ensemble_pred
                     
@@ -1392,34 +1392,34 @@ class CTRSuperEnsembleManager:
                             raw_combined_score = self.metrics_calculator.combined_score(y_val, raw_ensemble_pred)
                             calibration_improvement = combined_score - raw_combined_score
                             results[f"ensemble_{ensemble_type}_calibration_improvement"] = calibration_improvement
-                            logger.info(f"{ensemble_type} 앙상블 캘리브레이션 효과: {calibration_improvement:+.4f}")
+                            logger.info(f"{ensemble_type} ensemble calibration effect: {calibration_improvement:+.4f}")
                         except:
                             pass
                     
-                    # 앙상블 실행 보장 상태 추가
+                    # Add ensemble execution guarantee status
                     execution_guaranteed = getattr(ensemble, 'ensemble_execution_guaranteed', False)
                     results[f"ensemble_{ensemble_type}_execution_guaranteed"] = 1.0 if execution_guaranteed else 0.0
                     
-                    logger.info(f"{ensemble_type} 앙상블 Combined Score: {combined_score:.4f}")
-                    logger.info(f"{ensemble_type} 앙상블 CTR Optimized Score: {ctr_optimized_score:.4f}")
-                    logger.info(f"{ensemble_type} 앙상블 Calibration: {'Yes' if ensemble.is_calibrated else 'No'}")
-                    logger.info(f"{ensemble_type} 앙상블 Execution Guaranteed: {'Yes' if execution_guaranteed else 'No'}")
+                    logger.info(f"{ensemble_type} ensemble Combined Score: {combined_score:.4f}")
+                    logger.info(f"{ensemble_type} ensemble CTR Optimized Score: {ctr_optimized_score:.4f}")
+                    logger.info(f"{ensemble_type} ensemble Calibration: {'Yes' if ensemble.is_calibrated else 'No'}")
+                    logger.info(f"{ensemble_type} ensemble Execution Guaranteed: {'Yes' if execution_guaranteed else 'No'}")
                     
                     predicted_ctr = calibrated_ensemble_pred.mean()
                     actual_ctr = y_val.mean()
                     ctr_bias = abs(predicted_ctr - actual_ctr)
-                    logger.info(f"{ensemble_type} CTR: 예측 {predicted_ctr:.4f} vs 실제 {actual_ctr:.4f} (편향: {ctr_bias:.4f})")
+                    logger.info(f"{ensemble_type} CTR: Predicted {predicted_ctr:.4f} vs Actual {actual_ctr:.4f} (Bias: {ctr_bias:.4f})")
                     
                     target_achieved = combined_score >= self.target_combined_score
-                    logger.info(f"{ensemble_type} 목표 달성: {target_achieved} (목표: {self.target_combined_score})")
+                    logger.info(f"{ensemble_type} target achieved: {target_achieved} (Target: {self.target_combined_score})")
                     
                 except Exception as e:
-                    logger.error(f"{ensemble_type} 앙상블 평가 실패: {str(e)}")
+                    logger.error(f"{ensemble_type} ensemble evaluation failed: {str(e)}")
                     results[f"ensemble_{ensemble_type}"] = 0.0
                     results[f"ensemble_{ensemble_type}_ctr_optimized"] = 0.0
                     results[f"ensemble_{ensemble_type}_execution_guaranteed"] = 0.0
         
-        # 최고 성능 앙상블 선택 - 실행 보장 우선
+        # Select best performance ensemble - execution guarantee priority
         if results:
             ensemble_results = {k: v for k, v in results.items() 
                               if k.startswith('ensemble_') and not k.endswith('_ctr_optimized') 
@@ -1428,7 +1428,7 @@ class CTRSuperEnsembleManager:
                               and not k.endswith('_execution_guaranteed')}
             
             if ensemble_results:
-                # 실행 보장된 앙상블 중에서 최고 성능 선택
+                # Select best performance among execution-guaranteed ensembles
                 guaranteed_ensembles = []
                 for ensemble_name in ensemble_results.keys():
                     ensemble_type = ensemble_name.replace('ensemble_', '')
@@ -1438,30 +1438,30 @@ class CTRSuperEnsembleManager:
                 
                 if guaranteed_ensembles:
                     best_name = max(guaranteed_ensembles, key=lambda x: ensemble_results[x])
-                    logger.info("실행 보장된 앙상블 중에서 최고 성능 선택")
+                    logger.info("Best performance selected among execution-guaranteed ensembles")
                 else:
                     best_name = max(ensemble_results, key=ensemble_results.get)
-                    logger.info("실행 보장 실패, 일반 최고 성능 앙상블 선택")
+                    logger.info("Execution guarantee failed, general best performance ensemble selected")
                 
                 best_score = ensemble_results[best_name]
                 
                 ensemble_type = best_name.replace('ensemble_', '')
                 self.best_ensemble = self.ensembles[ensemble_type]
                 
-                logger.info(f"최고 성능 앙상블: {ensemble_type} (Combined Score: {best_score:.4f})")
+                logger.info(f"Best performance ensemble: {ensemble_type} (Combined Score: {best_score:.4f})")
                 
                 if best_score >= self.target_combined_score:
-                    logger.info(f"목표 Combined Score {self.target_combined_score}+ 달성!")
+                    logger.info(f"Target Combined Score {self.target_combined_score}+ achieved!")
                 else:
-                    logger.info(f"목표까지 {self.target_combined_score - best_score:.4f} 부족")
+                    logger.info(f"Still {self.target_combined_score - best_score:.4f} short of target")
                     
                 best_ensemble_obj = self.ensembles[ensemble_type]
                 if best_ensemble_obj.is_calibrated:
-                    logger.info("최고 앙상블에 캘리브레이션 적용됨")
+                    logger.info("Best ensemble has calibration applied")
                 if getattr(best_ensemble_obj, 'ensemble_execution_guaranteed', False):
-                    logger.info("최고 앙상블 실행 보장됨")
+                    logger.info("Best ensemble execution guaranteed")
             else:
-                logger.warning("평가 가능한 앙상블이 없습니다.")
+                logger.warning("No evaluable ensembles available.")
                 self.best_ensemble = None
         
         self.ensemble_results = results
@@ -1469,40 +1469,40 @@ class CTRSuperEnsembleManager:
         calibration_improvements = [v for k, v in results.items() if k.endswith('_calibration_improvement')]
         if calibration_improvements:
             avg_improvement = np.mean(calibration_improvements)
-            logger.info(f"평균 캘리브레이션 효과: {avg_improvement:+.4f}")
+            logger.info(f"Average calibration effect: {avg_improvement:+.4f}")
         
         return results
     
     def predict_with_best_ensemble(self, X: pd.DataFrame) -> np.ndarray:
-        """최고 성능 앙상블로 예측 - 실행 보장"""
-        logger.info("최고 성능 앙상블 예측 시작 - 실행 보장")
+        """Predict with best performance ensemble - execution guaranteed"""
+        logger.info("Best performance ensemble prediction started - execution guaranteed")
         
         try:
-            # 기본 모델 예측 수집
+            # Collect base model predictions
             base_predictions = {}
             for name, model in self.base_models.items():
                 try:
                     pred = model.predict_proba(X)
                     
-                    # 예측 유효성 검증
+                    # Validate prediction
                     if pred is None or len(pred) == 0 or np.all(np.isnan(pred)):
-                        logger.warning(f"{name} 모델 예측이 유효하지 않음")
+                        logger.warning(f"{name} model prediction is invalid")
                         pred = np.full(len(X), 0.0201)
                     
                     base_predictions[name] = pred
                     
                 except Exception as e:
-                    logger.error(f"{name} 예측 실패: {str(e)}")
+                    logger.error(f"{name} prediction failed: {str(e)}")
                     base_predictions[name] = np.full(len(X), 0.0201)
             
-            # 최소한 1개의 예측이 있는지 확인
+            # Ensure at least one prediction exists
             if not base_predictions:
-                logger.error("모든 기본 모델 예측 실패")
+                logger.error("All base model predictions failed")
                 return np.full(len(X), 0.0201)
             
-            # 최고 앙상블로 예측 - 실행 보장
+            # Predict with best ensemble - execution guaranteed
             if self.best_ensemble is None:
-                logger.warning("최고 앙상블이 없음, 기본 모델 중 최고 성능 사용")
+                logger.warning("No best ensemble available, using best performance base model")
                 
                 best_model_name = None
                 best_score = 0
@@ -1516,43 +1516,43 @@ class CTRSuperEnsembleManager:
                         best_model_name = result_name.replace('base_', '')
                 
                 if best_model_name and best_model_name in self.base_models:
-                    logger.info(f"최고 성능 기본 모델 사용: {best_model_name}")
+                    logger.info(f"Using best performance base model: {best_model_name}")
                     return self.base_models[best_model_name].predict_proba(X)
                 else:
-                    logger.info("평균 앙상블 사용")
+                    logger.info("Using average ensemble")
                     return np.mean(list(base_predictions.values()), axis=0)
             
-            # 최고 앙상블로 예측 실행
+            # Execute prediction with best ensemble
             try:
-                logger.info(f"최고 앙상블 ({self.best_ensemble.name}) 예측 실행")
+                logger.info(f"Best ensemble ({self.best_ensemble.name}) prediction execution")
                 
                 if self.best_ensemble.is_calibrated:
                     prediction = self.best_ensemble.predict_proba_calibrated(base_predictions)
                 else:
                     prediction = self.best_ensemble.predict_proba(base_predictions)
                 
-                # 예측 유효성 최종 검증
+                # Final prediction validation
                 if prediction is None or len(prediction) == 0 or np.all(np.isnan(prediction)):
-                    logger.error("최고 앙상블 예측이 유효하지 않음")
+                    logger.error("Best ensemble prediction is invalid")
                     prediction = np.mean(list(base_predictions.values()), axis=0)
                 
-                logger.info("최고 앙상블 예측 완료 - 실행 보장")
+                logger.info("Best ensemble prediction completed - execution guaranteed")
                 return prediction
                 
             except Exception as ensemble_error:
-                logger.error(f"최고 앙상블 예측 실패: {ensemble_error}")
+                logger.error(f"Best ensemble prediction failed: {ensemble_error}")
                 
-                # 앙상블 실패 시 기본 가중 평균 사용
-                logger.info("앙상블 실패, 기본 가중 평균 사용")
+                # Use basic weighted average on ensemble failure
+                logger.info("Ensemble failed, using basic weighted average")
                 return np.mean(list(base_predictions.values()), axis=0)
             
         except Exception as e:
-            logger.error(f"앙상블 예측 전체 실패: {e}")
-            # 최후의 수단으로 기본값 반환
+            logger.error(f"Ensemble prediction total failure: {e}")
+            # Last resort: return default value
             return np.full(len(X), 0.0201)
     
     def get_ensemble_summary(self) -> Dict[str, Any]:
-        """앙상블 요약 정보"""
+        """Get ensemble summary information"""
         
         target_achieved_count = sum(
             1 for key, score in self.ensemble_results.items()
@@ -1573,7 +1573,7 @@ class CTRSuperEnsembleManager:
             if hasattr(ensemble, 'is_calibrated') and ensemble.is_calibrated
         )
         
-        # 앙상블 실행 보장 상태 계산
+        # Calculate ensemble execution guarantee status
         guaranteed_ensembles = sum(
             1 for ensemble in self.ensembles.values()
             if getattr(ensemble, 'ensemble_execution_guaranteed', False)

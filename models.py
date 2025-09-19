@@ -18,21 +18,21 @@ try:
     LIGHTGBM_AVAILABLE = True
 except ImportError:
     LIGHTGBM_AVAILABLE = False
-    logging.warning("LightGBM이 설치되지 않았습니다.")
+    logging.warning("LightGBM is not installed.")
 
 try:
     import xgboost as xgb
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
-    logging.warning("XGBoost가 설치되지 않았습니다.")
+    logging.warning("XGBoost is not installed.")
 
 try:
     from catboost import CatBoostClassifier
     CATBOOST_AVAILABLE = True
 except ImportError:
     CATBOOST_AVAILABLE = False
-    logging.warning("CatBoost가 설치되지 않았습니다.")
+    logging.warning("CatBoost is not installed.")
 
 TORCH_AVAILABLE = False
 AMP_AVAILABLE = False
@@ -64,11 +64,11 @@ try:
             gpu_available = True
             rtx_4060ti_detected = 'RTX 4060 Ti' in gpu_name or gpu_memory_gb >= 15.0
             
-            logging.info(f"GPU 감지: {gpu_name} ({gpu_memory_gb:.1f}GB)")
-            logging.info(f"RTX 4060 Ti 최적화: {rtx_4060ti_detected}")
+            logging.info(f"GPU detected: {gpu_name} ({gpu_memory_gb:.1f}GB)")
+            logging.info(f"RTX 4060 Ti optimization: {rtx_4060ti_detected}")
             
         except Exception as e:
-            logging.warning(f"GPU 테스트 실패: {e}. CPU 전용 모드")
+            logging.warning(f"GPU test failed: {e}. CPU only mode")
             gpu_available = False
     
     TORCH_AVAILABLE = True
@@ -82,7 +82,7 @@ try:
             if gpu_available and hasattr(torch.cuda, 'amp'):
                 from torch.cuda.amp import GradScaler, autocast
                 AMP_AVAILABLE = True
-                logging.info("Mixed Precision 활성화")
+                logging.info("Mixed Precision enabled")
             else:
                 AMP_AVAILABLE = False
         except (ImportError, AttributeError):
@@ -92,7 +92,7 @@ except ImportError:
     TORCH_AVAILABLE = False
     AMP_AVAILABLE = False
     rtx_4060ti_detected = False
-    logging.warning("PyTorch가 설치되지 않았습니다. DeepCTR 모델을 사용할 수 없습니다.")
+    logging.warning("PyTorch is not installed. DeepCTR models will not be available.")
 
 try:
     from sklearn.calibration import CalibratedClassifierCV
@@ -104,7 +104,7 @@ try:
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
-    logging.warning("scikit-learn이 설치되지 않았습니다.")
+    logging.warning("scikit-learn is not installed.")
 
 try:
     import psutil
@@ -117,14 +117,14 @@ try:
     SCIPY_AVAILABLE = True
 except ImportError:
     SCIPY_AVAILABLE = False
-    logging.warning("scipy가 설치되지 않았습니다. 일부 캘리브레이션 기능이 제한됩니다.")
+    logging.warning("scipy is not installed. Some calibration functions will be limited.")
 
 from config import Config
 
 logger = logging.getLogger(__name__)
 
 class CTRCalibrator:
-    """CTR 예측 전용 캘리브레이션 클래스"""
+    """CTR prediction specialized calibration class"""
     
     def __init__(self, target_ctr: float = 0.0191, method: str = 'auto'):
         self.target_ctr = target_ctr
@@ -145,13 +145,13 @@ class CTRCalibrator:
         self.spline_calibrator = None
         
     def fit_platt_scaling(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Platt Scaling 캘리브레이션 학습"""
+        """Platt Scaling calibration training"""
         try:
             if not SKLEARN_AVAILABLE:
-                logger.warning("scikit-learn을 사용할 수 없어 Platt Scaling을 건너뜁니다")
+                logger.warning("scikit-learn is not available, skipping Platt Scaling")
                 return
                 
-            logger.info("Platt Scaling 캘리브레이션 학습 시작")
+            logger.info("Platt Scaling calibration training started")
             
             self.platt_scaler = LogisticRegression()
             
@@ -163,19 +163,19 @@ class CTRCalibrator:
             calibrated_probs = self.apply_platt_scaling(y_pred_proba)
             self.calibration_scores['platt_scaling'] = self._evaluate_calibration(y_true, calibrated_probs)
             
-            logger.info(f"Platt Scaling 학습 완료 - 점수: {self.calibration_scores['platt_scaling']:.4f}")
+            logger.info(f"Platt Scaling training complete - score: {self.calibration_scores['platt_scaling']:.4f}")
             
         except Exception as e:
-            logger.error(f"Platt Scaling 학습 실패: {e}")
+            logger.error(f"Platt Scaling training failed: {e}")
     
     def fit_isotonic_regression(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Isotonic Regression 캘리브레이션 학습"""
+        """Isotonic Regression calibration training"""
         try:
             if not SKLEARN_AVAILABLE:
-                logger.warning("scikit-learn을 사용할 수 없어 Isotonic Regression을 건너뜁니다")
+                logger.warning("scikit-learn is not available, skipping Isotonic Regression")
                 return
                 
-            logger.info("Isotonic Regression 캘리브레이션 학습 시작")
+            logger.info("Isotonic Regression calibration training started")
             
             self.isotonic_regressor = IsotonicRegression(out_of_bounds='clip')
             self.isotonic_regressor.fit(y_pred_proba, y_true)
@@ -183,15 +183,15 @@ class CTRCalibrator:
             calibrated_probs = self.apply_isotonic_regression(y_pred_proba)
             self.calibration_scores['isotonic_regression'] = self._evaluate_calibration(y_true, calibrated_probs)
             
-            logger.info(f"Isotonic Regression 학습 완료 - 점수: {self.calibration_scores['isotonic_regression']:.4f}")
+            logger.info(f"Isotonic Regression training complete - score: {self.calibration_scores['isotonic_regression']:.4f}")
             
         except Exception as e:
-            logger.error(f"Isotonic Regression 학습 실패: {e}")
+            logger.error(f"Isotonic Regression training failed: {e}")
     
     def fit_temperature_scaling(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Temperature Scaling 캘리브레이션 학습"""
+        """Temperature Scaling calibration training"""
         try:
-            logger.info("Temperature Scaling 캘리브레이션 학습 시작")
+            logger.info("Temperature Scaling calibration training started")
             
             def temperature_loss(params):
                 temp, bias = params
@@ -240,18 +240,18 @@ class CTRCalibrator:
             calibrated_probs = self.apply_temperature_scaling(y_pred_proba)
             self.calibration_scores['temperature_scaling'] = self._evaluate_calibration(y_true, calibrated_probs)
             
-            logger.info(f"Temperature Scaling 학습 완료 - 온도: {self.temperature:.3f}, 편향: {self.temperature_bias:.3f}")
-            logger.info(f"Temperature Scaling 점수: {self.calibration_scores['temperature_scaling']:.4f}")
+            logger.info(f"Temperature Scaling training complete - temperature: {self.temperature:.3f}, bias: {self.temperature_bias:.3f}")
+            logger.info(f"Temperature Scaling score: {self.calibration_scores['temperature_scaling']:.4f}")
             
         except Exception as e:
-            logger.error(f"Temperature Scaling 학습 실패: {e}")
+            logger.error(f"Temperature Scaling training failed: {e}")
             self.temperature = 1.0
             self.temperature_bias = 0.0
     
     def fit_beta_calibration(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Beta 캘리브레이션 학습"""
+        """Beta calibration training"""
         try:
-            logger.info("Beta 캘리브레이션 학습 시작")
+            logger.info("Beta calibration training started")
             
             def beta_loss(params):
                 a, b = params
@@ -281,16 +281,16 @@ class CTRCalibrator:
                 calibrated_probs = self.apply_beta_calibration(y_pred_proba)
                 self.calibration_scores['beta_calibration'] = self._evaluate_calibration(y_true, calibrated_probs)
                 
-                logger.info(f"Beta 캘리브레이션 학습 완료 - 점수: {self.calibration_scores['beta_calibration']:.4f}")
+                logger.info(f"Beta calibration training complete - score: {self.calibration_scores['beta_calibration']:.4f}")
             
         except Exception as e:
-            logger.warning(f"Beta 캘리브레이션 학습 실패: {e}")
+            logger.warning(f"Beta calibration training failed: {e}")
             self.beta_params = None
     
     def fit_bias_correction(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """편향 보정 학습"""
+        """Bias correction training"""
         try:
-            logger.info("편향 보정 학습 시작")
+            logger.info("Bias correction training started")
             
             actual_ctr = y_true.mean()
             predicted_ctr = y_pred_proba.mean()
@@ -302,14 +302,14 @@ class CTRCalibrator:
             else:
                 self.multiplicative_correction = 1.0
             
-            logger.info(f"편향 보정 완료 - 가법: {self.bias_correction:.4f}, 승법: {self.multiplicative_correction:.4f}")
+            logger.info(f"Bias correction complete - additive: {self.bias_correction:.4f}, multiplicative: {self.multiplicative_correction:.4f}")
             
         except Exception as e:
-            logger.error(f"편향 보정 학습 실패: {e}")
+            logger.error(f"Bias correction training failed: {e}")
     
     def fit(self, y_true: np.ndarray, y_pred_proba: np.ndarray, methods: List[str] = None):
-        """전체 캘리브레이션 학습"""
-        logger.info("CTR 캘리브레이션 학습 시작")
+        """Complete calibration training"""
+        logger.info("CTR calibration training started")
         
         if methods is None:
             methods = ['platt_scaling', 'isotonic_regression', 'temperature_scaling', 'beta_calibration', 'bias_correction']
@@ -318,10 +318,10 @@ class CTRCalibrator:
         y_pred_proba = np.asarray(y_pred_proba)
         
         if len(y_true) != len(y_pred_proba):
-            raise ValueError("y_true와 y_pred_proba의 길이가 다릅니다")
+            raise ValueError("Length mismatch between y_true and y_pred_proba")
         
         if len(y_true) == 0:
-            raise ValueError("빈 배열은 처리할 수 없습니다")
+            raise ValueError("Empty array cannot be processed")
         
         if 'platt_scaling' in methods:
             self.fit_platt_scaling(y_true, y_pred_proba)
@@ -340,16 +340,16 @@ class CTRCalibrator:
         
         if self.calibration_scores:
             self.best_method = max(self.calibration_scores, key=self.calibration_scores.get)
-            logger.info(f"최적 캘리브레이션 방법: {self.best_method} (점수: {self.calibration_scores[self.best_method]:.4f})")
+            logger.info(f"Best calibration method: {self.best_method} (score: {self.calibration_scores[self.best_method]:.4f})")
         else:
             self.best_method = 'bias_correction'
-            logger.warning("모든 캘리브레이션 방법이 실패했습니다. 편향 보정만 사용")
+            logger.warning("All calibration methods failed. Using bias correction only")
         
         self.is_fitted = True
-        logger.info("CTR 캘리브레이션 학습 완료")
+        logger.info("CTR calibration training complete")
     
     def apply_platt_scaling(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """Platt Scaling 적용"""
+        """Apply Platt Scaling"""
         if self.platt_scaler is None:
             return y_pred_proba
         
@@ -359,11 +359,11 @@ class CTRCalibrator:
             calibrated_probs = self.platt_scaler.predict_proba(logits.reshape(-1, 1))[:, 1]
             return np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
         except Exception as e:
-            logger.warning(f"Platt Scaling 적용 실패: {e}")
+            logger.warning(f"Platt Scaling application failed: {e}")
             return y_pred_proba
     
     def apply_isotonic_regression(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """Isotonic Regression 적용"""
+        """Apply Isotonic Regression"""
         if self.isotonic_regressor is None:
             return y_pred_proba
         
@@ -371,11 +371,11 @@ class CTRCalibrator:
             calibrated_probs = self.isotonic_regressor.predict(y_pred_proba)
             return np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
         except Exception as e:
-            logger.warning(f"Isotonic Regression 적용 실패: {e}")
+            logger.warning(f"Isotonic Regression application failed: {e}")
             return y_pred_proba
     
     def apply_temperature_scaling(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """Temperature Scaling 적용"""
+        """Apply Temperature Scaling"""
         try:
             pred_clipped = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
             logits = np.log(pred_clipped / (1 - pred_clipped))
@@ -385,11 +385,11 @@ class CTRCalibrator:
             
             return np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
         except Exception as e:
-            logger.warning(f"Temperature Scaling 적용 실패: {e}")
+            logger.warning(f"Temperature Scaling application failed: {e}")
             return y_pred_proba
     
     def apply_beta_calibration(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """Beta 캘리브레이션 적용"""
+        """Apply Beta calibration"""
         if not hasattr(self, 'beta_params') or self.beta_params is None:
             return y_pred_proba
         
@@ -399,22 +399,22 @@ class CTRCalibrator:
             calibrated_probs = beta.cdf(y_pred_proba, a, b)
             return np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
         except Exception as e:
-            logger.warning(f"Beta 캘리브레이션 적용 실패: {e}")
+            logger.warning(f"Beta calibration application failed: {e}")
             return y_pred_proba
     
     def apply_bias_correction(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """편향 보정 적용"""
+        """Apply bias correction"""
         try:
             corrected = y_pred_proba * self.multiplicative_correction + self.bias_correction
             return np.clip(corrected, 1e-15, 1 - 1e-15)
         except Exception as e:
-            logger.warning(f"편향 보정 적용 실패: {e}")
+            logger.warning(f"Bias correction application failed: {e}")
             return y_pred_proba
     
     def predict(self, y_pred_proba: np.ndarray, method: str = None) -> np.ndarray:
-        """캘리브레이션된 예측 반환"""
+        """Return calibrated predictions"""
         if not self.is_fitted:
-            logger.warning("캘리브레이션이 학습되지 않았습니다. 원본 예측을 반환합니다.")
+            logger.warning("Calibration not fitted. Returning original predictions.")
             return y_pred_proba
         
         if method is None:
@@ -433,11 +433,11 @@ class CTRCalibrator:
         elif method == 'bias_correction':
             return self.apply_bias_correction(y_pred_proba)
         else:
-            logger.warning(f"알 수 없는 캘리브레이션 방법: {method}. 편향 보정 사용")
+            logger.warning(f"Unknown calibration method: {method}. Using bias correction")
             return self.apply_bias_correction(y_pred_proba)
     
     def _evaluate_calibration(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """캘리브레이션 품질 평가"""
+        """Evaluate calibration quality"""
         try:
             ece = self._calculate_ece(y_true, y_pred_proba)
             
@@ -452,11 +452,11 @@ class CTRCalibrator:
             return max(0.0, calibration_score)
             
         except Exception as e:
-            logger.warning(f"캘리브레이션 평가 실패: {e}")
+            logger.warning(f"Calibration evaluation failed: {e}")
             return 0.0
     
     def _calculate_ece(self, y_true: np.ndarray, y_pred_proba: np.ndarray, n_bins: int = 15) -> float:
-        """Expected Calibration Error 계산"""
+        """Calculate Expected Calibration Error"""
         try:
             bin_boundaries = np.linspace(0, 1, n_bins + 1)
             bin_lowers = bin_boundaries[:-1]
@@ -476,11 +476,11 @@ class CTRCalibrator:
             return ece
             
         except Exception as e:
-            logger.warning(f"ECE 계산 실패: {e}")
+            logger.warning(f"ECE calculation failed: {e}")
             return 1.0
     
     def _calculate_reliability(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """신뢰도 계산"""
+        """Calculate reliability"""
         try:
             sorted_indices = np.argsort(y_pred_proba)
             sorted_true = y_true[sorted_indices]
@@ -505,11 +505,11 @@ class CTRCalibrator:
             return np.mean(reliability_scores) if reliability_scores else 0.0
             
         except Exception as e:
-            logger.warning(f"신뢰도 계산 실패: {e}")
+            logger.warning(f"Reliability calculation failed: {e}")
             return 0.0
     
     def get_calibration_summary(self) -> Dict[str, Any]:
-        """캘리브레이션 요약 정보"""
+        """Calibration summary information"""
         return {
             'is_fitted': self.is_fitted,
             'best_method': self.best_method,
@@ -523,7 +523,7 @@ class CTRCalibrator:
         }
 
 class MemoryMonitor:
-    """64GB RAM 환경 메모리 모니터링"""
+    """64GB RAM environment memory monitoring"""
     
     def __init__(self, max_memory_gb: float = 55.0):
         self.monitoring_enabled = PSUTIL_AVAILABLE
@@ -536,11 +536,11 @@ class MemoryMonitor:
         self.critical_threshold = max_memory_gb * 0.80
         self.abort_threshold = max_memory_gb * 0.90
         
-        logger.info(f"메모리 임계값 - 경고: {self.warning_threshold:.1f}GB, "
-                   f"위험: {self.critical_threshold:.1f}GB, 중단: {self.abort_threshold:.1f}GB")
+        logger.info(f"Memory thresholds - warning: {self.warning_threshold:.1f}GB, "
+                   f"critical: {self.critical_threshold:.1f}GB, abort: {self.abort_threshold:.1f}GB")
         
     def get_memory_usage(self) -> float:
-        """메모리 사용량 (GB)"""
+        """Memory usage (GB)"""
         if not self.monitoring_enabled:
             return 2.0
         
@@ -559,7 +559,7 @@ class MemoryMonitor:
             return 2.0
     
     def get_available_memory(self) -> float:
-        """사용 가능한 메모리 (GB)"""
+        """Available memory (GB)"""
         if not self.monitoring_enabled:
             return 45.0
         
@@ -570,7 +570,7 @@ class MemoryMonitor:
             return 45.0
     
     def check_memory_pressure(self) -> bool:
-        """메모리 압박 상태 확인"""
+        """Check memory pressure status"""
         try:
             usage = self.get_memory_usage()
             available = self.get_available_memory()
@@ -580,7 +580,7 @@ class MemoryMonitor:
             return False
     
     def get_memory_status(self) -> Dict[str, Any]:
-        """상세한 메모리 상태 반환"""
+        """Detailed memory status"""
         try:
             usage = self.get_memory_usage()
             available = self.get_available_memory()
@@ -613,7 +613,7 @@ class MemoryMonitor:
             }
     
     def force_memory_cleanup(self, intensive: bool = False):
-        """메모리 정리"""
+        """Memory cleanup"""
         try:
             initial_memory = self.get_memory_usage()
             
@@ -652,16 +652,16 @@ class MemoryMonitor:
             memory_freed = initial_memory - final_memory
             
             if memory_freed > 0.1:
-                logger.info(f"메모리 정리: {memory_freed:.2f}GB 해제 ({cleanup_rounds}라운드)")
+                logger.info(f"Memory cleanup: {memory_freed:.2f}GB freed ({cleanup_rounds} rounds)")
             
             return memory_freed
             
         except Exception as e:
-            logger.warning(f"메모리 정리 실패: {e}")
+            logger.warning(f"Memory cleanup failed: {e}")
             return 0.0
 
 class BaseModel(ABC):
-    """모든 모델의 기본 클래스"""
+    """Base class for all models"""
     
     def __init__(self, name: str, params: Dict[str, Any] = None):
         self.name = name
@@ -672,37 +672,37 @@ class BaseModel(ABC):
         self.calibrator = None
         self.is_calibrated = False
         self.prediction_diversity_threshold = 2000
-        self.calibration_applied = False  # 캘리브레이션 적용 추적
+        self.calibration_applied = False  # Track calibration application
         
         self.memory_monitor = MemoryMonitor()
         
     @abstractmethod
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """모델 학습"""
+        """Model training"""
         pass
     
     @abstractmethod
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """확률 예측"""
+        """Probability prediction"""
         pass
     
     def predict(self, X: pd.DataFrame) -> np.ndarray:
-        """이진 예측"""
+        """Binary prediction"""
         proba = self.predict_proba(X)
         return (proba >= 0.5).astype(int)
     
     def apply_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, 
                          method: str = 'auto', cv_folds: int = 5):
-        """캘리브레이션 강제 적용"""
+        """Force apply calibration"""
         try:
-            logger.info(f"{self.name} 모델에 캘리브레이션 강제 적용: {method}")
+            logger.info(f"Force applying calibration to {self.name} model: {method}")
             
             if not self.is_fitted:
-                logger.warning("모델이 학습되지 않아 캘리브레이션을 건너뜁니다")
+                logger.warning("Model not fitted, skipping calibration")
                 return
             
-            # 캘리브레이션 강제 실행
+            # Force calibration execution
             raw_predictions = self.predict_proba_raw(X_val)
             
             self.calibrator = CTRCalibrator()
@@ -717,32 +717,32 @@ class BaseModel(ABC):
             calibrated_ctr = calibrated_predictions.mean()
             actual_ctr = y_val.mean()
             
-            logger.info(f"캘리브레이션 강제 적용 완료")
-            logger.info(f"  - 원본 CTR: {original_ctr:.4f}")
-            logger.info(f"  - 캘리브레이션 CTR: {calibrated_ctr:.4f}")
-            logger.info(f"  - 실제 CTR: {actual_ctr:.4f}")
-            logger.info(f"  - 최적 방법: {self.calibrator.best_method}")
+            logger.info(f"Forced calibration application complete")
+            logger.info(f"  - Original CTR: {original_ctr:.4f}")
+            logger.info(f"  - Calibrated CTR: {calibrated_ctr:.4f}")
+            logger.info(f"  - Actual CTR: {actual_ctr:.4f}")
+            logger.info(f"  - Best method: {self.calibrator.best_method}")
             
         except Exception as e:
-            logger.error(f"캘리브레이션 강제 적용 실패: {e}")
+            logger.error(f"Forced calibration application failed: {e}")
             self.is_calibrated = False
             self.calibration_applied = False
     
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """캘리브레이션 이전 원본 예측"""
+        """Raw predictions before calibration"""
         return self.predict_proba(X)
     
     def _memory_safe_fit(self, fit_function, *args, **kwargs):
-        """메모리 안전 학습 래퍼"""
+        """Memory safe training wrapper"""
         try:
             memory_status = self.memory_monitor.get_memory_status()
             
             if memory_status['should_cleanup']:
-                logger.info(f"{self.name}: 학습 전 메모리 정리 수행")
+                logger.info(f"{self.name}: Performing memory cleanup before training")
                 self.memory_monitor.force_memory_cleanup()
             
             if memory_status['should_simplify']:
-                logger.warning(f"{self.name}: 메모리 부족으로 단순화 모드 활성화")
+                logger.warning(f"{self.name}: Memory shortage, enabling simplified mode")
                 self._simplify_for_memory()
             
             result = fit_function(*args, **kwargs)
@@ -752,12 +752,12 @@ class BaseModel(ABC):
             return result
             
         except Exception as e:
-            logger.error(f"{self.name} 메모리 안전 학습 실패: {e}")
+            logger.error(f"{self.name} memory safe training failed: {e}")
             self.memory_monitor.force_memory_cleanup(intensive=True)
             raise
     
     def _memory_safe_predict(self, predict_function, X: pd.DataFrame, batch_size: int = None) -> np.ndarray:
-        """메모리 안전 예측 래퍼"""
+        """Memory safe prediction wrapper"""
         try:
             memory_status = self.memory_monitor.get_memory_status()
             
@@ -786,26 +786,26 @@ class BaseModel(ABC):
                         gc.collect()
                     
                     if self.memory_monitor.check_memory_pressure():
-                        logger.warning(f"{self.name}: 예측 중 메모리 압박 감지, 정리 수행")
+                        logger.warning(f"{self.name}: Memory pressure detected during prediction, cleaning up")
                         self.memory_monitor.force_memory_cleanup()
                         
                 except Exception as e:
-                    logger.warning(f"{self.name}: 배치 {i}-{batch_end} 예측 실패: {e}")
+                    logger.warning(f"{self.name}: Batch {i}-{batch_end} prediction failed: {e}")
                     batch_size_actual = batch_end - i
                     predictions.append(np.full(batch_size_actual, 0.0191))
             
             return np.concatenate(predictions) if predictions else np.array([])
             
         except Exception as e:
-            logger.error(f"{self.name} 메모리 안전 예측 실패: {e}")
+            logger.error(f"{self.name} memory safe prediction failed: {e}")
             return np.full(len(X), 0.0191)
     
     def _simplify_for_memory(self):
-        """메모리 부족 시 모델 파라미터 단순화"""
+        """Simplify model parameters when memory is low"""
         pass
     
     def _ensure_feature_consistency(self, X: pd.DataFrame) -> pd.DataFrame:
-        """피처 일관성 보장"""
+        """Ensure feature consistency"""
         if self.feature_names is None:
             return X
         
@@ -818,11 +818,11 @@ class BaseModel(ABC):
             return X[self.feature_names]
             
         except Exception as e:
-            logger.warning(f"피처 일관성 보장 실패: {e}")
+            logger.warning(f"Feature consistency check failed: {e}")
             return X
     
     def _enhance_prediction_diversity(self, predictions: np.ndarray) -> np.ndarray:
-        """예측 다양성 향상"""
+        """Enhance prediction diversity"""
         try:
             unique_predictions = len(np.unique(predictions))
             
@@ -836,15 +836,15 @@ class BaseModel(ABC):
             return predictions
             
         except Exception as e:
-            logger.warning(f"예측 다양성 향상 실패: {e}")
+            logger.warning(f"Prediction diversity enhancement failed: {e}")
             return predictions
 
 class LightGBMModel(BaseModel):
-    """LightGBM 모델 (캘리브레이션 강제 적용)"""
+    """LightGBM model (forced calibration application)"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not LIGHTGBM_AVAILABLE:
-            raise ImportError("LightGBM이 설치되지 않았습니다.")
+            raise ImportError("LightGBM is not installed.")
             
         default_params = {
             'objective': 'binary',
@@ -880,7 +880,7 @@ class LightGBMModel(BaseModel):
         self.prediction_diversity_threshold = 2500
     
     def _simplify_for_memory(self):
-        """메모리 부족 시 파라미터 단순화"""
+        """Simplify parameters when memory is low"""
         self.params.update({
             'num_leaves': 1023,
             'max_depth': 15,
@@ -889,12 +889,12 @@ class LightGBMModel(BaseModel):
             'num_threads': 8,
             'early_stopping_rounds': 500
         })
-        logger.info(f"{self.name}: 메모리 절약을 위해 파라미터 단순화")
+        logger.info(f"{self.name}: Parameters simplified for memory conservation")
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """LightGBM 모델 학습 (캘리브레이션 강제 적용)"""
-        logger.info(f"{self.name} 모델 학습 시작 (데이터: {len(X_train):,})")
+        """LightGBM model training (forced calibration application)"""
+        logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         
         def _fit_internal():
             self.feature_names = list(X_train.columns)
@@ -940,7 +940,7 @@ class LightGBMModel(BaseModel):
             def memory_callback(env):
                 if env.iteration % 300 == 0:
                     if self.memory_monitor.check_memory_pressure():
-                        logger.warning("학습 중 메모리 압박 감지")
+                        logger.warning("Memory pressure detected during training")
                         self.memory_monitor.force_memory_cleanup()
             
             callbacks.append(memory_callback)
@@ -955,14 +955,14 @@ class LightGBMModel(BaseModel):
             
             self.is_fitted = True
             
-            # 모든 LightGBM 모델에 캘리브레이션 강제 적용
+            # Force apply calibration to all LightGBM models
             if X_val_clean is not None and y_val is not None:
-                logger.info(f"{self.name}: 캘리브레이션 강제 적용 시작")
+                logger.info(f"{self.name}: Starting forced calibration application")
                 self.apply_calibration(X_val_clean, y_val, method='auto')
                 if self.is_calibrated:
-                    logger.info(f"{self.name}: 캘리브레이션 강제 적용 완료")
+                    logger.info(f"{self.name}: Forced calibration application complete")
                 else:
-                    logger.warning(f"{self.name}: 캘리브레이션 강제 적용 실패")
+                    logger.warning(f"{self.name}: Forced calibration application failed")
             
             del train_data
             if 'val_data' in locals():
@@ -976,9 +976,9 @@ class LightGBMModel(BaseModel):
         return self._memory_safe_fit(_fit_internal)
     
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """캘리브레이션 이전 원본 예측"""
+        """Raw predictions before calibration"""
         if not self.is_fitted:
-            raise ValueError("모델이 학습되지 않았습니다.")
+            raise ValueError("Model is not fitted.")
         
         def _predict_internal(batch_X):
             X_processed = self._ensure_feature_consistency(batch_X)
@@ -997,7 +997,7 @@ class LightGBMModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X)
     
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """캘리브레이션이 적용된 확률 예측"""
+        """Calibrated probability prediction"""
         raw_pred = self.predict_proba_raw(X)
         
         if self.is_calibrated and self.calibrator is not None:
@@ -1005,16 +1005,16 @@ class LightGBMModel(BaseModel):
                 calibrated_pred = self.calibrator.predict(raw_pred)
                 return np.clip(calibrated_pred, 1e-15, 1 - 1e-15)
             except Exception as e:
-                logger.warning(f"{self.name} 캘리브레이션 예측 실패: {e}")
+                logger.warning(f"{self.name} calibration prediction failed: {e}")
         
         return raw_pred
 
 class XGBoostModel(BaseModel):
-    """XGBoost 모델 (캘리브레이션 강제 적용)"""
+    """XGBoost model (forced calibration application)"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
-            raise ImportError("XGBoost가 설치되지 않았습니다.")
+            raise ImportError("XGBoost is not installed.")
         
         default_params = {
             'objective': 'binary:logistic',
@@ -1054,12 +1054,12 @@ class XGBoostModel(BaseModel):
                         'gpu_id': 0,
                         'predictor': 'gpu_predictor'
                     })
-                    logger.info("XGBoost GPU 모드 활성화")
+                    logger.info("XGBoost GPU mode enabled")
                 else:
-                    logger.info("메모리 부족으로 XGBoost CPU 모드 사용")
+                    logger.info("Using XGBoost CPU mode due to memory shortage")
                     
             except Exception as e:
-                logger.warning(f"GPU 설정 실패, CPU 모드 사용: {e}")
+                logger.warning(f"GPU setup failed, using CPU mode: {e}")
         
         if params:
             default_params.update(params)
@@ -1068,7 +1068,7 @@ class XGBoostModel(BaseModel):
         self.prediction_diversity_threshold = 2500
     
     def _simplify_for_memory(self):
-        """메모리 부족 시 파라미터 단순화"""
+        """Simplify parameters when memory is low"""
         self.params.update({
             'max_depth': 10,
             'n_estimators': 5000,
@@ -1080,12 +1080,12 @@ class XGBoostModel(BaseModel):
         })
         self.params.pop('gpu_id', None)
         self.params.pop('predictor', None)
-        logger.info(f"{self.name}: 메모리 절약을 위해 파라미터 단순화 및 CPU 모드 전환")
+        logger.info(f"{self.name}: Parameters simplified for memory conservation and switched to CPU mode")
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """XGBoost 모델 학습 (캘리브레이션 강제 적용)"""
-        logger.info(f"{self.name} 모델 학습 시작 (데이터: {len(X_train):,})")
+        """XGBoost model training (forced calibration application)"""
+        logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         
         def _fit_internal():
             self.feature_names = list(X_train.columns)
@@ -1133,14 +1133,14 @@ class XGBoostModel(BaseModel):
             
             self.is_fitted = True
             
-            # 모든 XGBoost 모델에 캘리브레이션 강제 적용
+            # Force apply calibration to all XGBoost models
             if X_val_clean is not None and y_val is not None:
-                logger.info(f"{self.name}: 캘리브레이션 강제 적용 시작")
+                logger.info(f"{self.name}: Starting forced calibration application")
                 self.apply_calibration(X_val_clean, y_val, method='auto')
                 if self.is_calibrated:
-                    logger.info(f"{self.name}: 캘리브레이션 강제 적용 완료")
+                    logger.info(f"{self.name}: Forced calibration application complete")
                 else:
-                    logger.warning(f"{self.name}: 캘리브레이션 강제 적용 실패")
+                    logger.warning(f"{self.name}: Forced calibration application failed")
             
             del dtrain
             if dval is not None:
@@ -1154,9 +1154,9 @@ class XGBoostModel(BaseModel):
         return self._memory_safe_fit(_fit_internal)
     
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """캘리브레이션 이전 원본 예측"""
+        """Raw predictions before calibration"""
         if not self.is_fitted:
-            raise ValueError("모델이 학습되지 않았습니다.")
+            raise ValueError("Model is not fitted.")
         
         def _predict_internal(batch_X):
             X_processed = self._ensure_feature_consistency(batch_X)
@@ -1185,7 +1185,7 @@ class XGBoostModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X)
     
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """캘리브레이션이 적용된 확률 예측"""
+        """Calibrated probability prediction"""
         raw_pred = self.predict_proba_raw(X)
         
         if self.is_calibrated and self.calibrator is not None:
@@ -1193,16 +1193,16 @@ class XGBoostModel(BaseModel):
                 calibrated_pred = self.calibrator.predict(raw_pred)
                 return np.clip(calibrated_pred, 1e-15, 1 - 1e-15)
             except Exception as e:
-                logger.warning(f"{self.name} 캘리브레이션 예측 실패: {e}")
+                logger.warning(f"{self.name} calibration prediction failed: {e}")
         
         return raw_pred
 
 class LogisticModel(BaseModel):
-    """로지스틱 회귀 모델 (캘리브레이션 강제 적용)"""
+    """Logistic regression model (forced calibration application)"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not SKLEARN_AVAILABLE:
-            raise ImportError("scikit-learn이 설치되지 않았습니다.")
+            raise ImportError("scikit-learn is not installed.")
             
         default_params = {
             'C': 0.03,
@@ -1226,7 +1226,7 @@ class LogisticModel(BaseModel):
         self.prediction_diversity_threshold = 2000
     
     def _simplify_for_memory(self):
-        """메모리 부족 시 파라미터 단순화"""
+        """Simplify parameters when memory is low"""
         self.params.update({
             'C': 0.05,
             'max_iter': 800,
@@ -1234,12 +1234,12 @@ class LogisticModel(BaseModel):
             'solver': 'liblinear'
         })
         self.model = LogisticRegression(**self.params)
-        logger.info(f"{self.name}: 메모리 절약을 위해 파라미터 단순화")
+        logger.info(f"{self.name}: Parameters simplified for memory conservation")
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """로지스틱 회귀 모델 학습 (캘리브레이션 강제 적용)"""
-        logger.info(f"{self.name} 모델 학습 시작 (데이터: {len(X_train):,})")
+        """Logistic regression model training (forced calibration application)"""
+        logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         
         def _fit_internal():
             self.feature_names = list(X_train.columns)
@@ -1247,7 +1247,7 @@ class LogisticModel(BaseModel):
             X_train_clean = X_train.fillna(0)
             
             if len(X_train_clean) > 4000000:
-                logger.info(f"대용량 데이터 감지, 샘플링 적용 ({len(X_train_clean):,} -> 4,000,000)")
+                logger.info(f"Large data detected, applying sampling ({len(X_train_clean):,} -> 4,000,000)")
                 
                 pos_indices = np.where(y_train == 1)[0]
                 neg_indices = np.where(y_train == 0)[0]
@@ -1273,23 +1273,23 @@ class LogisticModel(BaseModel):
                 self.model.fit(X_train_clean, y_train_sample)
                 training_time = time.time() - start_time
                 
-                logger.info(f"{self.name} 학습 완료 (소요시간: {training_time:.2f}초)")
+                logger.info(f"{self.name} training complete (time taken: {training_time:.2f}s)")
                 self.is_fitted = True
                 
             except Exception as e:
-                logger.warning(f"로지스틱 회귀 학습 실패: {e}")
+                logger.warning(f"Logistic regression training failed: {e}")
                 self._simplify_for_memory()
                 self.model.fit(X_train_clean, y_train_sample)
                 self.is_fitted = True
             
-            # 모든 로지스틱 회귀 모델에 캘리브레이션 강제 적용
+            # Force apply calibration to all logistic regression models
             if X_val is not None and y_val is not None:
-                logger.info(f"{self.name}: 캘리브레이션 강제 적용 시작")
+                logger.info(f"{self.name}: Starting forced calibration application")
                 self.apply_calibration(X_val, y_val, method='auto')
                 if self.is_calibrated:
-                    logger.info(f"{self.name}: 캘리브레이션 강제 적용 완료")
+                    logger.info(f"{self.name}: Forced calibration application complete")
                 else:
-                    logger.warning(f"{self.name}: 캘리브레이션 강제 적용 실패")
+                    logger.warning(f"{self.name}: Forced calibration application failed")
             
             del X_train_clean
             
@@ -1298,9 +1298,9 @@ class LogisticModel(BaseModel):
         return self._memory_safe_fit(_fit_internal)
     
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """캘리브레이션 이전 원본 예측"""
+        """Raw predictions before calibration"""
         if not self.is_fitted:
-            raise ValueError("모델이 학습되지 않았습니다.")
+            raise ValueError("Model is not fitted.")
         
         def _predict_internal(batch_X):
             X_processed = self._ensure_feature_consistency(batch_X)
@@ -1320,7 +1320,7 @@ class LogisticModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X)
     
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """캘리브레이션이 적용된 확률 예측"""
+        """Calibrated probability prediction"""
         raw_pred = self.predict_proba_raw(X)
         
         if self.is_calibrated and self.calibrator is not None:
@@ -1328,46 +1328,46 @@ class LogisticModel(BaseModel):
                 calibrated_pred = self.calibrator.predict(raw_pred)
                 return np.clip(calibrated_pred, 1e-15, 1 - 1e-15)
             except Exception as e:
-                logger.warning(f"{self.name} 캘리브레이션 예측 실패: {e}")
+                logger.warning(f"{self.name} calibration prediction failed: {e}")
         
         return raw_pred
 
 class ModelFactory:
-    """CTR 모델 팩토리 (캘리브레이션 강제 적용)"""
+    """CTR model factory (forced calibration application)"""
     
     @staticmethod
     def create_model(model_type: str, **kwargs) -> BaseModel:
-        """모델 인스턴스 생성 (캘리브레이션 강제 적용)"""
+        """Create model instance (forced calibration application)"""
         
         try:
-            logger.info(f"모델 생성: {model_type} (캘리브레이션 강제 적용 설정)")
+            logger.info(f"Creating model: {model_type} (forced calibration application configured)")
             
             if model_type.lower() == 'lightgbm':
                 if not LIGHTGBM_AVAILABLE:
-                    raise ImportError("LightGBM이 설치되지 않았습니다.")
+                    raise ImportError("LightGBM is not installed.")
                 model = LightGBMModel(kwargs.get('params'))
                 
             elif model_type.lower() == 'xgboost':
                 if not XGBOOST_AVAILABLE:
-                    raise ImportError("XGBoost가 설치되지 않았습니다.")
+                    raise ImportError("XGBoost is not installed.")
                 model = XGBoostModel(kwargs.get('params'))
                 
             elif model_type.lower() == 'logistic':
                 model = LogisticModel(kwargs.get('params'))
                 
             else:
-                raise ValueError(f"지원하지 않는 모델 타입: {model_type}")
+                raise ValueError(f"Unsupported model type: {model_type}")
             
-            logger.info(f"{model_type} 모델 생성 완료 - 캘리브레이션 강제 적용 보장")
+            logger.info(f"{model_type} model creation complete - forced calibration application guaranteed")
             return model
                 
         except Exception as e:
-            logger.error(f"모델 생성 실패 ({model_type}): {e}")
+            logger.error(f"Model creation failed ({model_type}): {e}")
             raise
     
     @staticmethod
     def get_available_models() -> List[str]:
-        """사용 가능한 모델 타입 리스트"""
+        """List of available model types"""
         available = []
         
         available.append('logistic')
@@ -1377,12 +1377,12 @@ class ModelFactory:
         if XGBOOST_AVAILABLE:
             available.append('xgboost')
         
-        logger.info(f"사용 가능한 모델: {available} (모든 모델에 캘리브레이션 강제 적용)")
+        logger.info(f"Available models: {available} (all models have forced calibration application)")
         return available
     
     @staticmethod
     def get_model_priority() -> List[str]:
-        """모델 우선순위 리스트"""
+        """Model priority list"""
         priority_order = []
         
         if LIGHTGBM_AVAILABLE:
@@ -1398,7 +1398,7 @@ class ModelFactory:
     
     @staticmethod
     def select_models_by_memory_status() -> List[str]:
-        """메모리 상태에 따른 모델 선택"""
+        """Select models based on memory status"""
         memory_monitor = MemoryMonitor()
         memory_status = memory_monitor.get_memory_status()
         

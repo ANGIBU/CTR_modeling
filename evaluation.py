@@ -20,7 +20,7 @@ try:
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
-    logging.warning("matplotlib이 설치되지 않았습니다. 시각화 기능이 비활성화됩니다.")
+    logging.warning("matplotlib not installed. Visualization functionality will be disabled.")
 
 try:
     from scipy import stats
@@ -28,14 +28,14 @@ try:
     SCIPY_AVAILABLE = True
 except ImportError:
     SCIPY_AVAILABLE = False
-    logging.warning("scipy가 설치되지 않았습니다. 일부 통계 기능이 비활성화됩니다.")
+    logging.warning("scipy not installed. Some statistical functionality will be disabled.")
 
 from config import Config
 
 logger = logging.getLogger(__name__)
 
 class CTRAdvancedMetrics:
-    """CTR 예측 전용 고급 평가 지표 클래스 - Combined Score 0.30+ 달성 목표 + 캘리브레이션 평가"""
+    """CTR prediction specialized advanced evaluation metrics class - Combined Score 0.30+ achievement goal + calibration evaluation"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -52,7 +52,7 @@ class CTRAdvancedMetrics:
         self.cache = {}
         
     def average_precision_enhanced(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """Enhanced Average Precision - 안정성 및 정확도 개선"""
+        """Enhanced Average Precision - improved stability and accuracy"""
         try:
             cache_key = f"ap_{hash(y_true.tobytes())}_{hash(y_pred_proba.tobytes())}"
             if cache_key in self.cache:
@@ -62,20 +62,20 @@ class CTRAdvancedMetrics:
             y_pred_proba = np.asarray(y_pred_proba).flatten()
             
             if len(y_true) != len(y_pred_proba):
-                logger.error(f"크기 불일치: y_true={len(y_true)}, y_pred_proba={len(y_pred_proba)}")
+                logger.error(f"Size mismatch: y_true={len(y_true)}, y_pred_proba={len(y_pred_proba)}")
                 return 0.0
             
             if len(y_true) == 0:
-                logger.warning("빈 배열로 인해 AP 계산 불가")
+                logger.warning("Cannot calculate AP due to empty array")
                 return 0.0
             
             unique_classes = np.unique(y_true)
             if len(unique_classes) < 2:
-                logger.warning("단일 클래스만 존재하여 AP 계산 불가")
+                logger.warning("Cannot calculate AP - only single class exists")
                 return 0.0
             
             if np.any(np.isnan(y_pred_proba)) or np.any(np.isinf(y_pred_proba)):
-                logger.warning("예측값에 NaN 또는 무한값 존재, 클리핑 적용")
+                logger.warning("NaN or infinite values in predictions, applying clipping")
                 y_pred_proba = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
                 y_pred_proba = np.nan_to_num(y_pred_proba, nan=0.5, posinf=1.0, neginf=0.0)
             
@@ -84,11 +84,11 @@ class CTRAdvancedMetrics:
             try:
                 ap_score = average_precision_score(y_true, y_pred_proba)
             except Exception as e:
-                logger.warning(f"sklearn AP 계산 실패, 수동 계산: {e}")
+                logger.warning(f"sklearn AP calculation failed, using manual calculation: {e}")
                 ap_score = self._manual_average_precision(y_true, y_pred_proba)
             
             if np.isnan(ap_score) or np.isinf(ap_score):
-                logger.warning("AP 계산 결과가 유효하지 않음")
+                logger.warning("AP calculation result is invalid")
                 return 0.0
             
             ap_score = float(ap_score)
@@ -96,11 +96,11 @@ class CTRAdvancedMetrics:
             
             return ap_score
         except Exception as e:
-            logger.error(f"Enhanced AP 계산 오류: {str(e)}")
+            logger.error(f"Enhanced AP calculation error: {str(e)}")
             return 0.0
     
     def _manual_average_precision(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """수동 Average Precision 계산"""
+        """Manual Average Precision calculation"""
         try:
             sorted_indices = np.argsort(y_pred_proba)[::-1]
             y_true_sorted = y_true[sorted_indices]
@@ -133,11 +133,11 @@ class CTRAdvancedMetrics:
             
             return ap
         except Exception as e:
-            logger.error(f"수동 AP 계산 실패: {e}")
+            logger.error(f"Manual AP calculation failed: {e}")
             return 0.0
     
     def weighted_log_loss_enhanced(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """Enhanced Weighted Log Loss - CTR 분포 특화 개선"""
+        """Enhanced Weighted Log Loss - CTR distribution specialized improvement"""
         try:
             cache_key = f"wll_{hash(y_true.tobytes())}_{hash(y_pred_proba.tobytes())}"
             if cache_key in self.cache:
@@ -147,15 +147,15 @@ class CTRAdvancedMetrics:
             y_pred_proba = np.asarray(y_pred_proba).flatten()
             
             if len(y_true) != len(y_pred_proba):
-                logger.error(f"크기 불일치: y_true={len(y_true)}, y_pred_proba={len(y_pred_proba)}")
+                logger.error(f"Size mismatch: y_true={len(y_true)}, y_pred_proba={len(y_pred_proba)}")
                 return float('inf')
             
             if len(y_true) == 0:
-                logger.warning("빈 배열로 인해 WLL 계산 불가")
+                logger.warning("Cannot calculate WLL due to empty array")
                 return float('inf')
             
             if np.any(np.isnan(y_pred_proba)) or np.any(np.isinf(y_pred_proba)):
-                logger.warning("예측값에 NaN 또는 무한값 존재, 클리핑 적용")
+                logger.warning("NaN or infinite values in predictions, applying clipping")
                 y_pred_proba = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
                 y_pred_proba = np.nan_to_num(y_pred_proba, nan=0.5, posinf=1.0, neginf=0.0)
             
@@ -173,7 +173,7 @@ class CTRAdvancedMetrics:
                               (1 - y_true) * np.log(1 - y_pred_proba_clipped))
             
             if np.any(np.isnan(log_loss_values)) or np.any(np.isinf(log_loss_values)):
-                logger.warning("Log loss 계산에서 NaN 또는 무한값 발생")
+                logger.warning("NaN or infinite values in log loss calculation")
                 return float('inf')
             
             weighted_log_loss = np.average(log_loss_values, weights=sample_weights)
@@ -182,7 +182,7 @@ class CTRAdvancedMetrics:
             final_wll = weighted_log_loss + ctr_penalty
             
             if np.isnan(final_wll) or np.isinf(final_wll):
-                logger.warning("WLL 계산 결과가 유효하지 않음")
+                logger.warning("WLL calculation result is invalid")
                 return float('inf')
             
             final_wll = float(final_wll)
@@ -191,11 +191,11 @@ class CTRAdvancedMetrics:
             return final_wll
             
         except Exception as e:
-            logger.error(f"Enhanced WLL 계산 오류: {str(e)}")
+            logger.error(f"Enhanced WLL calculation error: {str(e)}")
             return float('inf')
     
     def combined_score_enhanced(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """Enhanced Combined Score = AP + WLL + CTR보정 + 다양성보정 - 0.30+ 목표"""
+        """Enhanced Combined Score = AP + WLL + CTR correction + diversity correction - 0.30+ target"""
         try:
             cache_key = f"combined_{hash(y_true.tobytes())}_{hash(y_pred_proba.tobytes())}"
             if cache_key in self.cache:
@@ -205,7 +205,7 @@ class CTRAdvancedMetrics:
             y_pred_proba = np.asarray(y_pred_proba).flatten()
             
             if len(y_true) != len(y_pred_proba) or len(y_true) == 0:
-                logger.error("Combined Score 계산을 위한 입력 데이터 문제")
+                logger.error("Input data problem for Combined Score calculation")
                 return 0.0
             
             ap_score = self.average_precision_enhanced(y_true, y_pred_proba)
@@ -215,7 +215,7 @@ class CTRAdvancedMetrics:
             
             basic_combined = self.ap_weight * ap_score + self.wll_weight * wll_normalized
             
-            # CTR 정렬 보정
+            # CTR alignment correction
             try:
                 predicted_ctr = y_pred_proba.mean()
                 actual_ctr = y_true.mean()
@@ -228,10 +228,10 @@ class CTRAdvancedMetrics:
                 ctr_bonus = ctr_alignment * ctr_penalty
                 
             except Exception as e:
-                logger.warning(f"CTR 정렬 계산 실패: {e}")
+                logger.warning(f"CTR alignment calculation failed: {e}")
                 ctr_bonus = 0.5
             
-            # 예측 다양성 보정
+            # Prediction diversity correction
             try:
                 pred_std = y_pred_proba.std()
                 pred_range = y_pred_proba.max() - y_pred_proba.min()
@@ -241,24 +241,24 @@ class CTRAdvancedMetrics:
                 diversity_bonus = min(diversity_score * 2.0, 0.5)
                 
             except Exception as e:
-                logger.warning(f"다양성 계산 실패: {e}")
+                logger.warning(f"Diversity calculation failed: {e}")
                 diversity_bonus = 0.0
             
-            # 분포 매칭 보정
+            # Distribution matching correction
             try:
                 distribution_score = self._calculate_distribution_matching_score(y_true, y_pred_proba)
             except Exception as e:
-                logger.warning(f"분포 매칭 계산 실패: {e}")
+                logger.warning(f"Distribution matching calculation failed: {e}")
                 distribution_score = 0.5
             
-            # 최종 점수 계산
+            # Final score calculation
             final_score = (basic_combined * 
                           (1.0 + 0.3 * ctr_bonus) * 
                           (1.0 + 0.1 * diversity_bonus) * 
                           (1.0 + 0.2 * distribution_score))
             
             if np.isnan(final_score) or np.isinf(final_score) or final_score < 0:
-                logger.warning("Combined Score 계산 결과가 유효하지 않음")
+                logger.warning("Combined Score calculation result is invalid")
                 return 0.0
             
             final_score = float(final_score)
@@ -267,11 +267,11 @@ class CTRAdvancedMetrics:
             return final_score
             
         except Exception as e:
-            logger.error(f"Enhanced Combined Score 계산 오류: {str(e)}")
+            logger.error(f"Enhanced Combined Score calculation error: {str(e)}")
             return 0.0
     
     def calibration_score_advanced(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> Dict[str, float]:
-        """고급 캘리브레이션 품질 평가 - 다중 지표"""
+        """Advanced calibration quality evaluation - multiple metrics"""
         try:
             y_true = np.asarray(y_true).flatten()
             y_pred_proba = np.asarray(y_pred_proba).flatten()
@@ -300,11 +300,11 @@ class CTRAdvancedMetrics:
             }
             
         except Exception as e:
-            logger.error(f"고급 캘리브레이션 평가 실패: {e}")
+            logger.error(f"Advanced calibration evaluation failed: {e}")
             return {'ece': 1.0, 'mce': 1.0, 'brier_reliability': 1.0, 'brier_resolution': 0.0, 'calibration_score': 0.0}
     
     def _calculate_ece_advanced(self, y_true: np.ndarray, y_pred_proba: np.ndarray, n_bins: int = 15) -> float:
-        """고급 Expected Calibration Error 계산"""
+        """Advanced Expected Calibration Error calculation"""
         try:
             bin_boundaries = np.linspace(0, 1, n_bins + 1)
             bin_lowers = bin_boundaries[:-1]
@@ -326,11 +326,11 @@ class CTRAdvancedMetrics:
             return min(ece, 1.0)
             
         except Exception as e:
-            logger.warning(f"ECE 계산 실패: {e}")
+            logger.warning(f"ECE calculation failed: {e}")
             return 1.0
     
     def _calculate_mce_advanced(self, y_true: np.ndarray, y_pred_proba: np.ndarray, n_bins: int = 15) -> float:
-        """고급 Maximum Calibration Error 계산"""
+        """Advanced Maximum Calibration Error calculation"""
         try:
             bin_boundaries = np.linspace(0, 1, n_bins + 1)
             bin_lowers = bin_boundaries[:-1]
@@ -351,11 +351,11 @@ class CTRAdvancedMetrics:
             return min(max_error, 1.0)
             
         except Exception as e:
-            logger.warning(f"MCE 계산 실패: {e}")
+            logger.warning(f"MCE calculation failed: {e}")
             return 1.0
     
     def _calculate_brier_decomposition(self, y_true: np.ndarray, y_pred_proba: np.ndarray, n_bins: int = 10) -> Tuple[float, float]:
-        """브라이어 스코어 분해: 신뢰성과 해상도"""
+        """Brier score decomposition: reliability and resolution"""
         try:
             bin_boundaries = np.linspace(0, 1, n_bins + 1)
             bin_lowers = bin_boundaries[:-1]
@@ -375,28 +375,28 @@ class CTRAdvancedMetrics:
                     accuracy_in_bin = y_true[in_bin].mean()
                     avg_confidence_in_bin = y_pred_proba[in_bin].mean()
                     
-                    # 신뢰성 (낮을수록 좋음)
+                    # Reliability (lower is better)
                     reliability += prop_in_bin * (avg_confidence_in_bin - accuracy_in_bin) ** 2
                     
-                    # 해상도 (높을수록 좋음)
+                    # Resolution (higher is better)
                     resolution += prop_in_bin * (accuracy_in_bin - overall_accuracy) ** 2
             
             return min(reliability, 1.0), min(resolution, 1.0)
             
         except Exception as e:
-            logger.warning(f"브라이어 분해 계산 실패: {e}")
+            logger.warning(f"Brier decomposition calculation failed: {e}")
             return 1.0, 0.0
     
     def _calculate_overall_calibration_score(self, ece: float, mce: float, reliability: float, resolution: float) -> float:
-        """전체 캘리브레이션 점수 계산"""
+        """Calculate overall calibration score"""
         try:
-            # ECE와 MCE는 낮을수록 좋고, Resolution은 높을수록 좋고, Reliability는 낮을수록 좋음
-            ece_score = max(0.0, 1.0 - ece * 5)  # ECE 0.2 이하면 만점
-            mce_score = max(0.0, 1.0 - mce * 3)  # MCE 0.33 이하면 만점
-            reliability_score = max(0.0, 1.0 - reliability * 10)  # Reliability 0.1 이하면 만점
-            resolution_score = min(resolution * 5, 1.0)  # Resolution 0.2 이상이면 만점
+            # ECE and MCE are better when lower, Resolution is better when higher, Reliability is better when lower
+            ece_score = max(0.0, 1.0 - ece * 5)  # Full score if ECE <= 0.2
+            mce_score = max(0.0, 1.0 - mce * 3)  # Full score if MCE <= 0.33
+            reliability_score = max(0.0, 1.0 - reliability * 10)  # Full score if Reliability <= 0.1
+            resolution_score = min(resolution * 5, 1.0)  # Full score if Resolution >= 0.2
             
-            # 가중 평균
+            # Weighted average
             overall_score = (0.3 * ece_score + 
                            0.2 * mce_score + 
                            0.3 * reliability_score + 
@@ -405,11 +405,11 @@ class CTRAdvancedMetrics:
             return max(0.0, min(overall_score, 1.0))
             
         except Exception as e:
-            logger.warning(f"전체 캘리브레이션 점수 계산 실패: {e}")
+            logger.warning(f"Overall calibration score calculation failed: {e}")
             return 0.0
     
     def ctr_ultra_optimized_score(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """CTR 예측에 초고도 최적화된 종합 점수 - 0.32+ 목표"""
+        """Ultra-optimized comprehensive score for CTR prediction - 0.32+ target"""
         try:
             cache_key = f"ultra_{hash(y_true.tobytes())}_{hash(y_pred_proba.tobytes())}"
             if cache_key in self.cache:
@@ -419,14 +419,14 @@ class CTRAdvancedMetrics:
             y_pred_proba = np.asarray(y_pred_proba).flatten()
             
             if len(y_true) != len(y_pred_proba) or len(y_true) == 0:
-                logger.error("CTR 초최적화 점수 계산을 위한 입력 데이터 문제")
+                logger.error("Input data problem for CTR ultra-optimization score calculation")
                 return 0.0
             
             ap_score = self.average_precision_enhanced(y_true, y_pred_proba)
             wll_score = self.weighted_log_loss_enhanced(y_true, y_pred_proba)
             wll_normalized = 1 / (1 + wll_score) if wll_score != float('inf') else 0.0
             
-            # CTR 초정밀 정렬
+            # CTR ultra-precision alignment
             try:
                 predicted_ctr = y_pred_proba.mean()
                 actual_ctr = y_true.mean()
@@ -436,46 +436,46 @@ class CTRAdvancedMetrics:
                 ctr_stability = 1.0 / (1.0 + ctr_bias * 10000)
                 
             except Exception as e:
-                logger.warning(f"CTR 초정밀 계산 실패: {e}")
+                logger.warning(f"CTR ultra-precision calculation failed: {e}")
                 ultra_ctr_accuracy = 0.0
                 ctr_stability = 0.0
             
-            # 고급 보정 품질
+            # Advanced calibration quality
             try:
                 calibration_metrics = self.calibration_score_advanced(y_true, y_pred_proba)
                 calibration_score = calibration_metrics['calibration_score']
             except Exception as e:
-                logger.warning(f"고급 보정 품질 계산 실패: {e}")
+                logger.warning(f"Advanced calibration quality calculation failed: {e}")
                 calibration_score = 0.5
             
-            # 분포 완벽 매칭
+            # Perfect distribution matching
             try:
                 perfect_distribution_score = self._calculate_perfect_distribution_matching(y_true, y_pred_proba)
             except Exception as e:
-                logger.warning(f"완벽 분포 매칭 계산 실패: {e}")
+                logger.warning(f"Perfect distribution matching calculation failed: {e}")
                 perfect_distribution_score = 0.5
             
-            # 예측 품질 지표
+            # Prediction quality metrics
             try:
                 prediction_quality = self._calculate_prediction_quality_score(y_pred_proba)
             except Exception as e:
-                logger.warning(f"예측 품질 계산 실패: {e}")
+                logger.warning(f"Prediction quality calculation failed: {e}")
                 prediction_quality = 0.5
             
-            # 극값 영역 성능
+            # Extreme region performance
             try:
                 extreme_performance = self._calculate_extreme_region_performance(y_true, y_pred_proba)
             except Exception as e:
-                logger.warning(f"극값 영역 성능 계산 실패: {e}")
+                logger.warning(f"Extreme region performance calculation failed: {e}")
                 extreme_performance = 0.5
             
-            # 가중치 적용 (캘리브레이션 중요도 증가)
+            # Weight application (increased calibration importance)
             weights = {
                 'ap': 0.20,
                 'wll': 0.15,
                 'ultra_ctr_accuracy': 0.20,
                 'ctr_stability': 0.10,
-                'calibration': 0.15,  # 캘리브레이션 가중치 증가
+                'calibration': 0.15,  # Increased calibration weight
                 'perfect_distribution': 0.10,
                 'prediction_quality': 0.05,
                 'extreme_performance': 0.05
@@ -493,7 +493,7 @@ class CTRAdvancedMetrics:
             )
             
             if np.isnan(ultra_optimized_score) or np.isinf(ultra_optimized_score) or ultra_optimized_score < 0:
-                logger.warning("CTR 초최적화 점수 계산 결과가 유효하지 않음")
+                logger.warning("CTR ultra-optimization score calculation result is invalid")
                 return 0.0
             
             ultra_optimized_score = float(ultra_optimized_score)
@@ -502,11 +502,11 @@ class CTRAdvancedMetrics:
             return ultra_optimized_score
             
         except Exception as e:
-            logger.error(f"CTR 초최적화 점수 계산 오류: {str(e)}")
+            logger.error(f"CTR ultra-optimization score calculation error: {str(e)}")
             return 0.0
     
     def _calculate_distribution_matching_score(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """분포 매칭 점수 계산"""
+        """Calculate distribution matching score"""
         try:
             quantiles = [0.1, 0.25, 0.5, 0.75, 0.9]
             
@@ -537,11 +537,11 @@ class CTRAdvancedMetrics:
             return distribution_score
             
         except Exception as e:
-            logger.warning(f"분포 매칭 점수 계산 실패: {e}")
+            logger.warning(f"Distribution matching score calculation failed: {e}")
             return 0.5
     
     def _calculate_perfect_distribution_matching(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """완벽 분포 매칭 계산"""
+        """Calculate perfect distribution matching"""
         try:
             percentiles = np.arange(5, 100, 5)
             
@@ -573,11 +573,11 @@ class CTRAdvancedMetrics:
                 return 0.5
             
         except Exception as e:
-            logger.warning(f"완벽 분포 매칭 계산 실패: {e}")
+            logger.warning(f"Perfect distribution matching calculation failed: {e}")
             return 0.5
     
     def _calculate_prediction_quality_score(self, y_pred_proba: np.ndarray) -> float:
-        """예측 품질 점수 계산"""
+        """Calculate prediction quality score"""
         try:
             pred_std = y_pred_proba.std()
             pred_var = y_pred_proba.var()
@@ -603,18 +603,18 @@ class CTRAdvancedMetrics:
             return min(quality_score, 1.0)
             
         except Exception as e:
-            logger.warning(f"예측 품질 점수 계산 실패: {e}")
+            logger.warning(f"Prediction quality score calculation failed: {e}")
             return 0.5
     
     def _calculate_extreme_region_performance(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """극값 영역 성능 계산"""
+        """Calculate extreme region performance"""
         try:
             high_threshold = np.percentile(y_pred_proba, 99)
             low_threshold = np.percentile(y_pred_proba, 1)
             
             extreme_scores = []
             
-            # 고극값 영역
+            # High extreme region
             high_mask = y_pred_proba >= high_threshold
             if high_mask.sum() > 5:
                 high_actual = y_true[high_mask].mean()
@@ -627,7 +627,7 @@ class CTRAdvancedMetrics:
                 
                 extreme_scores.append(high_score)
             
-            # 저극값 영역
+            # Low extreme region
             low_mask = y_pred_proba <= low_threshold
             if low_mask.sum() > 5:
                 low_actual = y_true[low_mask].mean()
@@ -646,11 +646,11 @@ class CTRAdvancedMetrics:
                 return 0.5
             
         except Exception as e:
-            logger.warning(f"극값 영역 성능 계산 실패: {e}")
+            logger.warning(f"Extreme region performance calculation failed: {e}")
             return 0.5
     
     def _calculate_gini_coefficient(self, values: np.ndarray) -> float:
-        """지니 계수 계산"""
+        """Calculate Gini coefficient"""
         try:
             sorted_values = np.sort(values)
             n = len(sorted_values)
@@ -676,7 +676,7 @@ class CTRAdvancedMetrics:
                                                       y_pred_proba: np.ndarray,
                                                       model_name: str = "Unknown",
                                                       threshold: float = 0.5) -> Dict[str, float]:
-        """초종합적인 평가 지표 계산 - Combined Score 0.30+ 목표 + 캘리브레이션 평가"""
+        """Ultra-comprehensive evaluation metrics calculation - Combined Score 0.30+ target + calibration evaluation"""
         
         try:
             start_time = time.time()
@@ -685,15 +685,15 @@ class CTRAdvancedMetrics:
             y_pred_proba = np.asarray(y_pred_proba).flatten()
             
             if len(y_true) != len(y_pred_proba):
-                logger.error(f"입력 크기 불일치: y_true={len(y_true)}, y_pred_proba={len(y_pred_proba)}")
+                logger.error(f"Input size mismatch: y_true={len(y_true)}, y_pred_proba={len(y_pred_proba)}")
                 return self._get_default_metrics_ultra_with_calibration(model_name)
             
             if len(y_true) == 0:
-                logger.error("빈 입력 배열")
+                logger.error("Empty input array")
                 return self._get_default_metrics_ultra_with_calibration(model_name)
             
             if np.any(np.isnan(y_pred_proba)) or np.any(np.isinf(y_pred_proba)):
-                logger.warning("예측값에 NaN 또는 무한값 존재, 정리 수행")
+                logger.warning("NaN or infinite values in predictions, performing cleanup")
                 y_pred_proba = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
                 y_pred_proba = np.nan_to_num(y_pred_proba, nan=0.5, posinf=1.0, neginf=0.0)
             
@@ -702,57 +702,57 @@ class CTRAdvancedMetrics:
             metrics = {}
             metrics['model_name'] = model_name
             
-            # 주요 CTR 초고성능 지표
+            # Main CTR ultra-performance metrics
             try:
                 metrics['ap_enhanced'] = self.average_precision_enhanced(y_true, y_pred_proba)
                 metrics['wll_enhanced'] = self.weighted_log_loss_enhanced(y_true, y_pred_proba)
                 metrics['combined_score_enhanced'] = self.combined_score_enhanced(y_true, y_pred_proba)
                 metrics['ctr_ultra_optimized_score'] = self.ctr_ultra_optimized_score(y_true, y_pred_proba)
             except Exception as e:
-                logger.error(f"주요 CTR 지표 계산 실패: {e}")
+                logger.error(f"Main CTR metrics calculation failed: {e}")
                 metrics.update({
                     'ap_enhanced': 0.0, 'wll_enhanced': float('inf'), 
                     'combined_score_enhanced': 0.0, 'ctr_ultra_optimized_score': 0.0
                 })
             
-            # 고급 캘리브레이션 평가
+            # Advanced calibration evaluation
             try:
                 calibration_metrics = self.calibration_score_advanced(y_true, y_pred_proba)
                 metrics.update({
                     f'calibration_{k}': v for k, v in calibration_metrics.items()
                 })
                 
-                logger.info(f"{model_name} 캘리브레이션 평가:")
+                logger.info(f"{model_name} calibration evaluation:")
                 logger.info(f"  - ECE: {calibration_metrics['ece']:.4f}")
                 logger.info(f"  - MCE: {calibration_metrics['mce']:.4f}")
-                logger.info(f"  - 캘리브레이션 점수: {calibration_metrics['calibration_score']:.4f}")
+                logger.info(f"  - Calibration score: {calibration_metrics['calibration_score']:.4f}")
                 
             except Exception as e:
-                logger.error(f"캘리브레이션 지표 계산 실패: {e}")
+                logger.error(f"Calibration metrics calculation failed: {e}")
                 metrics.update({
                     'calibration_ece': 1.0, 'calibration_mce': 1.0, 
                     'calibration_brier_reliability': 1.0, 'calibration_brier_resolution': 0.0,
                     'calibration_score': 0.0
                 })
             
-            # 기본 분류 지표 (안정성 개선)
+            # Basic classification metrics (improved stability)
             try:
                 metrics['auc'] = roc_auc_score(y_true, y_pred_proba)
                 metrics['log_loss'] = log_loss(y_true, y_pred_proba)
                 metrics['brier_score'] = brier_score_loss(y_true, y_pred_proba)
             except Exception as e:
-                logger.warning(f"기본 분류 지표 계산 실패: {e}")
+                logger.warning(f"Basic classification metrics calculation failed: {e}")
                 metrics.update({
                     'auc': 0.5, 'log_loss': 1.0, 'brier_score': 0.25
                 })
             
-            # 혼동 행렬 기반 지표 (강화)
+            # Confusion matrix based metrics (enhanced)
             try:
                 cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
                 if cm.shape == (2, 2):
                     tn, fp, fn, tp = cm.ravel()
                 else:
-                    logger.warning("혼동 행렬 형태가 예상과 다름")
+                    logger.warning("Confusion matrix shape differs from expected")
                     tn, fp, fn, tp = 0, 0, 0, 0
                 
                 total = tp + tn + fp + fn
@@ -774,7 +774,7 @@ class CTRAdvancedMetrics:
                     else:
                         metrics['mcc'] = 0.0
                     
-                    # 향상된 성능 지표
+                    # Enhanced performance metrics
                     metrics['balanced_accuracy'] = (metrics['sensitivity'] + metrics['specificity']) / 2
                     metrics['geometric_mean'] = np.sqrt(metrics['sensitivity'] * metrics['specificity'])
                     
@@ -786,14 +786,14 @@ class CTRAdvancedMetrics:
                     })
                 
             except Exception as e:
-                logger.warning(f"혼동 행렬 지표 계산 실패: {e}")
+                logger.warning(f"Confusion matrix metrics calculation failed: {e}")
                 metrics.update({
                     'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0,
                     'specificity': 0.0, 'sensitivity': 0.0, 'f1': 0.0, 'mcc': 0.0,
                     'balanced_accuracy': 0.0, 'geometric_mean': 0.0
                 })
             
-            # CTR 초정밀 분석
+            # CTR ultra-precision analysis
             try:
                 metrics['ctr_actual'] = float(y_true.mean())
                 metrics['ctr_predicted'] = float(y_pred_proba.mean())
@@ -803,19 +803,19 @@ class CTRAdvancedMetrics:
                 metrics['ctr_relative_error'] = abs(metrics['ctr_bias']) / max(metrics['ctr_actual'], 1e-10)
                 metrics['ctr_alignment_score'] = np.exp(-abs(metrics['ctr_bias']) * 1000)
                 
-                # CTR 안정성 지표
+                # CTR stability metrics
                 metrics['ctr_stability'] = 1.0 / (1.0 + abs(metrics['ctr_bias']) * 10000)
                 metrics['target_ctr_achievement'] = 1.0 if abs(metrics['ctr_bias']) < 0.001 else 0.0
                 
             except Exception as e:
-                logger.warning(f"CTR 초정밀 분석 실패: {e}")
+                logger.warning(f"CTR ultra-precision analysis failed: {e}")
                 metrics.update({
                     'ctr_actual': 0.0201, 'ctr_predicted': 0.0201, 'ctr_bias': 0.0,
                     'ctr_ratio': 1.0, 'ctr_absolute_error': 0.0, 'ctr_relative_error': 0.0,
                     'ctr_alignment_score': 1.0, 'ctr_stability': 1.0, 'target_ctr_achievement': 1.0
                 })
             
-            # 예측 품질 통계 (강화)
+            # Prediction quality statistics (enhanced)
             try:
                 metrics['prediction_std'] = float(y_pred_proba.std())
                 metrics['prediction_var'] = float(y_pred_proba.var())
@@ -828,14 +828,14 @@ class CTRAdvancedMetrics:
                 metrics['effective_sample_size'] = len(y_pred_proba) / max(1 + metrics['prediction_var'] * len(y_pred_proba), 1)
                 
             except Exception as e:
-                logger.warning(f"예측 품질 통계 계산 실패: {e}")
+                logger.warning(f"Prediction quality statistics calculation failed: {e}")
                 metrics.update({
                     'prediction_std': 0.0, 'prediction_var': 0.0, 'prediction_entropy': 0.0, 
                     'prediction_gini': 0.0, 'prediction_range': 0.0, 'prediction_iqr': 0.0,
                     'unique_predictions_ratio': 0.0, 'effective_sample_size': len(y_true)
                 })
             
-            # 클래스별 예측 통계 (강화)
+            # Class-wise prediction statistics (enhanced)
             try:
                 pos_mask = (y_true == 1)
                 neg_mask = (y_true == 0)
@@ -866,30 +866,30 @@ class CTRAdvancedMetrics:
                     metrics['separation_ratio'] = 1.0
                     
             except Exception as e:
-                logger.warning(f"클래스별 예측 통계 계산 실패: {e}")
+                logger.warning(f"Class-wise prediction statistics calculation failed: {e}")
                 metrics.update({
                     'pos_mean_pred': 0.0, 'pos_std_pred': 0.0, 'pos_median_pred': 0.0,
                     'neg_mean_pred': 0.0, 'neg_std_pred': 0.0, 'neg_median_pred': 0.0,
                     'separation': 0.0, 'separation_ratio': 1.0
                 })
             
-            # 목표 달성 지표 (캘리브레이션 포함)
+            # Target achievement metrics (including calibration)
             try:
                 metrics['target_combined_score_achievement'] = 1.0 if metrics['combined_score_enhanced'] >= self.target_combined_score else 0.0
                 metrics['combined_score_gap'] = max(0, self.target_combined_score - metrics['combined_score_enhanced'])
                 metrics['ultra_score_achievement'] = 1.0 if metrics['ctr_ultra_optimized_score'] >= 0.32 else 0.0
                 metrics['performance_tier'] = self._classify_performance_tier(metrics['combined_score_enhanced'])
                 
-                # 캘리브레이션 목표 달성 여부
-                calibration_threshold = 0.7  # 캘리브레이션 품질 임계값
+                # Calibration target achievement
+                calibration_threshold = 0.7  # Calibration quality threshold
                 metrics['calibration_achievement'] = 1.0 if metrics.get('calibration_score', 0.0) >= calibration_threshold else 0.0
                 metrics['calibration_gap'] = max(0, calibration_threshold - metrics.get('calibration_score', 0.0))
                 
-                # 통합 목표 달성 (성능 + 캘리브레이션)
+                # Integrated target achievement (performance + calibration)
                 metrics['integrated_achievement'] = metrics['target_combined_score_achievement'] * metrics['calibration_achievement']
                 
             except Exception as e:
-                logger.warning(f"목표 달성 지표 계산 실패: {e}")
+                logger.warning(f"Target achievement metrics calculation failed: {e}")
                 metrics['target_combined_score_achievement'] = 0.0
                 metrics['combined_score_gap'] = self.target_combined_score
                 metrics['ultra_score_achievement'] = 0.0
@@ -898,10 +898,10 @@ class CTRAdvancedMetrics:
                 metrics['calibration_gap'] = 0.7
                 metrics['integrated_achievement'] = 0.0
             
-            # 계산 시간
+            # Calculation time
             metrics['evaluation_time'] = time.time() - start_time
             
-            # 모든 지표값을 float로 변환하고 유효성 검사
+            # Convert all metric values to float and validate
             validated_metrics = {}
             for key, value in metrics.items():
                 try:
@@ -921,11 +921,11 @@ class CTRAdvancedMetrics:
             return validated_metrics
             
         except Exception as e:
-            logger.error(f"초종합 평가 계산 오류: {str(e)}")
+            logger.error(f"Ultra-comprehensive evaluation calculation error: {str(e)}")
             return self._get_default_metrics_ultra_with_calibration(model_name)
     
     def _get_default_metrics_ultra_with_calibration(self, model_name: str = "Unknown") -> Dict[str, float]:
-        """초고성능 기본 지표값 반환 - 캘리브레이션 포함"""
+        """Return ultra-high performance default metric values - including calibration"""
         return {
             'model_name': model_name,
             'ap_enhanced': 0.0, 'wll_enhanced': float('inf'), 
@@ -951,7 +951,7 @@ class CTRAdvancedMetrics:
         }
     
     def _calculate_entropy_enhanced(self, probabilities: np.ndarray) -> float:
-        """향상된 예측 확률의 엔트로피 계산"""
+        """Enhanced entropy calculation of prediction probabilities"""
         try:
             p = np.clip(probabilities, 1e-15, 1 - 1e-15)
             
@@ -965,7 +965,7 @@ class CTRAdvancedMetrics:
             return 0.0
     
     def _classify_performance_tier(self, combined_score: float) -> str:
-        """성능 등급 분류"""
+        """Performance tier classification"""
         if combined_score >= 0.35:
             return 'exceptional'
         elif combined_score >= 0.30:
@@ -980,12 +980,12 @@ class CTRAdvancedMetrics:
             return 'very_poor'
     
     def clear_cache(self):
-        """캐시 정리"""
+        """Clear cache"""
         self.cache.clear()
         gc.collect()
 
 class UltraModelComparator:
-    """초고성능 다중 모델 비교 클래스 - Combined Score 0.30+ 달성 + 캘리브레이션 평가"""
+    """Ultra high-performance multi-model comparison class - Combined Score 0.30+ achievement + calibration evaluation"""
     
     def __init__(self):
         self.metrics_calculator = CTRAdvancedMetrics()
@@ -996,13 +996,13 @@ class UltraModelComparator:
                                             models_predictions: Dict[str, np.ndarray],
                                             y_true: np.ndarray,
                                             models_info: Dict[str, Dict[str, Any]] = None) -> pd.DataFrame:
-        """초고성능 여러 모델의 성능 비교 - 캘리브레이션 평가 포함"""
+        """Ultra high-performance multiple model performance comparison - including calibration evaluation"""
         
         results = []
         
         y_true = np.asarray(y_true).flatten()
         
-        logger.info(f"초고성능 모델 비교 시작 (캘리브레이션 평가 포함): {len(models_predictions)}개 모델")
+        logger.info(f"Ultra high-performance model comparison started (including calibration evaluation): {len(models_predictions)} models")
         
         for model_name, y_pred_proba in models_predictions.items():
             try:
@@ -1011,19 +1011,19 @@ class UltraModelComparator:
                 y_pred_proba = np.asarray(y_pred_proba).flatten()
                 
                 if len(y_pred_proba) != len(y_true):
-                    logger.error(f"{model_name}: 예측값과 실제값 크기 불일치")
+                    logger.error(f"{model_name}: Prediction and actual value size mismatch")
                     continue
                 
                 if len(y_pred_proba) == 0:
-                    logger.error(f"{model_name}: 빈 예측값")
+                    logger.error(f"{model_name}: Empty predictions")
                     continue
                 
                 if np.any(np.isnan(y_pred_proba)) or np.any(np.isinf(y_pred_proba)):
-                    logger.warning(f"{model_name}: 예측값에 NaN 또는 무한값 존재, 정리 수행")
+                    logger.warning(f"{model_name}: NaN or infinite values in predictions, performing cleanup")
                     y_pred_proba = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
                     y_pred_proba = np.nan_to_num(y_pred_proba, nan=0.5, posinf=1.0, neginf=0.0)
                 
-                # 캘리브레이션 평가 포함 종합 평가
+                # Comprehensive evaluation including calibration evaluation
                 metrics = self.metrics_calculator.comprehensive_evaluation_ultra_with_calibration(
                     y_true, y_pred_proba, model_name
                 )
@@ -1031,7 +1031,7 @@ class UltraModelComparator:
                 evaluation_time = time.time() - start_time
                 metrics['evaluation_duration'] = evaluation_time
                 
-                # 모델 정보 추가
+                # Add model information
                 if models_info and model_name in models_info:
                     model_info = models_info[model_name]
                     metrics['is_calibrated'] = model_info.get('is_calibrated', False)
@@ -1044,7 +1044,7 @@ class UltraModelComparator:
                 
                 results.append(metrics)
                 
-                logger.info(f"{model_name} 평가 완료 ({evaluation_time:.2f}초)")
+                logger.info(f"{model_name} evaluation completed ({evaluation_time:.2f}s)")
                 logger.info(f"  - Combined Score Enhanced: {metrics['combined_score_enhanced']:.4f}")
                 logger.info(f"  - Ultra Optimized Score: {metrics['ctr_ultra_optimized_score']:.4f}")
                 logger.info(f"  - CTR Bias: {metrics['ctr_bias']:.4f}")
@@ -1053,7 +1053,7 @@ class UltraModelComparator:
                 logger.info(f"  - Performance Tier: {metrics['performance_tier']}")
                 
             except Exception as e:
-                logger.error(f"{model_name} 초고성능 모델 평가 실패: {str(e)}")
+                logger.error(f"{model_name} ultra high-performance model evaluation failed: {str(e)}")
                 default_metrics = self.metrics_calculator._get_default_metrics_ultra_with_calibration(model_name)
                 default_metrics['evaluation_duration'] = 0.0
                 default_metrics['is_calibrated'] = False
@@ -1062,7 +1062,7 @@ class UltraModelComparator:
                 results.append(default_metrics)
         
         if not results:
-            logger.error("평가 가능한 모델이 없습니다")
+            logger.error("No evaluable models available")
             return pd.DataFrame()
         
         try:
@@ -1071,7 +1071,7 @@ class UltraModelComparator:
             if not comparison_df.empty:
                 comparison_df.set_index('model_name', inplace=True)
                 
-                # 다중 정렬 기준 (캘리브레이션 점수 포함)
+                # Multi-sort criteria (including calibration score)
                 sort_columns = []
                 if 'ctr_ultra_optimized_score' in comparison_df.columns:
                     sort_columns.append('ctr_ultra_optimized_score')
@@ -1087,32 +1087,32 @@ class UltraModelComparator:
         
             self.comparison_results = comparison_df
             
-            # 목표 달성 모델 수 로깅 (캘리브레이션 포함)
+            # Log target achievement model count (including calibration)
             target_achieved_count = comparison_df['target_combined_score_achievement'].sum()
             ultra_achieved_count = comparison_df['ultra_score_achievement'].sum()
             calibration_achieved_count = comparison_df['calibration_achievement'].sum()
             integrated_achieved_count = comparison_df['integrated_achievement'].sum()
             calibrated_models_count = comparison_df['is_calibrated'].sum()
             
-            logger.info(f"초고성능 모델 비교 완료 (캘리브레이션 평가 포함)")
-            logger.info(f"Combined Score 0.30+ 달성 모델: {target_achieved_count}/{len(comparison_df)}")
-            logger.info(f"Ultra Score 0.32+ 달성 모델: {ultra_achieved_count}/{len(comparison_df)}")
-            logger.info(f"캘리브레이션 품질 목표 달성 모델: {calibration_achieved_count}/{len(comparison_df)}")
-            logger.info(f"통합 목표 달성 모델: {integrated_achieved_count}/{len(comparison_df)}")
-            logger.info(f"캘리브레이션 적용 모델: {calibrated_models_count}/{len(comparison_df)}")
+            logger.info(f"Ultra high-performance model comparison completed (including calibration evaluation)")
+            logger.info(f"Combined Score 0.30+ achievement models: {target_achieved_count}/{len(comparison_df)}")
+            logger.info(f"Ultra Score 0.32+ achievement models: {ultra_achieved_count}/{len(comparison_df)}")
+            logger.info(f"Calibration quality target achievement models: {calibration_achieved_count}/{len(comparison_df)}")
+            logger.info(f"Integrated target achievement models: {integrated_achieved_count}/{len(comparison_df)}")
+            logger.info(f"Calibration applied models: {calibrated_models_count}/{len(comparison_df)}")
             
             return comparison_df
             
         except Exception as e:
-            logger.error(f"초고성능 비교 결과 생성 실패: {e}")
+            logger.error(f"Ultra high-performance comparison result generation failed: {e}")
             return pd.DataFrame()
     
     def rank_models_ultra_with_calibration(self, 
                                          ranking_metric: str = 'ctr_ultra_optimized_score') -> pd.DataFrame:
-        """초고성능 모델 순위 매기기 - 캘리브레이션 고려"""
+        """Ultra high-performance model ranking - calibration consideration"""
         
         if self.comparison_results.empty:
-            logger.warning("비교 결과가 없습니다.")
+            logger.warning("No comparison results available.")
             return pd.DataFrame()
         
         try:
@@ -1139,18 +1139,18 @@ class UltraModelComparator:
             return ranking_df[available_columns]
         
         except Exception as e:
-            logger.error(f"초고성능 모델 순위 매기기 실패: {e}")
+            logger.error(f"Ultra high-performance model ranking failed: {e}")
             return pd.DataFrame()
     
     def get_best_model_ultra_with_calibration(self, metric: str = 'integrated_achievement') -> Tuple[str, float]:
-        """최고 성능 모델 반환 (초고성능 + 캘리브레이션 고려)"""
+        """Return best performance model (ultra high-performance + calibration consideration)"""
         
         if self.comparison_results.empty:
             return None, 0.0
         
         try:
             if metric not in self.comparison_results.columns:
-                # 대체 지표 순서
+                # Fallback metrics order
                 fallback_metrics = ['ctr_ultra_optimized_score', 'combined_score_enhanced', 'calibration_score']
                 for fallback_metric in fallback_metrics:
                     if fallback_metric in self.comparison_results.columns:
@@ -1163,11 +1163,11 @@ class UltraModelComparator:
             return best_idx, best_score
         
         except Exception as e:
-            logger.error(f"최고 초고성능 모델 찾기 실패: {e}")
+            logger.error(f"Best ultra high-performance model finding failed: {e}")
             return None, 0.0
 
 class EvaluationReporter:
-    """평가 결과 리포팅 클래스 - 캘리브레이션 보고서 포함"""
+    """Evaluation result reporting class - including calibration reports"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -1176,10 +1176,10 @@ class EvaluationReporter:
     def generate_model_performance_report_with_calibration(self, 
                                                          comparator: UltraModelComparator,
                                                          save_path: Optional[Path] = None) -> Dict[str, Any]:
-        """모델 성능 리포트 생성 - 캘리브레이션 평가 포함"""
+        """Generate model performance report - including calibration evaluation"""
         try:
             if comparator.comparison_results.empty:
-                return {'error': '비교 결과가 없습니다'}
+                return {'error': 'No comparison results available'}
             
             report = {
                 'summary': {
@@ -1195,12 +1195,12 @@ class EvaluationReporter:
                 'recommendations': []
             }
             
-            # 최고 성능 모델 찾기 (캘리브레이션 고려)
+            # Find best performance model (calibration consideration)
             best_model, best_score = comparator.get_best_model_ultra_with_calibration()
             report['summary']['best_model'] = best_model
             report['summary']['best_score'] = best_score
             
-            # 상세 결과
+            # Detailed results
             for model_name, row in comparator.comparison_results.iterrows():
                 model_result = {
                     'combined_score': row.get('combined_score_enhanced', 0.0),
@@ -1221,7 +1221,7 @@ class EvaluationReporter:
                 }
                 report['detailed_results'][model_name] = model_result
             
-            # 성능 분석
+            # Performance analysis
             df = comparator.comparison_results
             report['performance_analysis'] = {
                 'avg_combined_score': float(df['combined_score_enhanced'].mean()),
@@ -1231,7 +1231,7 @@ class EvaluationReporter:
                 'tier_distribution': df['performance_tier'].value_counts().to_dict()
             }
             
-            # 캘리브레이션 분석
+            # Calibration analysis
             report['calibration_analysis'] = {
                 'avg_calibration_score': float(df['calibration_score'].mean()),
                 'std_calibration_score': float(df['calibration_score'].std()),
@@ -1243,7 +1243,7 @@ class EvaluationReporter:
                 'integrated_achievers': int(df['integrated_achievement'].sum())
             }
             
-            # 캘리브레이션 요약
+            # Calibration summary
             report['summary']['calibration_summary'] = {
                 'total_calibrated': int(df['is_calibrated'].sum()),
                 'calibration_coverage': float(df['is_calibrated'].mean()),
@@ -1251,44 +1251,44 @@ class EvaluationReporter:
                 'best_calibration_score': float(df['calibration_score'].max())
             }
             
-            # 권장사항 생성 (캘리브레이션 고려)
+            # Generate recommendations (calibration consideration)
             if best_score >= 0.30:
-                report['recommendations'].append("목표 달성: Combined Score 0.30+ 달성 모델이 있습니다")
+                report['recommendations'].append("Target achieved: Models achieving Combined Score 0.30+ are available")
             else:
-                report['recommendations'].append("개선 필요: 모든 모델이 목표 점수에 미달합니다")
+                report['recommendations'].append("Improvement needed: All models fall short of target score")
             
             if report['calibration_analysis']['calibrated_models_count'] == 0:
-                report['recommendations'].append("캘리브레이션 적용: 모든 모델에 캘리브레이션을 적용하여 예측 신뢰도를 향상시키세요")
+                report['recommendations'].append("Apply calibration: Apply calibration to all models to improve prediction reliability")
             elif report['calibration_analysis']['calibrated_models_count'] < len(df):
-                report['recommendations'].append("캘리브레이션 확장: 더 많은 모델에 캘리브레이션을 적용하세요")
+                report['recommendations'].append("Expand calibration: Apply calibration to more models")
             
             if report['calibration_analysis']['avg_calibration_ece'] > 0.1:
-                report['recommendations'].append("캘리브레이션 품질 개선: ECE가 높습니다. 더 고급 캘리브레이션 기법을 시도하세요")
+                report['recommendations'].append("Improve calibration quality: ECE is high. Try more advanced calibration techniques")
             
             if report['calibration_analysis']['integrated_achievers'] == 0:
-                report['recommendations'].append("통합 최적화: 성능과 캘리브레이션을 동시에 향상시키는 방법을 찾으세요")
+                report['recommendations'].append("Integrated optimization: Find ways to simultaneously improve performance and calibration")
             
-            # 저장
+            # Save
             if save_path:
                 try:
                     save_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(save_path, 'w', encoding='utf-8') as f:
                         json.dump(report, f, indent=2, ensure_ascii=False)
-                    logger.info(f"평가 리포트 저장: {save_path} (캘리브레이션 분석 포함)")
+                    logger.info(f"Evaluation report saved: {save_path} (including calibration analysis)")
                 except Exception as e:
-                    logger.warning(f"리포트 저장 실패: {e}")
+                    logger.warning(f"Report saving failed: {e}")
             
             self.report_data = report
             return report
             
         except Exception as e:
-            logger.error(f"평가 리포트 생성 실패: {e}")
-            return {'error': f'리포트 생성 중 오류: {str(e)}'}
+            logger.error(f"Evaluation report generation failed: {e}")
+            return {'error': f'Error during report generation: {str(e)}'}
     
     def save_comparison_results_with_calibration(self, 
                                                comparison_df: pd.DataFrame,
                                                save_path: Optional[Path] = None) -> bool:
-        """비교 결과를 파일로 저장 - 캘리브레이션 정보 포함"""
+        """Save comparison results to file - including calibration information"""
         try:
             if save_path is None:
                 save_path = self.config.OUTPUT_DIR / "model_comparison_results_with_calibration.csv"
@@ -1296,15 +1296,15 @@ class EvaluationReporter:
             save_path.parent.mkdir(parents=True, exist_ok=True)
             comparison_df.to_csv(save_path, index=True, encoding='utf-8')
             
-            logger.info(f"모델 비교 결과 저장: {save_path} (캘리브레이션 정보 포함)")
+            logger.info(f"Model comparison results saved: {save_path} (including calibration information)")
             return True
             
         except Exception as e:
-            logger.error(f"비교 결과 저장 실패: {e}")
+            logger.error(f"Comparison results saving failed: {e}")
             return False
     
     def generate_summary_table_with_calibration(self, comparison_df: pd.DataFrame) -> pd.DataFrame:
-        """요약 테이블 생성 - 캘리브레이션 포함"""
+        """Generate summary table - including calibration"""
         try:
             if comparison_df.empty:
                 return pd.DataFrame()
@@ -1323,7 +1323,7 @@ class EvaluationReporter:
             if available_columns:
                 summary_df = comparison_df[available_columns].copy()
                 
-                # 수치형 컬럼만 반올림
+                # Round only numeric columns
                 numeric_columns = summary_df.select_dtypes(include=[np.number]).columns
                 summary_df[numeric_columns] = summary_df[numeric_columns].round(4)
                 
@@ -1332,44 +1332,44 @@ class EvaluationReporter:
                 return comparison_df
             
         except Exception as e:
-            logger.error(f"요약 테이블 생성 실패: {e}")
+            logger.error(f"Summary table generation failed: {e}")
             return pd.DataFrame()
 
-# 하위 호환성을 위한 alias들 - main.py에서 import할 수 있도록 보장
+# Aliases for backward compatibility - ensure import from main.py
 CTRMetrics = CTRAdvancedMetrics
 ModelComparator = UltraModelComparator
 
-# 추가 하위 호환성 보장
+# Additional backward compatibility assurance
 def create_ctr_metrics():
-    """CTR 지표 생성기"""
+    """CTR metrics generator"""
     return CTRAdvancedMetrics()
 
 def create_model_comparator():
-    """모델 비교기 생성기"""
+    """Model comparator generator"""
     return UltraModelComparator()
 
 def create_evaluation_reporter():
-    """평가 리포터 생성기"""
+    """Evaluation reporter generator"""
     return EvaluationReporter()
 
-# 모듈 수준에서 직접 접근 가능한 주요 함수들
+# Main functions directly accessible at module level
 def evaluate_model_performance_with_calibration(y_true, y_pred_proba, model_name="Unknown"):
-    """단일 모델 성능 평가 - 캘리브레이션 포함"""
+    """Single model performance evaluation - including calibration"""
     metrics_calc = CTRAdvancedMetrics()
     return metrics_calc.comprehensive_evaluation_ultra_with_calibration(y_true, y_pred_proba, model_name)
 
 def compare_multiple_models_with_calibration(models_predictions, y_true, models_info=None):
-    """다중 모델 비교 - 캘리브레이션 평가 포함"""
+    """Multiple model comparison - including calibration evaluation"""
     comparator = UltraModelComparator()
     return comparator.compare_models_ultra_with_calibration(models_predictions, y_true, models_info)
 
-# 기존 함수들 (하위 호환성)
+# Existing functions (backward compatibility)
 def evaluate_model_performance(y_true, y_pred_proba):
-    """단일 모델 성능 평가"""
+    """Single model performance evaluation"""
     metrics_calc = CTRAdvancedMetrics()
     return metrics_calc.comprehensive_evaluation_ultra_with_calibration(y_true, y_pred_proba)
 
 def compare_multiple_models(models_predictions, y_true):
-    """다중 모델 비교"""
+    """Multiple model comparison"""
     comparator = UltraModelComparator()
     return comparator.compare_models_ultra_with_calibration(models_predictions, y_true)
