@@ -622,6 +622,70 @@ class CTRSuperEnsembleManager:
         
         logger.info("All ensemble training completed - execution guaranteed")
     
+    def predict_with_best_ensemble(self, X: pd.DataFrame) -> Tuple[np.ndarray, bool]:
+        """Predict using best ensemble"""
+        logger.info("Best ensemble prediction started")
+        
+        try:
+            # Check if any ensemble is available and fitted
+            available_ensemble = None
+            for ensemble_type, ensemble in self.ensembles.items():
+                if ensemble.is_fitted:
+                    available_ensemble = ensemble
+                    self.best_ensemble = ensemble
+                    logger.info(f"Using {ensemble_type} ensemble for prediction")
+                    break
+            
+            if available_ensemble is None:
+                logger.warning("No fitted ensemble available, using individual model")
+                if len(self.base_models) > 0:
+                    # Use first available model
+                    model_name = list(self.base_models.keys())[0]
+                    model = self.base_models[model_name]
+                    predictions = model.predict_proba(X)
+                    logger.info(f"Using individual model: {model_name}")
+                    return predictions, False
+                else:
+                    # Default fallback
+                    logger.warning("No models available, using default predictions")
+                    return np.full(len(X), 0.0201), False
+            
+            # Get base predictions
+            base_predictions = {}
+            for name, model in self.base_models.items():
+                try:
+                    pred = model.predict_proba(X)
+                    base_predictions[name] = pred
+                except Exception as e:
+                    logger.error(f"{name} model prediction failed: {e}")
+                    base_predictions[name] = np.full(len(X), 0.0201)
+            
+            # Get ensemble prediction
+            ensemble_pred = available_ensemble.predict_proba(base_predictions)
+            predicted_ctr = ensemble_pred.mean()
+            
+            logger.info(f"Ensemble prediction completed - CTR: {predicted_ctr:.4f}")
+            
+            return ensemble_pred, True
+            
+        except Exception as e:
+            logger.error(f"Best ensemble prediction failed: {e}")
+            
+            # Fallback to individual model
+            if len(self.base_models) > 0:
+                logger.info("Falling back to individual model")
+                model_name = list(self.base_models.keys())[0]
+                model = self.base_models[model_name]
+                try:
+                    predictions = model.predict_proba(X)
+                    return predictions, False
+                except Exception as e2:
+                    logger.error(f"Individual model fallback failed: {e2}")
+                    return np.full(len(X), 0.0201), False
+            else:
+                logger.error("No models available for prediction")
+                return np.full(len(X), 0.0201), False
+    
     def evaluate_ensembles(self, X: pd.DataFrame, y: pd.Series):
         """Evaluate ensembles"""
         logger.info("Ensemble evaluation started")
