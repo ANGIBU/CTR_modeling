@@ -903,7 +903,7 @@ class XGBoostModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """XGBoost model training with memory management"""
+        """XGBoost model training with GPU fallback"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         
         def _fit_internal():
@@ -950,108 +950,223 @@ class XGBoostModel(BaseModel):
             self.memory_monitor.force_memory_cleanup()
             time.sleep(1)
             
-            try:
-                # Create DMatrix with memory management
-                logger.info(f"{self.name}: Creating training DMatrix")
-                dtrain = xgb.DMatrix(
-                    X_train_clean, 
-                    label=y_train, 
-                    enable_categorical=False,
-                    feature_names=list(X_train_clean.columns)
-                )
-                
-                evals = [(dtrain, 'train')]
-                dval = None
-                
-                if X_val_clean is not None and y_val is not None:
-                    logger.info(f"{self.name}: Creating validation DMatrix")
-                    # Memory cleanup before validation DMatrix
-                    self.memory_monitor.force_memory_cleanup()
-                    
-                    dval = xgb.DMatrix(
-                        X_val_clean, 
-                        label=y_val, 
-                        enable_categorical=False,
-                        feature_names=list(X_val_clean.columns)
-                    )
-                    evals.append((dval, 'valid'))
-                
-                # Clear data frames after DMatrix creation
-                del X_train_clean
-                if X_val_clean is not None:
-                    del X_val_clean
-                
-                self.memory_monitor.force_memory_cleanup()
-                
-                early_stopping = self.params.get('early_stopping_rounds', 800)
-                
-                logger.info(f"{self.name}: Starting XGBoost training")
-                self.model = xgb.train(
-                    self.params,
-                    dtrain,
-                    evals=evals,
-                    early_stopping_rounds=early_stopping,
-                    verbose_eval=False
-                )
-                
-                self.is_fitted = True
-                
-                # Force apply calibration to all XGBoost models
-                if X_val is not None and y_val is not None:
-                    logger.info(f"{self.name}: Starting forced calibration application")
-                    # Use original validation data for calibration
-                    X_val_for_calibration = X_val.fillna(0).copy()
-                    for col in X_val_for_calibration.columns:
-                        if X_val_for_calibration[col].dtype in ['float64']:
-                            X_val_for_calibration[col] = X_val_for_calibration[col].astype('float32')
-                        elif X_val_for_calibration[col].dtype in ['int64']:
-                            X_val_for_calibration[col] = X_val_for_calibration[col].astype('int32')
-                    
-                    self.apply_calibration(X_val_for_calibration, y_val, method='auto')
-                    if self.is_calibrated:
-                        logger.info(f"{self.name}: Forced calibration application complete")
-                    else:
-                        logger.warning(f"{self.name}: Forced calibration application failed")
-                    
-                    del X_val_for_calibration
-                
-                # Cleanup DMatrix objects
-                del dtrain
-                if dval is not None:
-                    del dval
-                
-                self.memory_monitor.force_memory_cleanup()
-                
-                return self
-                
-            except Exception as e:
-                logger.error(f"{self.name}: DMatrix creation or training failed: {e}")
-                
-                # Cleanup on failure
+            # First attempt: Try GPU training
+            gpu_success = False
+            if 'gpu_id' in self.params or self.params.get('tree_method') == 'gpu_hist':
                 try:
-                    if 'dtrain' in locals():
-                        del dtrain
-                    if 'dval' in locals() and dval is not None:
-                        del dval
-                    if 'X_train_clean' in locals():
-                        del X_train_clean
-                    if 'X_val_clean' in locals() and X_val_clean is not None:
-                        del X_val_clean
-                except:
-                    pass
-                
-                # Intensive memory cleanup on failure
-                cleanup_rounds = 20
-                for i in range(cleanup_rounds):
-                    collected = gc.collect()
-                    time.sleep(0.1)
-                    if i % 5 == 0:
-                        memory_freed = self.memory_monitor.force_memory_cleanup(intensive=True)
-                        logger.info(f"Memory cleanup: {memory_freed:.2f}GB freed (round {i+1})")
-                
-                raise
+                    logger.info(f"{self.name}: Attempting GPU training")
+                    gpu_success = self._try_gpu_training(X_train_clean, y_train, X_val_clean, y_val)
+                except Exception as gpu_error:
+                    logger.warning(f"{self.name}: GPU training failed: {gpu_error}")
+                    # Check if it's a GPU memory error
+                    if "cudaErrorMemoryAllocation" in str(gpu_error) or "out of memory" in str(gpu_error):
+                        logger.info(f"{self.name}: GPU memory error detected, switching to CPU mode")
+                        self._force_cpu_mode()
+                    else:
+                        logger.info(f"{self.name}: GPU error detected, switching to CPU mode")
+                        self._force_cpu_mode()
+            
+            # Second attempt: CPU training if GPU failed or not attempted
+            if not gpu_success:
+                try:
+                    logger.info(f"{self.name}: Starting CPU training")
+                    self._train_cpu_mode(X_train_clean, y_train, X_val_clean, y_val)
+                    
+                    # Force apply calibration to all XGBoost models
+                    if X_val is not None and y_val is not None:
+                        logger.info(f"{self.name}: Starting forced calibration application")
+                        # Use original validation data for calibration
+                        X_val_for_calibration = X_val.fillna(0).copy()
+                        for col in X_val_for_calibration.columns:
+                            if X_val_for_calibration[col].dtype in ['float64']:
+                                X_val_for_calibration[col] = X_val_for_calibration[col].astype('float32')
+                            elif X_val_for_calibration[col].dtype in ['int64']:
+                                X_val_for_calibration[col] = X_val_for_calibration[col].astype('int32')
+                        
+                        self.apply_calibration(X_val_for_calibration, y_val, method='auto')
+                        if self.is_calibrated:
+                            logger.info(f"{self.name}: Forced calibration application complete")
+                        else:
+                            logger.warning(f"{self.name}: Forced calibration application failed")
+                        
+                        del X_val_for_calibration
+                    
+                except Exception as cpu_error:
+                    logger.error(f"{self.name}: CPU training also failed: {cpu_error}")
+                    
+                    # Final cleanup on complete failure
+                    self._cleanup_training_data(locals())
+                    
+                    # Intensive memory cleanup on failure
+                    cleanup_rounds = 20
+                    for i in range(cleanup_rounds):
+                        collected = gc.collect()
+                        time.sleep(0.1)
+                        if i % 5 == 0:
+                            memory_freed = self.memory_monitor.force_memory_cleanup(intensive=True)
+                            logger.info(f"Memory cleanup: {memory_freed:.2f}GB freed (round {i+1})")
+                    
+                    raise
+            
+            # Final cleanup
+            self._cleanup_training_data(locals())
+            self.memory_monitor.force_memory_cleanup()
+            
+            return self
         
         return self._memory_safe_fit(_fit_internal)
+    
+    def _try_gpu_training(self, X_train_clean: pd.DataFrame, y_train: pd.Series, 
+                         X_val_clean: Optional[pd.DataFrame], y_val: Optional[pd.Series]) -> bool:
+        """Try GPU training"""
+        try:
+            # GPU memory check before creating DMatrix
+            if TORCH_AVAILABLE and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
+                free_memory_gb = free_memory / (1024**3)
+                
+                if free_memory_gb < 6.0:  # Need at least 6GB for training
+                    logger.warning(f"{self.name}: Insufficient GPU memory ({free_memory_gb:.2f}GB), switching to CPU")
+                    return False
+            
+            logger.info(f"{self.name}: Creating training DMatrix (GPU mode)")
+            dtrain = xgb.DMatrix(
+                X_train_clean, 
+                label=y_train, 
+                enable_categorical=False,
+                feature_names=list(X_train_clean.columns)
+            )
+            
+            evals = [(dtrain, 'train')]
+            dval = None
+            
+            if X_val_clean is not None and y_val is not None:
+                logger.info(f"{self.name}: Creating validation DMatrix (GPU mode)")
+                self.memory_monitor.force_memory_cleanup()
+                
+                dval = xgb.DMatrix(
+                    X_val_clean, 
+                    label=y_val, 
+                    enable_categorical=False,
+                    feature_names=list(X_val_clean.columns)
+                )
+                evals.append((dval, 'valid'))
+            
+            early_stopping = self.params.get('early_stopping_rounds', 800)
+            
+            logger.info(f"{self.name}: Starting XGBoost GPU training")
+            self.model = xgb.train(
+                self.params,
+                dtrain,
+                evals=evals,
+                early_stopping_rounds=early_stopping,
+                verbose_eval=False
+            )
+            
+            self.is_fitted = True
+            
+            # Cleanup DMatrix objects
+            del dtrain
+            if dval is not None:
+                del dval
+            
+            logger.info(f"{self.name}: GPU training completed successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"{self.name}: GPU training failed: {e}")
+            # Cleanup on GPU failure
+            try:
+                if 'dtrain' in locals():
+                    del dtrain
+                if 'dval' in locals() and dval is not None:
+                    del dval
+            except:
+                pass
+            
+            if TORCH_AVAILABLE and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            return False
+    
+    def _train_cpu_mode(self, X_train_clean: pd.DataFrame, y_train: pd.Series, 
+                       X_val_clean: Optional[pd.DataFrame], y_val: Optional[pd.Series]):
+        """Train in CPU mode"""
+        try:
+            logger.info(f"{self.name}: Creating training DMatrix (CPU mode)")
+            dtrain = xgb.DMatrix(
+                X_train_clean, 
+                label=y_train, 
+                enable_categorical=False,
+                feature_names=list(X_train_clean.columns)
+            )
+            
+            evals = [(dtrain, 'train')]
+            dval = None
+            
+            if X_val_clean is not None and y_val is not None:
+                logger.info(f"{self.name}: Creating validation DMatrix (CPU mode)")
+                self.memory_monitor.force_memory_cleanup()
+                
+                dval = xgb.DMatrix(
+                    X_val_clean, 
+                    label=y_val, 
+                    enable_categorical=False,
+                    feature_names=list(X_val_clean.columns)
+                )
+                evals.append((dval, 'valid'))
+            
+            early_stopping = self.params.get('early_stopping_rounds', 800)
+            
+            logger.info(f"{self.name}: Starting XGBoost CPU training")
+            self.model = xgb.train(
+                self.params,
+                dtrain,
+                evals=evals,
+                early_stopping_rounds=early_stopping,
+                verbose_eval=False
+            )
+            
+            self.is_fitted = True
+            
+            # Cleanup DMatrix objects
+            del dtrain
+            if dval is not None:
+                del dval
+            
+            logger.info(f"{self.name}: CPU training completed successfully")
+            
+        except Exception as e:
+            logger.error(f"{self.name}: CPU training failed: {e}")
+            raise
+    
+    def _force_cpu_mode(self):
+        """Force switch to CPU mode"""
+        logger.info(f"{self.name}: Forcing CPU mode")
+        
+        # Remove GPU-specific parameters
+        self.params.pop('gpu_id', None)
+        self.params.pop('predictor', None)
+        
+        # Set CPU parameters
+        self.params['tree_method'] = 'hist'
+        
+        # Additional CPU optimizations for large data
+        if 'nthread' not in self.params:
+            self.params['nthread'] = 8
+        
+        logger.info(f"{self.name}: Switched to CPU mode with optimized parameters")
+    
+    def _cleanup_training_data(self, local_vars: dict):
+        """Cleanup training data"""
+        try:
+            cleanup_vars = ['X_train_clean', 'X_val_clean', 'dtrain', 'dval']
+            for var_name in cleanup_vars:
+                if var_name in local_vars and local_vars[var_name] is not None:
+                    del local_vars[var_name]
+        except Exception:
+            pass
     
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
         """Raw predictions before calibration"""

@@ -105,12 +105,13 @@ class CTRAdvancedMetrics:
             if not SKLEARN_AVAILABLE:
                 return self._manual_average_precision(y_true, y_pred_proba)
             
+            # Convert pandas Series to numpy array for consistent hashing
+            y_true = np.asarray(y_true).flatten()
+            y_pred_proba = np.asarray(y_pred_proba).flatten()
+            
             cache_key = f"ap_{hash(y_true.tobytes())}_{hash(y_pred_proba.tobytes())}"
             if cache_key in self.cache:
                 return self.cache[cache_key]
-            
-            y_true = np.asarray(y_true).flatten()
-            y_pred_proba = np.asarray(y_pred_proba).flatten()
             
             if len(y_true) != len(y_pred_proba) or len(y_true) == 0:
                 return 0.0
