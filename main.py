@@ -30,6 +30,10 @@ except ImportError:
     TORCH_AVAILABLE = False
     warnings.warn("PyTorch not available. GPU functions will be disabled.")
 
+# Ensure logs directory exists before configuring logging
+logs_dir = Path('logs')
+logs_dir.mkdir(exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
