@@ -327,6 +327,7 @@ class CTRModelTrainer:
         elif model_type.lower() == 'xgboost':
             return {
                 'objective': 'binary:logistic',
+                'eval_metric': 'logloss',
                 'max_depth': 6,
                 'learning_rate': 0.05,
                 'n_estimators': 1000,
@@ -663,11 +664,8 @@ class CTRModelTrainer:
                 'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
                 'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
                 'gamma': trial.suggest_float('gamma', 0.0, 1.0),
-                'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
-                'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 2.0),
-                'objective': 'binary:logistic',
-                'verbosity': 0,
-                'random_state': 42
+                'alpha': trial.suggest_float('alpha', 0.0, 1.0),
+                'lambda': trial.suggest_float('lambda', 0.0, 2.0)
             }
         
         elif model_type.lower() == 'logistic':
