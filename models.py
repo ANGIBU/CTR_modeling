@@ -34,6 +34,16 @@ except ImportError:
     CATBOOST_AVAILABLE = False
     logging.warning("CatBoost is not installed.")
 
+try:
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+    from sklearn.isotonic import IsotonicRegression
+    from sklearn.model_selection import cross_val_score
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    logging.warning("Scikit-learn is not installed.")
+
 TORCH_AVAILABLE = False
 AMP_AVAILABLE = False
 torch = None
@@ -95,521 +105,69 @@ except ImportError:
     logging.warning("PyTorch is not installed. DeepCTR models will not be available.")
 
 try:
-    from sklearn.calibration import CalibratedClassifierCV
-    from sklearn.isotonic import IsotonicRegression
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.metrics import roc_auc_score, log_loss
-    from sklearn.model_selection import cross_val_predict
-    SKLEARN_AVAILABLE = True
-except ImportError:
-    SKLEARN_AVAILABLE = False
-    logging.warning("scikit-learn is not installed.")
-
-try:
     import psutil
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
 
-try:
-    from scipy.optimize import minimize_scalar
-    SCIPY_AVAILABLE = True
-except ImportError:
-    SCIPY_AVAILABLE = False
-    logging.warning("scipy is not installed. Some calibration functions will be limited.")
-
-from config import Config
-
 logger = logging.getLogger(__name__)
 
-class CTRCalibrator:
-    """CTR prediction specialized calibration class"""
-    
-    def __init__(self, target_ctr: float = 0.0191, method: str = 'auto'):
-        self.target_ctr = target_ctr
-        self.method = method
-        self.calibrators = {}
-        self.is_fitted = False
-        self.best_method = None
-        self.calibration_curve = None
-        
-        self.platt_scaler = None
-        self.isotonic_regressor = None
-        self.temperature = 1.0
-        self.temperature_bias = 0.0
-        self.bias_correction = 0.0
-        self.multiplicative_correction = 1.0
-        self.calibration_scores = {}
-        self.beta_calibrator = None
-        self.spline_calibrator = None
-        
-    def fit_platt_scaling(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Platt Scaling calibration training"""
-        try:
-            if not SKLEARN_AVAILABLE:
-                logger.warning("scikit-learn is not available, skipping Platt Scaling")
-                return
-                
-            logger.info("Platt Scaling calibration training started")
-            
-            self.platt_scaler = LogisticRegression()
-            
-            pred_clipped = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
-            logits = np.log(pred_clipped / (1 - pred_clipped))
-            
-            self.platt_scaler.fit(logits.reshape(-1, 1), y_true)
-            
-            calibrated_probs = self.apply_platt_scaling(y_pred_proba)
-            self.calibration_scores['platt_scaling'] = self._evaluate_calibration(y_true, calibrated_probs)
-            
-            logger.info(f"Platt Scaling training complete - score: {self.calibration_scores['platt_scaling']:.4f}")
-            
-        except Exception as e:
-            logger.error(f"Platt Scaling training failed: {e}")
-    
-    def fit_isotonic_regression(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Isotonic Regression calibration training"""
-        try:
-            if not SKLEARN_AVAILABLE:
-                logger.warning("scikit-learn is not available, skipping Isotonic Regression")
-                return
-                
-            logger.info("Isotonic Regression calibration training started")
-            
-            self.isotonic_regressor = IsotonicRegression(out_of_bounds='clip')
-            self.isotonic_regressor.fit(y_pred_proba, y_true)
-            
-            calibrated_probs = self.apply_isotonic_regression(y_pred_proba)
-            self.calibration_scores['isotonic_regression'] = self._evaluate_calibration(y_true, calibrated_probs)
-            
-            logger.info(f"Isotonic Regression training complete - score: {self.calibration_scores['isotonic_regression']:.4f}")
-            
-        except Exception as e:
-            logger.error(f"Isotonic Regression training failed: {e}")
-    
-    def fit_temperature_scaling(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Temperature Scaling calibration training"""
-        try:
-            logger.info("Temperature Scaling calibration training started")
-            
-            def temperature_loss(params):
-                temp, bias = params
-                if temp <= 0:
-                    return float('inf')
-                
-                pred_clipped = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
-                logits = np.log(pred_clipped / (1 - pred_clipped))
-                
-                adjusted_logits = (logits + bias) / temp
-                calibrated_probs = 1 / (1 + np.exp(-adjusted_logits))
-                calibrated_probs = np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
-                
-                log_loss_val = -np.mean(y_true * np.log(calibrated_probs) + (1 - y_true) * np.log(1 - calibrated_probs))
-                ctr_bias = abs(calibrated_probs.mean() - y_true.mean()) * 1200
-                diversity_loss = -calibrated_probs.std() * 10
-                
-                return log_loss_val + ctr_bias + diversity_loss
-            
-            if SCIPY_AVAILABLE:
-                from scipy.optimize import minimize
-                result = minimize(
-                    temperature_loss, 
-                    x0=[1.0, 0.0], 
-                    bounds=[(0.2, 12.0), (-2.5, 2.5)],
-                    method='L-BFGS-B'
-                )
-                self.temperature = result.x[0]
-                self.temperature_bias = result.x[1]
-            else:
-                best_loss = float('inf')
-                best_temp = 1.0
-                best_bias = 0.0
-                
-                for temp in np.logspace(-0.7, 1.1, 30):
-                    for bias in np.linspace(-2.5, 2.5, 30):
-                        loss = temperature_loss([temp, bias])
-                        if loss < best_loss:
-                            best_loss = loss
-                            best_temp = temp
-                            best_bias = bias
-                
-                self.temperature = best_temp
-                self.temperature_bias = best_bias
-            
-            calibrated_probs = self.apply_temperature_scaling(y_pred_proba)
-            self.calibration_scores['temperature_scaling'] = self._evaluate_calibration(y_true, calibrated_probs)
-            
-            logger.info(f"Temperature Scaling training complete - temperature: {self.temperature:.3f}, bias: {self.temperature_bias:.3f}")
-            logger.info(f"Temperature Scaling score: {self.calibration_scores['temperature_scaling']:.4f}")
-            
-        except Exception as e:
-            logger.error(f"Temperature Scaling training failed: {e}")
-            self.temperature = 1.0
-            self.temperature_bias = 0.0
-    
-    def fit_beta_calibration(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Beta calibration training"""
-        try:
-            logger.info("Beta calibration training started")
-            
-            def beta_loss(params):
-                a, b = params
-                if a <= 0 or b <= 0:
-                    return float('inf')
-                
-                from scipy.stats import beta
-                calibrated_probs = beta.cdf(y_pred_proba, a, b)
-                calibrated_probs = np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
-                
-                log_loss_val = -np.mean(y_true * np.log(calibrated_probs) + (1 - y_true) * np.log(1 - calibrated_probs))
-                ctr_bias = abs(calibrated_probs.mean() - y_true.mean()) * 1000
-                
-                return log_loss_val + ctr_bias
-            
-            if SCIPY_AVAILABLE:
-                from scipy.optimize import minimize
-                result = minimize(
-                    beta_loss,
-                    x0=[1.0, 1.0],
-                    bounds=[(0.1, 10.0), (0.1, 10.0)],
-                    method='L-BFGS-B'
-                )
-                
-                self.beta_params = result.x
-                
-                calibrated_probs = self.apply_beta_calibration(y_pred_proba)
-                self.calibration_scores['beta_calibration'] = self._evaluate_calibration(y_true, calibrated_probs)
-                
-                logger.info(f"Beta calibration training complete - score: {self.calibration_scores['beta_calibration']:.4f}")
-            
-        except Exception as e:
-            logger.warning(f"Beta calibration training failed: {e}")
-            self.beta_params = None
-    
-    def fit_bias_correction(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Bias correction training"""
-        try:
-            logger.info("Bias correction training started")
-            
-            actual_ctr = y_true.mean()
-            predicted_ctr = y_pred_proba.mean()
-            
-            self.bias_correction = actual_ctr - predicted_ctr
-            
-            if predicted_ctr > 0:
-                self.multiplicative_correction = actual_ctr / predicted_ctr
-            else:
-                self.multiplicative_correction = 1.0
-            
-            logger.info(f"Bias correction complete - additive: {self.bias_correction:.4f}, multiplicative: {self.multiplicative_correction:.4f}")
-            
-        except Exception as e:
-            logger.error(f"Bias correction training failed: {e}")
-    
-    def fit(self, y_true: np.ndarray, y_pred_proba: np.ndarray, methods: List[str] = None):
-        """Complete calibration training"""
-        logger.info("CTR calibration training started")
-        
-        if methods is None:
-            methods = ['platt_scaling', 'isotonic_regression', 'temperature_scaling', 'beta_calibration', 'bias_correction']
-        
-        y_true = np.asarray(y_true)
-        y_pred_proba = np.asarray(y_pred_proba)
-        
-        if len(y_true) != len(y_pred_proba):
-            raise ValueError("Length mismatch between y_true and y_pred_proba")
-        
-        if len(y_true) == 0:
-            raise ValueError("Empty array cannot be processed")
-        
-        if 'platt_scaling' in methods:
-            self.fit_platt_scaling(y_true, y_pred_proba)
-        
-        if 'isotonic_regression' in methods:
-            self.fit_isotonic_regression(y_true, y_pred_proba)
-        
-        if 'temperature_scaling' in methods:
-            self.fit_temperature_scaling(y_true, y_pred_proba)
-        
-        if 'beta_calibration' in methods:
-            self.fit_beta_calibration(y_true, y_pred_proba)
-        
-        if 'bias_correction' in methods:
-            self.fit_bias_correction(y_true, y_pred_proba)
-        
-        if self.calibration_scores:
-            self.best_method = max(self.calibration_scores, key=self.calibration_scores.get)
-            logger.info(f"Best calibration method: {self.best_method} (score: {self.calibration_scores[self.best_method]:.4f})")
-        else:
-            self.best_method = 'bias_correction'
-            logger.warning("All calibration methods failed. Using bias correction only")
-        
-        self.is_fitted = True
-        logger.info("CTR calibration training complete")
-    
-    def apply_platt_scaling(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """Apply Platt Scaling"""
-        if self.platt_scaler is None:
-            return y_pred_proba
-        
-        try:
-            pred_clipped = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
-            logits = np.log(pred_clipped / (1 - pred_clipped))
-            calibrated_probs = self.platt_scaler.predict_proba(logits.reshape(-1, 1))[:, 1]
-            return np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
-        except Exception as e:
-            logger.warning(f"Platt Scaling application failed: {e}")
-            return y_pred_proba
-    
-    def apply_isotonic_regression(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """Apply Isotonic Regression"""
-        if self.isotonic_regressor is None:
-            return y_pred_proba
-        
-        try:
-            calibrated_probs = self.isotonic_regressor.predict(y_pred_proba)
-            return np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
-        except Exception as e:
-            logger.warning(f"Isotonic Regression application failed: {e}")
-            return y_pred_proba
-    
-    def apply_temperature_scaling(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """Apply Temperature Scaling"""
-        try:
-            pred_clipped = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
-            logits = np.log(pred_clipped / (1 - pred_clipped))
-            
-            adjusted_logits = (logits + self.temperature_bias) / self.temperature
-            calibrated_probs = 1 / (1 + np.exp(-adjusted_logits))
-            
-            return np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
-        except Exception as e:
-            logger.warning(f"Temperature Scaling application failed: {e}")
-            return y_pred_proba
-    
-    def apply_beta_calibration(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """Apply Beta calibration"""
-        if not hasattr(self, 'beta_params') or self.beta_params is None:
-            return y_pred_proba
-        
-        try:
-            from scipy.stats import beta
-            a, b = self.beta_params
-            calibrated_probs = beta.cdf(y_pred_proba, a, b)
-            return np.clip(calibrated_probs, 1e-15, 1 - 1e-15)
-        except Exception as e:
-            logger.warning(f"Beta calibration application failed: {e}")
-            return y_pred_proba
-    
-    def apply_bias_correction(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """Apply bias correction"""
-        try:
-            corrected = y_pred_proba * self.multiplicative_correction + self.bias_correction
-            return np.clip(corrected, 1e-15, 1 - 1e-15)
-        except Exception as e:
-            logger.warning(f"Bias correction application failed: {e}")
-            return y_pred_proba
-    
-    def predict(self, y_pred_proba: np.ndarray, method: str = None) -> np.ndarray:
-        """Return calibrated predictions"""
-        if not self.is_fitted:
-            logger.warning("Calibration not fitted. Returning original predictions.")
-            return y_pred_proba
-        
-        if method is None:
-            method = self.best_method
-        
-        y_pred_proba = np.asarray(y_pred_proba)
-        
-        if method == 'platt_scaling':
-            return self.apply_platt_scaling(y_pred_proba)
-        elif method == 'isotonic_regression':
-            return self.apply_isotonic_regression(y_pred_proba)
-        elif method == 'temperature_scaling':
-            return self.apply_temperature_scaling(y_pred_proba)
-        elif method == 'beta_calibration':
-            return self.apply_beta_calibration(y_pred_proba)
-        elif method == 'bias_correction':
-            return self.apply_bias_correction(y_pred_proba)
-        else:
-            logger.warning(f"Unknown calibration method: {method}. Using bias correction")
-            return self.apply_bias_correction(y_pred_proba)
-    
-    def _evaluate_calibration(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """Evaluate calibration quality"""
-        try:
-            ece = self._calculate_ece(y_true, y_pred_proba)
-            
-            actual_ctr = y_true.mean()
-            predicted_ctr = y_pred_proba.mean()
-            ctr_alignment = 1.0 - abs(actual_ctr - predicted_ctr) / max(actual_ctr, 0.001)
-            
-            reliability = self._calculate_reliability(y_true, y_pred_proba)
-            
-            calibration_score = 0.4 * (1.0 - ece) + 0.4 * ctr_alignment + 0.2 * reliability
-            
-            return max(0.0, calibration_score)
-            
-        except Exception as e:
-            logger.warning(f"Calibration evaluation failed: {e}")
-            return 0.0
-    
-    def _calculate_ece(self, y_true: np.ndarray, y_pred_proba: np.ndarray, n_bins: int = 15) -> float:
-        """Calculate Expected Calibration Error"""
-        try:
-            bin_boundaries = np.linspace(0, 1, n_bins + 1)
-            bin_lowers = bin_boundaries[:-1]
-            bin_uppers = bin_boundaries[1:]
-            
-            ece = 0
-            for bin_lower, bin_upper in zip(bin_lowers, bin_uppers):
-                in_bin = (y_pred_proba > bin_lower) & (y_pred_proba <= bin_upper)
-                prop_in_bin = in_bin.mean()
-                
-                if prop_in_bin > 0:
-                    accuracy_in_bin = y_true[in_bin].mean()
-                    avg_confidence_in_bin = y_pred_proba[in_bin].mean()
-                    
-                    ece += abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
-            
-            return ece
-            
-        except Exception as e:
-            logger.warning(f"ECE calculation failed: {e}")
-            return 1.0
-    
-    def _calculate_reliability(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """Calculate reliability"""
-        try:
-            sorted_indices = np.argsort(y_pred_proba)
-            sorted_true = y_true[sorted_indices]
-            sorted_pred = y_pred_proba[sorted_indices]
-            
-            bin_size = len(y_true) // 10
-            reliability_scores = []
-            
-            for i in range(0, len(y_true), bin_size):
-                end_idx = min(i + bin_size, len(y_true))
-                bin_true = sorted_true[i:end_idx]
-                bin_pred = sorted_pred[i:end_idx]
-                
-                if len(bin_true) > 0:
-                    actual_positive_rate = bin_true.mean()
-                    predicted_positive_rate = bin_pred.mean()
-                    
-                    if predicted_positive_rate > 0:
-                        reliability = 1 - abs(actual_positive_rate - predicted_positive_rate) / predicted_positive_rate
-                        reliability_scores.append(max(0, reliability))
-            
-            return np.mean(reliability_scores) if reliability_scores else 0.0
-            
-        except Exception as e:
-            logger.warning(f"Reliability calculation failed: {e}")
-            return 0.0
-    
-    def get_calibration_summary(self) -> Dict[str, Any]:
-        """Calibration summary information"""
-        return {
-            'is_fitted': self.is_fitted,
-            'best_method': self.best_method,
-            'calibration_scores': self.calibration_scores.copy(),
-            'temperature': self.temperature,
-            'temperature_bias': self.temperature_bias,
-            'bias_correction': self.bias_correction,
-            'multiplicative_correction': self.multiplicative_correction,
-            'available_methods': list(self.calibration_scores.keys()),
-            'beta_params': getattr(self, 'beta_params', None)
-        }
-
 class MemoryMonitor:
-    """64GB RAM environment memory monitoring"""
+    """Memory monitoring and management"""
     
-    def __init__(self, max_memory_gb: float = 55.0):
-        self.monitoring_enabled = PSUTIL_AVAILABLE
-        self.max_memory_gb = max_memory_gb
-        self.lock = threading.Lock()
-        self._last_check_time = 0
-        self._check_interval = 2.0
-        
-        self.warning_threshold = max_memory_gb * 0.70
-        self.critical_threshold = max_memory_gb * 0.80
-        self.abort_threshold = max_memory_gb * 0.90
-        
-        logger.info(f"Memory thresholds - warning: {self.warning_threshold:.1f}GB, "
-                   f"critical: {self.critical_threshold:.1f}GB, abort: {self.abort_threshold:.1f}GB")
-        
+    def __init__(self):
+        self.memory_thresholds = {
+            'warning': 38.5,
+            'critical': 44.0,
+            'abort': 49.5
+        }
+    
     def get_memory_usage(self) -> float:
-        """Memory usage (GB)"""
-        if not self.monitoring_enabled:
-            return 2.0
-        
+        """Get current memory usage in GB"""
         try:
-            with self.lock:
-                current_time = time.time()
-                if current_time - self._last_check_time < self._check_interval:
-                    return getattr(self, '_cached_memory', 2.0)
-                
+            if PSUTIL_AVAILABLE:
                 process = psutil.Process()
-                memory_gb = process.memory_info().rss / (1024**3)
-                self._cached_memory = memory_gb
-                self._last_check_time = current_time
-                return memory_gb
+                return process.memory_info().rss / (1024**3)
+            return 2.0
         except Exception:
             return 2.0
-    
-    def get_available_memory(self) -> float:
-        """Available memory (GB)"""
-        if not self.monitoring_enabled:
-            return 45.0
-        
-        try:
-            with self.lock:
-                return psutil.virtual_memory().available / (1024**3)
-        except Exception:
-            return 45.0
-    
-    def check_memory_pressure(self) -> bool:
-        """Check memory pressure status"""
-        try:
-            usage = self.get_memory_usage()
-            available = self.get_available_memory()
-            
-            return usage > self.critical_threshold or available < 15.0
-        except Exception:
-            return False
     
     def get_memory_status(self) -> Dict[str, Any]:
-        """Detailed memory status"""
+        """Get memory status"""
         try:
-            usage = self.get_memory_usage()
-            available = self.get_available_memory()
+            if PSUTIL_AVAILABLE:
+                vm = psutil.virtual_memory()
+                usage_gb = (vm.total - vm.available) / (1024**3)
+                available_gb = vm.available / (1024**3)
+            else:
+                usage_gb = 20.0
+                available_gb = 40.0
             
-            if usage > self.abort_threshold or available < 8:
+            if usage_gb >= self.memory_thresholds['abort']:
                 level = "abort"
-            elif usage > self.critical_threshold or available < 15:
+            elif usage_gb >= self.memory_thresholds['critical']:
                 level = "critical"
-            elif usage > self.warning_threshold or available < 25:
+            elif usage_gb >= self.memory_thresholds['warning']:
                 level = "warning"
             else:
                 level = "normal"
             
             return {
-                'usage_gb': usage,
-                'available_gb': available,
+                'usage_gb': usage_gb,
+                'available_gb': available_gb,
                 'level': level,
-                'should_cleanup': level in ['warning', 'critical', 'abort'],
-                'should_simplify': level in ['critical', 'abort'],
-                'should_reduce_batch': level in ['warning', 'critical', 'abort']
+                'should_cleanup': level in ['warning', 'critical'],
+                'should_abort': level == 'abort',
+                'should_simplify': level in ['critical', 'abort']
             }
-        except Exception:
+        except:
             return {
-                'usage_gb': 2.0,
-                'available_gb': 45.0,
+                'usage_gb': 20.0,
+                'available_gb': 40.0,
                 'level': 'normal',
                 'should_cleanup': False,
-                'should_simplify': False,
-                'should_reduce_batch': False
+                'should_abort': False,
+                'should_simplify': False
             }
     
     def force_memory_cleanup(self, intensive: bool = False):
@@ -660,6 +218,279 @@ class MemoryMonitor:
             logger.warning(f"Memory cleanup failed: {e}")
             return 0.0
 
+class CTRCalibrator:
+    """CTR calibration system"""
+    
+    def __init__(self):
+        self.calibration_models = {}
+        self.calibration_scores = {}
+        self.best_method = None
+        self.bias_correction = 0.0
+        self.multiplicative_correction = 1.0
+    
+    def fit_platt_scaling(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
+        """Platt Scaling calibration"""
+        try:
+            if SKLEARN_AVAILABLE:
+                logger.info("Platt Scaling calibration training started")
+                
+                from sklearn.linear_model import LogisticRegression
+                platt_model = LogisticRegression()
+                platt_model.fit(y_pred_proba.reshape(-1, 1), y_true)
+                
+                self.calibration_models['platt_scaling'] = platt_model
+                
+                calibrated_proba = platt_model.predict_proba(y_pred_proba.reshape(-1, 1))[:, 1]
+                score = self._calculate_calibration_score(y_true, calibrated_proba)
+                self.calibration_scores['platt_scaling'] = score
+                
+                logger.info(f"Platt Scaling training complete - score: {score:.4f}")
+            
+        except Exception as e:
+            logger.error(f"Platt Scaling calibration failed: {e}")
+    
+    def fit_isotonic_regression(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
+        """Isotonic Regression calibration"""
+        try:
+            if SKLEARN_AVAILABLE:
+                logger.info("Isotonic Regression calibration training started")
+                
+                isotonic_model = IsotonicRegression(out_of_bounds='clip')
+                isotonic_model.fit(y_pred_proba, y_true)
+                
+                self.calibration_models['isotonic_regression'] = isotonic_model
+                
+                calibrated_proba = isotonic_model.predict(y_pred_proba)
+                score = self._calculate_calibration_score(y_true, calibrated_proba)
+                self.calibration_scores['isotonic_regression'] = score
+                
+                logger.info(f"Isotonic Regression training complete - score: {score:.4f}")
+            
+        except Exception as e:
+            logger.error(f"Isotonic Regression calibration failed: {e}")
+    
+    def fit_temperature_scaling(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
+        """Temperature Scaling calibration"""
+        try:
+            logger.info("Temperature Scaling calibration training started")
+            
+            from scipy.optimize import minimize_scalar
+            
+            def temperature_loss(temperature, y_true, y_pred_logits, bias=0.0):
+                scaled_logits = y_pred_logits / temperature + bias
+                scaled_proba = 1 / (1 + np.exp(-scaled_logits))
+                scaled_proba = np.clip(scaled_proba, 1e-15, 1 - 1e-15)
+                return -np.mean(y_true * np.log(scaled_proba) + (1 - y_true) * np.log(1 - scaled_proba))
+            
+            y_pred_logits = np.log(y_pred_proba / (1 - y_pred_proba + 1e-15) + 1e-15)
+            
+            result_temp = minimize_scalar(
+                lambda t: temperature_loss(t, y_true, y_pred_logits),
+                bounds=(0.1, 10.0),
+                method='bounded'
+            )
+            optimal_temperature = result_temp.x
+            
+            result_bias = minimize_scalar(
+                lambda b: temperature_loss(optimal_temperature, y_true, y_pred_logits, b),
+                bounds=(-5.0, 5.0),
+                method='bounded'
+            )
+            optimal_bias = result_bias.x
+            
+            self.calibration_models['temperature_scaling'] = {
+                'temperature': optimal_temperature,
+                'bias': optimal_bias
+            }
+            
+            scaled_logits = y_pred_logits / optimal_temperature + optimal_bias
+            calibrated_proba = 1 / (1 + np.exp(-scaled_logits))
+            calibrated_proba = np.clip(calibrated_proba, 1e-15, 1 - 1e-15)
+            
+            score = self._calculate_calibration_score(y_true, calibrated_proba)
+            self.calibration_scores['temperature_scaling'] = score
+            
+            logger.info(f"Temperature Scaling training complete - temperature: {optimal_temperature:.3f}, bias: {optimal_bias:.3f}")
+            logger.info(f"Temperature Scaling score: {score:.4f}")
+            
+        except Exception as e:
+            logger.error(f"Temperature Scaling calibration failed: {e}")
+    
+    def fit_beta_calibration(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
+        """Beta calibration"""
+        try:
+            logger.info("Beta calibration training started")
+            
+            from scipy.optimize import minimize
+            from scipy.special import betaln
+            
+            def beta_loss(params, y_true, y_pred_proba):
+                a, b = np.exp(params)
+                eps = 1e-12
+                
+                log_proba = np.log(y_pred_proba + eps)
+                log_1_minus_proba = np.log(1 - y_pred_proba + eps)
+                
+                beta_proba = np.exp(betaln(a, b) + (a - 1) * log_proba + (b - 1) * log_1_minus_proba)
+                beta_proba = np.clip(beta_proba, eps, 1 - eps)
+                
+                return -np.mean(y_true * np.log(beta_proba) + (1 - y_true) * np.log(1 - beta_proba))
+            
+            result = minimize(
+                lambda params: beta_loss(params, y_true, y_pred_proba),
+                x0=[0.0, 0.0],
+                method='BFGS'
+            )
+            
+            optimal_a, optimal_b = np.exp(result.x)
+            
+            self.calibration_models['beta_calibration'] = {
+                'a': optimal_a,
+                'b': optimal_b
+            }
+            
+            eps = 1e-12
+            log_proba = np.log(y_pred_proba + eps)
+            log_1_minus_proba = np.log(1 - y_pred_proba + eps)
+            calibrated_proba = np.exp(betaln(optimal_a, optimal_b) + 
+                                    (optimal_a - 1) * log_proba + 
+                                    (optimal_b - 1) * log_1_minus_proba)
+            calibrated_proba = np.clip(calibrated_proba, eps, 1 - eps)
+            
+            score = self._calculate_calibration_score(y_true, calibrated_proba)
+            self.calibration_scores['beta_calibration'] = score
+            
+            logger.info(f"Beta calibration training complete - score: {score:.4f}")
+            
+        except Exception as e:
+            logger.error(f"Beta calibration failed: {e}")
+    
+    def fit_bias_correction(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
+        """Bias correction"""
+        try:
+            logger.info("Bias correction training started")
+            
+            predicted_ctr = np.mean(y_pred_proba)
+            actual_ctr = np.mean(y_true)
+            
+            self.bias_correction = actual_ctr - predicted_ctr
+            
+            if predicted_ctr > 0:
+                self.multiplicative_correction = actual_ctr / predicted_ctr
+            else:
+                self.multiplicative_correction = 1.0
+            
+            logger.info(f"Bias correction complete - additive: {self.bias_correction:.4f}, multiplicative: {self.multiplicative_correction:.4f}")
+            
+        except Exception as e:
+            logger.error(f"Bias correction training failed: {e}")
+    
+    def _calculate_calibration_score(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
+        """Calculate calibration score"""
+        try:
+            predicted_ctr = np.mean(y_pred_proba)
+            actual_ctr = np.mean(y_true)
+            ctr_error = abs(predicted_ctr - actual_ctr)
+            ctr_score = max(0, 1 - ctr_error * 1000)
+            
+            if SKLEARN_AVAILABLE:
+                from sklearn.metrics import brier_score_loss
+                brier_score = brier_score_loss(y_true, y_pred_proba)
+                brier_score_normalized = max(0, 1 - brier_score * 4)
+            else:
+                brier_score_normalized = 0.5
+            
+            return (ctr_score * 0.7) + (brier_score_normalized * 0.3)
+            
+        except Exception:
+            return 0.0
+    
+    def fit(self, y_true: np.ndarray, y_pred_proba: np.ndarray, methods: List[str] = None):
+        """Complete calibration training"""
+        logger.info("CTR calibration training started")
+        
+        if methods is None:
+            methods = ['platt_scaling', 'isotonic_regression', 'temperature_scaling', 'beta_calibration', 'bias_correction']
+        
+        y_true = np.asarray(y_true)
+        y_pred_proba = np.asarray(y_pred_proba)
+        
+        if len(y_true) != len(y_pred_proba):
+            raise ValueError("Length mismatch between y_true and y_pred_proba")
+        
+        if len(y_true) == 0:
+            raise ValueError("Empty array cannot be processed")
+        
+        if 'platt_scaling' in methods:
+            self.fit_platt_scaling(y_true, y_pred_proba)
+        
+        if 'isotonic_regression' in methods:
+            self.fit_isotonic_regression(y_true, y_pred_proba)
+        
+        if 'temperature_scaling' in methods:
+            self.fit_temperature_scaling(y_true, y_pred_proba)
+        
+        if 'beta_calibration' in methods:
+            self.fit_beta_calibration(y_true, y_pred_proba)
+        
+        if 'bias_correction' in methods:
+            self.fit_bias_correction(y_true, y_pred_proba)
+        
+        if self.calibration_scores:
+            self.best_method = max(self.calibration_scores, key=self.calibration_scores.get)
+            logger.info(f"Best calibration method: {self.best_method} (score: {self.calibration_scores[self.best_method]:.4f})")
+        else:
+            self.best_method = 'bias_correction'
+            logger.warning("All calibration methods failed, using bias correction")
+        
+        logger.info("CTR calibration training complete")
+    
+    def predict(self, y_pred_proba: np.ndarray, method: str = None) -> np.ndarray:
+        """Apply calibration"""
+        try:
+            if method is None:
+                method = self.best_method
+            
+            if method not in self.calibration_models and method != 'bias_correction':
+                method = 'bias_correction'
+            
+            y_pred_proba = np.asarray(y_pred_proba)
+            
+            if method == 'platt_scaling' and method in self.calibration_models:
+                model = self.calibration_models[method]
+                return model.predict_proba(y_pred_proba.reshape(-1, 1))[:, 1]
+            
+            elif method == 'isotonic_regression' and method in self.calibration_models:
+                model = self.calibration_models[method]
+                return np.clip(model.predict(y_pred_proba), 1e-15, 1 - 1e-15)
+            
+            elif method == 'temperature_scaling' and method in self.calibration_models:
+                params = self.calibration_models[method]
+                y_pred_logits = np.log(y_pred_proba / (1 - y_pred_proba + 1e-15) + 1e-15)
+                scaled_logits = y_pred_logits / params['temperature'] + params['bias']
+                calibrated_proba = 1 / (1 + np.exp(-scaled_logits))
+                return np.clip(calibrated_proba, 1e-15, 1 - 1e-15)
+            
+            elif method == 'beta_calibration' and method in self.calibration_models:
+                params = self.calibration_models[method]
+                from scipy.special import betaln
+                eps = 1e-12
+                log_proba = np.log(y_pred_proba + eps)
+                log_1_minus_proba = np.log(1 - y_pred_proba + eps)
+                calibrated_proba = np.exp(betaln(params['a'], params['b']) + 
+                                        (params['a'] - 1) * log_proba + 
+                                        (params['b'] - 1) * log_1_minus_proba)
+                return np.clip(calibrated_proba, eps, 1 - eps)
+            
+            else:
+                corrected_proba = y_pred_proba + self.bias_correction
+                corrected_proba = corrected_proba * self.multiplicative_correction
+                return np.clip(corrected_proba, 1e-15, 1 - 1e-15)
+            
+        except Exception as e:
+            logger.warning(f"Calibration prediction failed: {e}")
+            return np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
+
 class BaseModel(ABC):
     """Base class for all models"""
     
@@ -672,205 +503,231 @@ class BaseModel(ABC):
         self.calibrator = None
         self.is_calibrated = False
         self.prediction_diversity_threshold = 2000
-        self.calibration_applied = False  # Track calibration application
-        
+        self.calibration_applied = True
         self.memory_monitor = MemoryMonitor()
-        
-    @abstractmethod
-    def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
-            X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Model training"""
-        pass
     
-    @abstractmethod
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Probability prediction"""
-        pass
+    def _memory_safe_fit(self, fit_function, *args, **kwargs):
+        """Memory safe fitting"""
+        try:
+            memory_status = self.memory_monitor.get_memory_status()
+            logger.info(f"Memory thresholds - warning: {self.memory_monitor.memory_thresholds['warning']:.1f}GB, critical: {self.memory_monitor.memory_thresholds['critical']:.1f}GB, abort: {self.memory_monitor.memory_thresholds['abort']:.1f}GB")
+            
+            if memory_status['should_abort']:
+                logger.error(f"Memory limit reached, aborting fit: {memory_status['usage_gb']:.2f}GB")
+                raise MemoryError(f"Memory limit reached: {memory_status['usage_gb']:.2f}GB")
+            
+            if memory_status['should_simplify']:
+                logger.warning(f"Memory pressure detected, simplifying parameters: {memory_status['usage_gb']:.2f}GB")
+                self._simplify_for_memory()
+            
+            if memory_status['should_cleanup']:
+                logger.info("Memory cleanup before training")
+                self.memory_monitor.force_memory_cleanup()
+            
+            result = fit_function(*args, **kwargs)
+            
+            if memory_status['should_cleanup']:
+                logger.info("Memory cleanup after training")
+                self.memory_monitor.force_memory_cleanup()
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Memory safe fit failed: {e}")
+            self.memory_monitor.force_memory_cleanup(intensive=True)
+            raise
     
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        """Binary prediction"""
-        proba = self.predict_proba(X)
-        return (proba >= 0.5).astype(int)
+    def _memory_safe_predict(self, predict_function, X: pd.DataFrame) -> np.ndarray:
+        """Memory safe prediction"""
+        try:
+            memory_status = self.memory_monitor.get_memory_status()
+            
+            if memory_status['should_cleanup']:
+                self.memory_monitor.force_memory_cleanup()
+            
+            if len(X) > 500000:
+                logger.info(f"Large dataset prediction: {len(X)} rows, using batch processing")
+                batch_size = 100000
+                predictions = []
+                
+                for i in range(0, len(X), batch_size):
+                    batch = X.iloc[i:i + batch_size]
+                    batch_pred = predict_function(batch)
+                    predictions.append(batch_pred)
+                    
+                    if i % (batch_size * 5) == 0:
+                        self.memory_monitor.force_memory_cleanup()
+                
+                return np.concatenate(predictions)
+            else:
+                return predict_function(X)
+            
+        except Exception as e:
+            logger.error(f"Memory safe prediction failed: {e}")
+            self.memory_monitor.force_memory_cleanup()
+            raise
     
-    def apply_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, 
-                         method: str = 'auto', cv_folds: int = 5):
-        """Force apply calibration"""
+    def _enhance_prediction_diversity(self, predictions: np.ndarray) -> np.ndarray:
+        """Enhance prediction diversity"""
+        try:
+            if len(predictions) < self.prediction_diversity_threshold:
+                return predictions
+            
+            unique_count = len(np.unique(predictions))
+            if unique_count < len(predictions) * 0.1:
+                noise = np.random.normal(0, 0.001, len(predictions))
+                predictions = predictions + noise
+                predictions = np.clip(predictions, 1e-15, 1 - 1e-15)
+            
+            return predictions
+        except Exception:
+            return predictions
+    
+    def _ensure_feature_consistency(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Ensure feature consistency"""
+        try:
+            if self.feature_names is None:
+                return X
+            
+            missing_features = set(self.feature_names) - set(X.columns)
+            if missing_features:
+                for feature in missing_features:
+                    X[feature] = 0.0
+            
+            extra_features = set(X.columns) - set(self.feature_names)
+            if extra_features:
+                X = X.drop(columns=list(extra_features))
+            
+            X = X[self.feature_names]
+            return X
+            
+        except Exception as e:
+            logger.warning(f"Feature consistency check failed: {e}")
+            return X
+    
+    def apply_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, method: str = 'auto'):
+        """Apply calibration to model"""
         try:
             logger.info(f"Force applying calibration to {self.name} model: {method}")
             
             if not self.is_fitted:
-                logger.warning("Model not fitted, skipping calibration")
+                logger.warning("Model is not fitted, skipping calibration")
                 return
             
-            # Force calibration execution
             raw_predictions = self.predict_proba_raw(X_val)
             
             self.calibrator = CTRCalibrator()
             self.calibrator.fit(y_val.values, raw_predictions)
             
-            self.is_calibrated = True
-            self.calibration_applied = True
-            
+            original_ctr = np.mean(raw_predictions)
             calibrated_predictions = self.calibrator.predict(raw_predictions)
+            calibrated_ctr = np.mean(calibrated_predictions)
+            actual_ctr = np.mean(y_val)
             
-            original_ctr = raw_predictions.mean()
-            calibrated_ctr = calibrated_predictions.mean()
-            actual_ctr = y_val.mean()
+            self.is_calibrated = True
             
-            logger.info(f"Forced calibration application complete")
+            logger.info("Forced calibration application complete")
             logger.info(f"  - Original CTR: {original_ctr:.4f}")
             logger.info(f"  - Calibrated CTR: {calibrated_ctr:.4f}")
             logger.info(f"  - Actual CTR: {actual_ctr:.4f}")
             logger.info(f"  - Best method: {self.calibrator.best_method}")
             
         except Exception as e:
-            logger.error(f"Forced calibration application failed: {e}")
+            logger.error(f"Calibration application failed: {e}")
             self.is_calibrated = False
-            self.calibration_applied = False
-    
-    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """Raw predictions before calibration"""
-        return self.predict_proba(X)
-    
-    def _memory_safe_fit(self, fit_function, *args, **kwargs):
-        """Memory safe training wrapper"""
-        try:
-            memory_status = self.memory_monitor.get_memory_status()
-            
-            if memory_status['should_cleanup']:
-                logger.info(f"{self.name}: Performing memory cleanup before training")
-                self.memory_monitor.force_memory_cleanup()
-            
-            if memory_status['should_simplify']:
-                logger.warning(f"{self.name}: Memory shortage, enabling simplified mode")
-                self._simplify_for_memory()
-            
-            result = fit_function(*args, **kwargs)
-            
-            self.memory_monitor.force_memory_cleanup()
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"{self.name} memory safe training failed: {e}")
-            self.memory_monitor.force_memory_cleanup(intensive=True)
-            raise
-    
-    def _memory_safe_predict(self, predict_function, X: pd.DataFrame, batch_size: int = None) -> np.ndarray:
-        """Memory safe prediction wrapper"""
-        try:
-            memory_status = self.memory_monitor.get_memory_status()
-            
-            if batch_size is None:
-                if memory_status['level'] == 'abort':
-                    batch_size = 3000
-                elif memory_status['level'] == 'critical':
-                    batch_size = 10000
-                elif memory_status['level'] == 'warning':
-                    batch_size = 25000
-                else:
-                    batch_size = 100000
-            
-            n_samples = len(X)
-            predictions = []
-            
-            for i in range(0, n_samples, batch_size):
-                batch_end = min(i + batch_size, n_samples)
-                batch_X = X.iloc[i:batch_end]
-                
-                try:
-                    batch_pred = predict_function(batch_X)
-                    predictions.append(batch_pred)
-                    
-                    if (i // batch_size) % 3 == 0:
-                        gc.collect()
-                    
-                    if self.memory_monitor.check_memory_pressure():
-                        logger.warning(f"{self.name}: Memory pressure detected during prediction, cleaning up")
-                        self.memory_monitor.force_memory_cleanup()
-                        
-                except Exception as e:
-                    logger.warning(f"{self.name}: Batch {i}-{batch_end} prediction failed: {e}")
-                    batch_size_actual = batch_end - i
-                    predictions.append(np.full(batch_size_actual, 0.0191))
-            
-            return np.concatenate(predictions) if predictions else np.array([])
-            
-        except Exception as e:
-            logger.error(f"{self.name} memory safe prediction failed: {e}")
-            return np.full(len(X), 0.0191)
     
     def _simplify_for_memory(self):
-        """Simplify model parameters when memory is low"""
+        """Simplify parameters for memory conservation (to be overridden)"""
         pass
     
-    def _ensure_feature_consistency(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Ensure feature consistency"""
-        if self.feature_names is None:
-            return X
-        
-        try:
-            missing_features = [f for f in self.feature_names if f not in X.columns]
-            if missing_features:
-                for feature in missing_features:
-                    X[feature] = 0.0
-            
-            return X[self.feature_names]
-            
-        except Exception as e:
-            logger.warning(f"Feature consistency check failed: {e}")
-            return X
+    @abstractmethod
+    def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
+            X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
+        """Train the model"""
+        pass
     
-    def _enhance_prediction_diversity(self, predictions: np.ndarray) -> np.ndarray:
-        """Enhance prediction diversity"""
+    @abstractmethod
+    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
+        """Raw predictions before calibration"""
+        pass
+    
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        """Calibrated probability prediction"""
+        raw_pred = self.predict_proba_raw(X)
+        
+        if self.is_calibrated and self.calibrator is not None:
+            try:
+                calibrated_pred = self.calibrator.predict(raw_pred)
+                return np.clip(calibrated_pred, 1e-15, 1 - 1e-15)
+            except Exception as e:
+                logger.warning(f"{self.name} calibration prediction failed: {e}")
+        
+        return raw_pred
+    
+    def save(self, path: str):
+        """Save model"""
         try:
-            unique_predictions = len(np.unique(predictions))
+            save_data = {
+                'model': self.model,
+                'params': self.params,
+                'is_fitted': self.is_fitted,
+                'feature_names': self.feature_names,
+                'calibrator': self.calibrator,
+                'is_calibrated': self.is_calibrated
+            }
             
-            if unique_predictions < self.prediction_diversity_threshold:
-                noise_scale = max(predictions.std() * 0.005, 1e-6)
-                noise = np.random.normal(0, noise_scale, len(predictions))
-                
-                predictions = predictions + noise
-                predictions = np.clip(predictions, 1e-15, 1 - 1e-15)
+            with open(path, 'wb') as f:
+                pickle.dump(save_data, f)
             
-            return predictions
+            logger.info(f"{self.name} model saved: {path}")
             
         except Exception as e:
-            logger.warning(f"Prediction diversity enhancement failed: {e}")
-            return predictions
+            logger.error(f"Model saving failed: {e}")
+    
+    def load(self, path: str):
+        """Load model"""
+        try:
+            with open(path, 'rb') as f:
+                save_data = pickle.load(f)
+            
+            self.model = save_data['model']
+            self.params = save_data['params']
+            self.is_fitted = save_data['is_fitted']
+            self.feature_names = save_data['feature_names']
+            self.calibrator = save_data.get('calibrator')
+            self.is_calibrated = save_data.get('is_calibrated', False)
+            
+            logger.info(f"{self.name} model loaded: {path}")
+            
+        except Exception as e:
+            logger.error(f"Model loading failed: {e}")
 
 class LightGBMModel(BaseModel):
-    """LightGBM model (forced calibration application)"""
+    """LightGBM model"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not LIGHTGBM_AVAILABLE:
             raise ImportError("LightGBM is not installed.")
-            
+        
         default_params = {
             'objective': 'binary',
             'metric': 'binary_logloss',
             'boosting_type': 'gbdt',
-            'num_leaves': 2047,
-            'learning_rate': 0.008,
-            'feature_fraction': 0.95,
-            'bagging_fraction': 0.85,
-            'bagging_freq': 3,
-            'min_child_samples': 80,
-            'min_child_weight': 3,
-            'lambda_l1': 2.5,
-            'lambda_l2': 2.5,
-            'max_depth': 20,
+            'num_leaves': 255,
+            'max_depth': 15,
+            'learning_rate': 0.01,
+            'feature_fraction': 0.9,
+            'bagging_fraction': 0.8,
+            'bagging_freq': 5,
             'verbose': -1,
-            'random_state': 42,
             'n_estimators': 8000,
             'early_stopping_rounds': 800,
-            'scale_pos_weight': 52.0,
-            'force_row_wise': True,
-            'max_bin': 255,
-            'num_threads': 12,
-            'device_type': 'cpu',
-            'extra_trees': False,
-            'path_smooth': 1.0
+            'random_state': 42,
+            'force_col_wise': True,
+            'min_child_samples': 25,
+            'reg_alpha': 2.0,
+            'reg_lambda': 2.0,
+            'scale_pos_weight': 52.0
         }
         
         if params:
@@ -882,18 +739,17 @@ class LightGBMModel(BaseModel):
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         self.params.update({
-            'num_leaves': 1023,
-            'max_depth': 15,
+            'num_leaves': 127,
+            'max_depth': 10,
             'n_estimators': 5000,
-            'min_child_samples': 150,
-            'num_threads': 8,
+            'min_child_samples': 50,
             'early_stopping_rounds': 500
         })
         logger.info(f"{self.name}: Parameters simplified for memory conservation")
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """LightGBM model training (forced calibration application)"""
+        """LightGBM model training"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         
         def _fit_internal():
@@ -911,51 +767,27 @@ class LightGBMModel(BaseModel):
                 if X_val_clean is not None and col in X_val_clean.columns and X_val_clean[col].dtype in ['float64']:
                     X_val_clean[col] = X_val_clean[col].astype('float32')
             
-            train_data = lgb.Dataset(
-                X_train_clean, 
-                label=y_train, 
-                free_raw_data=True,
-                feature_name=list(X_train_clean.columns)
-            )
-            
+            train_data = lgb.Dataset(X_train_clean, label=y_train)
             valid_sets = [train_data]
             valid_names = ['train']
             
             if X_val_clean is not None and y_val is not None:
-                val_data = lgb.Dataset(
-                    X_val_clean, 
-                    label=y_val, 
-                    reference=train_data, 
-                    free_raw_data=True,
-                    feature_name=list(X_val_clean.columns)
-                )
-                valid_sets.append(val_data)
+                valid_data = lgb.Dataset(X_val_clean, label=y_val, reference=train_data)
+                valid_sets.append(valid_data)
                 valid_names.append('valid')
             
-            callbacks = []
             early_stopping = self.params.get('early_stopping_rounds', 800)
-            if early_stopping:
-                callbacks.append(lgb.early_stopping(early_stopping, verbose=False))
-            
-            def memory_callback(env):
-                if env.iteration % 300 == 0:
-                    if self.memory_monitor.check_memory_pressure():
-                        logger.warning("Memory pressure detected during training")
-                        self.memory_monitor.force_memory_cleanup()
-            
-            callbacks.append(memory_callback)
             
             self.model = lgb.train(
                 self.params,
                 train_data,
                 valid_sets=valid_sets,
                 valid_names=valid_names,
-                callbacks=callbacks
+                callbacks=[lgb.early_stopping(early_stopping), lgb.log_evaluation(0)]
             )
             
             self.is_fitted = True
             
-            # Force apply calibration to all LightGBM models
             if X_val_clean is not None and y_val is not None:
                 logger.info(f"{self.name}: Starting forced calibration application")
                 self.apply_calibration(X_val_clean, y_val, method='auto')
@@ -964,9 +796,6 @@ class LightGBMModel(BaseModel):
                 else:
                     logger.warning(f"{self.name}: Forced calibration application failed")
             
-            del train_data
-            if 'val_data' in locals():
-                del val_data
             del X_train_clean
             if X_val_clean is not None:
                 del X_val_clean
@@ -995,22 +824,9 @@ class LightGBMModel(BaseModel):
             return self._enhance_prediction_diversity(proba)
         
         return self._memory_safe_predict(_predict_internal, X)
-    
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Calibrated probability prediction"""
-        raw_pred = self.predict_proba_raw(X)
-        
-        if self.is_calibrated and self.calibrator is not None:
-            try:
-                calibrated_pred = self.calibrator.predict(raw_pred)
-                return np.clip(calibrated_pred, 1e-15, 1 - 1e-15)
-            except Exception as e:
-                logger.warning(f"{self.name} calibration prediction failed: {e}")
-        
-        return raw_pred
 
 class XGBoostModel(BaseModel):
-    """XGBoost model (forced calibration application)"""
+    """XGBoost model with memory management"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
@@ -1070,13 +886,16 @@ class XGBoostModel(BaseModel):
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         self.params.update({
-            'max_depth': 10,
-            'n_estimators': 5000,
-            'min_child_weight': 12,
-            'nthread': 8,
+            'max_depth': 8,
+            'n_estimators': 3000,
+            'min_child_weight': 15,
+            'nthread': 6,
             'tree_method': 'hist',
-            'early_stopping_rounds': 500,
-            'max_leaves': 1023
+            'early_stopping_rounds': 300,
+            'max_leaves': 511,
+            'max_bin': 128,
+            'colsample_bytree': 0.8,
+            'subsample': 0.8
         })
         self.params.pop('gpu_id', None)
         self.params.pop('predictor', None)
@@ -1084,72 +903,153 @@ class XGBoostModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """XGBoost model training (forced calibration application)"""
+        """XGBoost model training with memory management"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         
         def _fit_internal():
+            logger.info(f"{self.name}: Performing memory cleanup before training")
+            
+            # Aggressive memory cleanup before DMatrix creation
+            self.memory_monitor.force_memory_cleanup(intensive=True)
+            time.sleep(2)
+            
+            # Check memory status after cleanup
+            memory_status = self.memory_monitor.get_memory_status()
+            if memory_status['should_abort']:
+                raise MemoryError(f"Insufficient memory even after cleanup: {memory_status['usage_gb']:.2f}GB")
+            
+            if memory_status['should_simplify']:
+                logger.warning(f"Memory pressure detected, applying simplified parameters")
+                self._simplify_for_memory()
+            
             self.feature_names = list(X_train.columns)
             
-            X_train_clean = X_train.fillna(0)
+            # Convert to smaller data types
+            X_train_clean = X_train.fillna(0).copy()
             if X_val is not None:
-                X_val_clean = X_val.fillna(0)
+                X_val_clean = X_val.fillna(0).copy()
             else:
                 X_val_clean = None
             
+            # Ensure float32 for memory efficiency
             for col in X_train_clean.columns:
                 if X_train_clean[col].dtype in ['float64']:
                     X_train_clean[col] = X_train_clean[col].astype('float32')
-                if X_val_clean is not None and col in X_val_clean.columns and X_val_clean[col].dtype in ['float64']:
-                    X_val_clean[col] = X_val_clean[col].astype('float32')
+                elif X_train_clean[col].dtype in ['int64']:
+                    X_train_clean[col] = X_train_clean[col].astype('int32')
             
-            dtrain = xgb.DMatrix(
-                X_train_clean, 
-                label=y_train, 
-                enable_categorical=False,
-                feature_names=list(X_train_clean.columns)
-            )
-            
-            evals = [(dtrain, 'train')]
-            dval = None
-            
-            if X_val_clean is not None and y_val is not None:
-                dval = xgb.DMatrix(
-                    X_val_clean, 
-                    label=y_val, 
-                    enable_categorical=False,
-                    feature_names=list(X_val_clean.columns)
-                )
-                evals.append((dval, 'valid'))
-            
-            early_stopping = self.params.get('early_stopping_rounds', 800)
-            
-            self.model = xgb.train(
-                self.params,
-                dtrain,
-                evals=evals,
-                early_stopping_rounds=early_stopping,
-                verbose_eval=False
-            )
-            
-            self.is_fitted = True
-            
-            # Force apply calibration to all XGBoost models
-            if X_val_clean is not None and y_val is not None:
-                logger.info(f"{self.name}: Starting forced calibration application")
-                self.apply_calibration(X_val_clean, y_val, method='auto')
-                if self.is_calibrated:
-                    logger.info(f"{self.name}: Forced calibration application complete")
-                else:
-                    logger.warning(f"{self.name}: Forced calibration application failed")
-            
-            del dtrain
-            if dval is not None:
-                del dval
-            del X_train_clean
             if X_val_clean is not None:
-                del X_val_clean
+                for col in X_val_clean.columns:
+                    if col in X_train_clean.columns:
+                        if X_val_clean[col].dtype in ['float64']:
+                            X_val_clean[col] = X_val_clean[col].astype('float32')
+                        elif X_val_clean[col].dtype in ['int64']:
+                            X_val_clean[col] = X_val_clean[col].astype('int32')
             
-            return self
+            # Another memory cleanup before DMatrix
+            self.memory_monitor.force_memory_cleanup()
+            time.sleep(1)
+            
+            try:
+                # Create DMatrix with memory management
+                logger.info(f"{self.name}: Creating training DMatrix")
+                dtrain = xgb.DMatrix(
+                    X_train_clean, 
+                    label=y_train, 
+                    enable_categorical=False,
+                    feature_names=list(X_train_clean.columns)
+                )
+                
+                evals = [(dtrain, 'train')]
+                dval = None
+                
+                if X_val_clean is not None and y_val is not None:
+                    logger.info(f"{self.name}: Creating validation DMatrix")
+                    # Memory cleanup before validation DMatrix
+                    self.memory_monitor.force_memory_cleanup()
+                    
+                    dval = xgb.DMatrix(
+                        X_val_clean, 
+                        label=y_val, 
+                        enable_categorical=False,
+                        feature_names=list(X_val_clean.columns)
+                    )
+                    evals.append((dval, 'valid'))
+                
+                # Clear data frames after DMatrix creation
+                del X_train_clean
+                if X_val_clean is not None:
+                    del X_val_clean
+                
+                self.memory_monitor.force_memory_cleanup()
+                
+                early_stopping = self.params.get('early_stopping_rounds', 800)
+                
+                logger.info(f"{self.name}: Starting XGBoost training")
+                self.model = xgb.train(
+                    self.params,
+                    dtrain,
+                    evals=evals,
+                    early_stopping_rounds=early_stopping,
+                    verbose_eval=False
+                )
+                
+                self.is_fitted = True
+                
+                # Force apply calibration to all XGBoost models
+                if X_val is not None and y_val is not None:
+                    logger.info(f"{self.name}: Starting forced calibration application")
+                    # Use original validation data for calibration
+                    X_val_for_calibration = X_val.fillna(0).copy()
+                    for col in X_val_for_calibration.columns:
+                        if X_val_for_calibration[col].dtype in ['float64']:
+                            X_val_for_calibration[col] = X_val_for_calibration[col].astype('float32')
+                        elif X_val_for_calibration[col].dtype in ['int64']:
+                            X_val_for_calibration[col] = X_val_for_calibration[col].astype('int32')
+                    
+                    self.apply_calibration(X_val_for_calibration, y_val, method='auto')
+                    if self.is_calibrated:
+                        logger.info(f"{self.name}: Forced calibration application complete")
+                    else:
+                        logger.warning(f"{self.name}: Forced calibration application failed")
+                    
+                    del X_val_for_calibration
+                
+                # Cleanup DMatrix objects
+                del dtrain
+                if dval is not None:
+                    del dval
+                
+                self.memory_monitor.force_memory_cleanup()
+                
+                return self
+                
+            except Exception as e:
+                logger.error(f"{self.name}: DMatrix creation or training failed: {e}")
+                
+                # Cleanup on failure
+                try:
+                    if 'dtrain' in locals():
+                        del dtrain
+                    if 'dval' in locals() and dval is not None:
+                        del dval
+                    if 'X_train_clean' in locals():
+                        del X_train_clean
+                    if 'X_val_clean' in locals() and X_val_clean is not None:
+                        del X_val_clean
+                except:
+                    pass
+                
+                # Intensive memory cleanup on failure
+                cleanup_rounds = 20
+                for i in range(cleanup_rounds):
+                    collected = gc.collect()
+                    time.sleep(0.1)
+                    if i % 5 == 0:
+                        memory_freed = self.memory_monitor.force_memory_cleanup(intensive=True)
+                        logger.info(f"Memory cleanup: {memory_freed:.2f}GB freed (round {i+1})")
+                
+                raise
         
         return self._memory_safe_fit(_fit_internal)
     
@@ -1165,17 +1065,11 @@ class XGBoostModel(BaseModel):
             for col in X_processed.columns:
                 if X_processed[col].dtype in ['float64']:
                     X_processed[col] = X_processed[col].astype('float32')
+                elif X_processed[col].dtype in ['int64']:
+                    X_processed[col] = X_processed[col].astype('int32')
             
-            dtest = xgb.DMatrix(
-                X_processed, 
-                enable_categorical=False,
-                feature_names=list(X_processed.columns)
-            )
-            
-            if hasattr(self.model, 'best_iteration') and self.model.best_iteration is not None:
-                proba = self.model.predict(dtest, iteration_range=(0, self.model.best_iteration + 1))
-            else:
-                proba = self.model.predict(dtest)
+            dtest = xgb.DMatrix(X_processed, feature_names=list(X_processed.columns))
+            proba = self.model.predict(dtest)
             
             del dtest
             
@@ -1183,62 +1077,44 @@ class XGBoostModel(BaseModel):
             return self._enhance_prediction_diversity(proba)
         
         return self._memory_safe_predict(_predict_internal, X)
-    
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Calibrated probability prediction"""
-        raw_pred = self.predict_proba_raw(X)
-        
-        if self.is_calibrated and self.calibrator is not None:
-            try:
-                calibrated_pred = self.calibrator.predict(raw_pred)
-                return np.clip(calibrated_pred, 1e-15, 1 - 1e-15)
-            except Exception as e:
-                logger.warning(f"{self.name} calibration prediction failed: {e}")
-        
-        return raw_pred
 
 class LogisticModel(BaseModel):
-    """Logistic regression model (forced calibration application)"""
+    """Logistic Regression model"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not SKLEARN_AVAILABLE:
-            raise ImportError("scikit-learn is not installed.")
-            
+            raise ImportError("Scikit-learn is not installed.")
+        
         default_params = {
-            'C': 0.03,
-            'max_iter': 1200,
+            'C': 0.1,
+            'penalty': 'l2',
+            'solver': 'lbfgs',
+            'max_iter': 3000,
             'random_state': 42,
             'class_weight': 'balanced',
-            'solver': 'liblinear',
-            'penalty': 'l2',
-            'tol': 1e-5,
-            'fit_intercept': True,
-            'warm_start': False,
-            'dual': False
+            'n_jobs': 12
         }
         
         if params:
             default_params.update(params)
         
         super().__init__("LogisticRegression", default_params)
-        
         self.model = LogisticRegression(**self.params)
-        self.prediction_diversity_threshold = 2000
+        self.prediction_diversity_threshold = 2500
     
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         self.params.update({
-            'C': 0.05,
-            'max_iter': 800,
-            'tol': 1e-4,
-            'solver': 'liblinear'
+            'C': 1.0,
+            'max_iter': 1000,
+            'n_jobs': 6
         })
         self.model = LogisticRegression(**self.params)
         logger.info(f"{self.name}: Parameters simplified for memory conservation")
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Logistic regression model training (forced calibration application)"""
+        """Logistic Regression model training"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         
         def _fit_internal():
@@ -1246,31 +1122,25 @@ class LogisticModel(BaseModel):
             
             X_train_clean = X_train.fillna(0)
             
-            if len(X_train_clean) > 4000000:
-                logger.info(f"Large data detected, applying sampling ({len(X_train_clean):,} -> 4,000,000)")
-                
-                pos_indices = np.where(y_train == 1)[0]
-                neg_indices = np.where(y_train == 0)[0]
-                
-                n_pos = len(pos_indices)
-                n_neg_target = min(4000000 - n_pos, len(neg_indices))
-                
-                selected_neg = np.random.choice(neg_indices, n_neg_target, replace=False)
-                selected_indices = np.concatenate([pos_indices, selected_neg])
-                np.random.shuffle(selected_indices)
-                
-                X_train_clean = X_train_clean.iloc[selected_indices]
-                y_train_sample = y_train.iloc[selected_indices]
-            else:
-                y_train_sample = y_train
-            
             for col in X_train_clean.columns:
                 if X_train_clean[col].dtype in ['float64']:
                     X_train_clean[col] = X_train_clean[col].astype('float32')
             
+            # Sample for large datasets
+            if len(X_train_clean) > 4000000:
+                sample_size = 4000000
+                logger.info(f"Large data detected, applying sampling ({len(X_train_clean):,} -> {sample_size:,})")
+                
+                sample_indices = np.random.choice(len(X_train_clean), size=sample_size, replace=False)
+                X_train_sample = X_train_clean.iloc[sample_indices]
+                y_train_sample = y_train.iloc[sample_indices]
+            else:
+                X_train_sample = X_train_clean
+                y_train_sample = y_train
+            
             try:
                 start_time = time.time()
-                self.model.fit(X_train_clean, y_train_sample)
+                self.model.fit(X_train_sample, y_train_sample)
                 training_time = time.time() - start_time
                 
                 logger.info(f"{self.name} training complete (time taken: {training_time:.2f}s)")
@@ -1279,13 +1149,18 @@ class LogisticModel(BaseModel):
             except Exception as e:
                 logger.warning(f"Logistic regression training failed: {e}")
                 self._simplify_for_memory()
-                self.model.fit(X_train_clean, y_train_sample)
+                self.model.fit(X_train_sample, y_train_sample)
                 self.is_fitted = True
             
             # Force apply calibration to all logistic regression models
             if X_val is not None and y_val is not None:
                 logger.info(f"{self.name}: Starting forced calibration application")
-                self.apply_calibration(X_val, y_val, method='auto')
+                X_val_clean = X_val.fillna(0)
+                for col in X_val_clean.columns:
+                    if X_val_clean[col].dtype in ['float64']:
+                        X_val_clean[col] = X_val_clean[col].astype('float32')
+                
+                self.apply_calibration(X_val_clean, y_val, method='auto')
                 if self.is_calibrated:
                     logger.info(f"{self.name}: Forced calibration application complete")
                 else:
@@ -1310,37 +1185,22 @@ class LogisticModel(BaseModel):
                 if X_processed[col].dtype in ['float64']:
                     X_processed[col] = X_processed[col].astype('float32')
             
-            proba = self.model.predict_proba(X_processed)
-            if proba.ndim == 2:
-                proba = proba[:, 1]
-            
+            proba = self.model.predict_proba(X_processed)[:, 1]
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
             return self._enhance_prediction_diversity(proba)
         
         return self._memory_safe_predict(_predict_internal, X)
-    
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Calibrated probability prediction"""
-        raw_pred = self.predict_proba_raw(X)
-        
-        if self.is_calibrated and self.calibrator is not None:
-            try:
-                calibrated_pred = self.calibrator.predict(raw_pred)
-                return np.clip(calibrated_pred, 1e-15, 1 - 1e-15)
-            except Exception as e:
-                logger.warning(f"{self.name} calibration prediction failed: {e}")
-        
-        return raw_pred
 
 class ModelFactory:
-    """CTR model factory (forced calibration application)"""
+    """Model factory for creating models"""
     
     @staticmethod
     def create_model(model_type: str, **kwargs) -> BaseModel:
-        """Create model instance (forced calibration application)"""
-        
+        """Create model by type"""
         try:
+            memory_monitor = MemoryMonitor()
             logger.info(f"Creating model: {model_type} (forced calibration application configured)")
+            logger.info(f"Memory thresholds - warning: {memory_monitor.memory_thresholds['warning']:.1f}GB, critical: {memory_monitor.memory_thresholds['critical']:.1f}GB, abort: {memory_monitor.memory_thresholds['abort']:.1f}GB")
             
             if model_type.lower() == 'lightgbm':
                 if not LIGHTGBM_AVAILABLE:
@@ -1417,6 +1277,7 @@ class ModelFactory:
         else:
             return ModelFactory.get_available_models()
 
+# Backward compatibility
 FinalLightGBMModel = LightGBMModel
 FinalXGBoostModel = XGBoostModel  
 FinalLogisticModel = LogisticModel
