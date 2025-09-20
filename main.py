@@ -254,8 +254,8 @@ def execute_final_pipeline(config, quick_mode: bool = False):
             
             if PSUTIL_AVAILABLE:
                 vm = psutil.virtual_memory()
-                # More aggressive threshold for 64GB environment (changed from 10GB to 5GB)
-                if vm.available / (1024**3) < 5:
+                # Adjusted threshold for 64GB environment (changed from 5GB to 8GB)
+                if vm.available / (1024**3) < 8:
                     logger.warning("Performing simplified feature engineering due to low memory")
                     feature_engineer.set_memory_efficient_mode(True)
             
@@ -353,10 +353,10 @@ def execute_final_pipeline(config, quick_mode: bool = False):
             try:
                 force_memory_cleanup()
                 
-                # More aggressive memory threshold for model training (changed from 5GB to 2GB)
+                # Adjusted memory threshold for model training (changed from 2GB to 4GB)
                 if PSUTIL_AVAILABLE:
                     vm = psutil.virtual_memory()
-                    if vm.available / (1024**3) < 2:  # 2GB threshold instead of 5GB
+                    if vm.available / (1024**3) < 4:  # 4GB threshold
                         logger.warning(f"{model_type} model training skipped: low memory")
                         continue
                 
@@ -373,8 +373,8 @@ def execute_final_pipeline(config, quick_mode: bool = False):
                     trained_models[model_type] = model
                     successful_models += 1
                     
-                    # Add to ensemble
-                    ensemble_manager.add_model(model_type, model)
+                    # Fixed: Add to ensemble using correct method name
+                    ensemble_manager.add_base_model(model_type, model)
                     
                     logger.info(f"{model_type} model training completed successfully")
                 else:
@@ -386,10 +386,10 @@ def execute_final_pipeline(config, quick_mode: bool = False):
             
             force_memory_cleanup()
             
-            # Memory check after each model (more aggressive threshold)
+            # Memory check after each model (adjusted threshold)
             if PSUTIL_AVAILABLE:
                 vm = psutil.virtual_memory()
-                if vm.available / (1024**3) < 2:  # 2GB threshold
+                if vm.available / (1024**3) < 4:  # 4GB threshold
                     logger.warning("Low memory detected, stopping additional model training")
                     break
         
@@ -401,7 +401,8 @@ def execute_final_pipeline(config, quick_mode: bool = False):
         
         try:
             if len(trained_models) >= 1:  # Changed from 2 to 1 for more lenient ensemble
-                ensemble_manager.train_ensemble(X_val_split, y_val_split)
+                # Fixed: Use correct method name for ensemble training
+                ensemble_manager.train_all_ensembles(X_val_split, y_val_split)
                 ensemble_used = True
                 logger.info("Ensemble training completed")
             else:
@@ -491,69 +492,86 @@ def generate_final_submission(trained_models, X_test, config, ensemble_manager=N
                 ensemble_predictions, ensemble_used = ensemble_manager.predict_with_best_ensemble(X_test)
                 
                 if ensemble_predictions is not None and len(ensemble_predictions) > 0:
-                    predictions = ensemble_predictions[:len(sample_submission)]
                     prediction_method = "Ensemble"
-                    logger.info("Ensemble manager prediction completed")
+                    sample_submission['clicked'] = ensemble_predictions
+                    logger.info("Ensemble prediction successful")
                 else:
                     raise ValueError("Ensemble prediction returned empty results")
-                
+                    
             except Exception as e:
                 logger.error(f"Ensemble prediction failed: {e}")
-                ensemble_predictions = None
-        else:
-            ensemble_predictions = None
+                ensemble_manager = None
         
-        # Try individual model prediction if ensemble failed
-        if ensemble_predictions is None and trained_models:
-            try:
-                logger.info("Individual model prediction started")
+        # Individual model prediction
+        if ensemble_manager is None:
+            logger.info("Individual model prediction started")
+            
+            if trained_models:
+                # Use best performing model (prioritize lightgbm)
+                model_priority = ['lightgbm', 'xgboost', 'logistic']
+                selected_model = None
                 
-                # Use the best performing model
-                best_model_name = list(trained_models.keys())[0]
-                best_model = trained_models[best_model_name]
+                for model_name in model_priority:
+                    if model_name in trained_models:
+                        selected_model = trained_models[model_name]
+                        prediction_method = f"Individual ({model_name})"
+                        break
                 
-                predictions = best_model.predict_proba(X_test)
-                prediction_method = f"Individual ({best_model_name})"
+                if selected_model is None:
+                    selected_model = list(trained_models.values())[0]
+                    model_name = list(trained_models.keys())[0]
+                    prediction_method = f"Individual ({model_name})"
                 
-                logger.info(f"Individual model prediction completed: {best_model_name}")
-                
-            except Exception as e:
-                logger.error(f"Individual model prediction failed: {e}")
-                predictions = None
-        else:
-            predictions = ensemble_predictions
+                # Prediction with calibration
+                try:
+                    if hasattr(selected_model, 'is_calibrated') and selected_model.is_calibrated:
+                        predictions = selected_model.predict_proba(X_test)
+                        logger.info("Using calibrated predictions")
+                    else:
+                        predictions = selected_model.predict_proba(X_test)
+                        logger.info("Using raw predictions")
+                    
+                    sample_submission['clicked'] = predictions
+                    logger.info(f"Individual model prediction completed: {model_name}")
+                    
+                except Exception as e:
+                    logger.error(f"Individual model prediction failed: {e}")
+                    # Use default values
+                    sample_submission['clicked'] = np.random.lognormal(
+                        mean=np.log(0.0191), sigma=0.1, size=len(sample_submission)
+                    )
+                    sample_submission['clicked'] = np.clip(sample_submission['clicked'], 0.001, 0.08)
+                    prediction_method = "Default (model failed)"
+            else:
+                # No trained models available
+                sample_submission['clicked'] = np.random.lognormal(
+                    mean=np.log(0.0191), sigma=0.1, size=len(sample_submission)
+                )
+                sample_submission['clicked'] = np.clip(sample_submission['clicked'], 0.001, 0.08)
+                prediction_method = "Default (no models)"
         
-        # Use default values if all prediction methods failed
-        if predictions is None:
-            logger.warning("All model predictions failed. Using default values")
-            predictions = np.random.lognormal(
-                mean=np.log(0.0193), 
-                sigma=0.15, 
-                size=len(sample_submission)
-            )
-            predictions = np.clip(predictions, 0.0092, 0.0406)
-            prediction_method = "Default"
+        # Final validation and adjustment
+        predictions = sample_submission['clicked'].values
+        predictions = np.clip(predictions, 1e-15, 1 - 1e-15)
         
-        # Adjust predictions to match sample_submission length
-        if len(predictions) > len(sample_submission):
-            predictions = predictions[:len(sample_submission)]
-        elif len(predictions) < len(sample_submission):
-            # Pad with mean values
-            mean_pred = np.mean(predictions) if len(predictions) > 0 else 0.0193
-            padding = np.full(len(sample_submission) - len(predictions), mean_pred)
-            predictions = np.concatenate([predictions, padding])
+        # CTR adjustment
+        current_ctr = predictions.mean()
+        target_ctr = 0.0191
         
-        # Create submission
-        submission = sample_submission.copy()
-        submission['clicked'] = predictions
+        if abs(current_ctr - target_ctr) > 0.002:
+            correction_factor = target_ctr / current_ctr
+            predictions = predictions * correction_factor
+            predictions = np.clip(predictions, 1e-15, 1 - 1e-15)
+        
+        sample_submission['clicked'] = predictions
         
         # Statistics
-        final_ctr = submission['clicked'].mean()
-        final_std = submission['clicked'].std()
-        final_min = submission['clicked'].min()
-        final_max = submission['clicked'].max()
+        final_ctr = predictions.mean()
+        final_std = predictions.std()
+        final_min = predictions.min()
+        final_max = predictions.max()
         
-        logger.info("=== Submission file generation results ===")
+        logger.info(f"=== Submission file generation results ===")
         logger.info(f"Prediction method: {prediction_method}")
         logger.info(f"Processed data: {test_size:,} rows")
         logger.info(f"Average CTR: {final_ctr:.4f}")
@@ -561,10 +579,10 @@ def generate_final_submission(trained_models, X_test, config, ensemble_manager=N
         logger.info(f"Range: {final_min:.4f} ~ {final_max:.4f}")
         
         output_path = Path("submission.csv")
-        submission.to_csv(output_path, index=False, encoding='utf-8')
+        sample_submission.to_csv(output_path, index=False, encoding='utf-8')
         logger.info(f"Submission file saved: {output_path}")
         
-        return submission
+        return sample_submission
         
     except Exception as e:
         logger.error(f"Submission file generation failed: {e}")
@@ -625,7 +643,6 @@ def inference_mode():
         
         logger.info(f"Found model files: {len(model_files)}")
         
-        # Load test data
         test_path = Path("data/test.parquet")
         if not test_path.exists():
             logger.error("Test data file not found")
@@ -640,7 +657,6 @@ def inference_mode():
             logger.error(f"Test data loading failed: {e}")
             return False
         
-        # Load models
         try:
             models = {}
             for model_file in model_files:
@@ -659,7 +675,6 @@ def inference_mode():
                 logger.error("No available models")
                 return False
             
-            # Generate submission
             submission = generate_final_submission(models, test_df, config)
             
             output_path = Path("submission_inference.csv")
@@ -699,6 +714,7 @@ def reproduce_score():
         
         logger.info(f"Found model files: {len(model_files)}")
         
+        # Load test data
         test_path = Path("data/test.parquet")
         if not test_path.exists():
             logger.error("Test data file not found")
@@ -713,6 +729,7 @@ def reproduce_score():
             logger.error(f"Test data loading failed: {e}")
             return False
         
+        # Load models
         try:
             models = {}
             for model_file in model_files:
@@ -731,6 +748,7 @@ def reproduce_score():
                 logger.error("No available models")
                 return False
             
+            # Generate submission
             submission = generate_final_submission(models, test_df, config)
             
             output_path = Path("submission_reproduced.csv")
@@ -786,43 +804,50 @@ def main():
                 logger.info("Training mode completed")
                 logger.info(f"Execution time: {results['execution_time']:.2f}s")
                 logger.info(f"Successful models: {results['successful_models']}")
-                logger.info(f"Ensemble enabled: {results.get('ensemble_enabled', False)}")
-                logger.info(f"Ensemble actually used: {results.get('ensemble_used', False)}")
-                logger.info(f"Calibration applied: {results.get('calibration_applied', False)}")
+                logger.info(f"Ensemble enabled: {results['ensemble_enabled']}")
+                logger.info(f"Ensemble actually used: {results['ensemble_used']}")
+                logger.info(f"Calibration applied: {results['calibration_applied']}")
             else:
-                logger.error("Training failed")
+                logger.error("Training mode failed")
                 sys.exit(1)
-                
+            
         elif args.mode == "inference":
+            logger.info("Inference mode started")
+            
             success = inference_mode()
-            if not success:
-                logger.error("Inference failed")
+            if success:
+                logger.info("Inference mode completed")
+            else:
+                logger.error("Inference mode failed")
                 sys.exit(1)
-                
+            
         elif args.mode == "reproduce":
+            logger.info("Score reproduction mode started")
+            
             success = reproduce_score()
-            if not success:
+            if success:
+                logger.info("Score reproduction completed")
+            else:
                 logger.error("Score reproduction failed")
                 sys.exit(1)
         
-    except KeyboardInterrupt:
-        logger.info("Program interrupted by user")
-        force_memory_cleanup(intensive=True)
-        sys.exit(0)
-        
-    except Exception as e:
-        logger.error(f"Main execution failed: {e}")
-        logger.error(f"Detailed error: {traceback.format_exc()}")
-        force_memory_cleanup(intensive=True)
-        sys.exit(1)
-    
-    finally:
         logger.info("=== CTR modeling system terminated ===")
+        
         force_memory_cleanup(intensive=True)
         
         if PSUTIL_AVAILABLE:
             vm = psutil.virtual_memory()
             logger.info(f"Final memory status: available {vm.available/(1024**3):.1f}GB")
+        
+    except KeyboardInterrupt:
+        logger.info("Program interrupted by user")
+        force_memory_cleanup(intensive=True)
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Program execution failed: {e}")
+        logger.error(f"Detailed error: {traceback.format_exc()}")
+        force_memory_cleanup(intensive=True)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

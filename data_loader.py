@@ -4,178 +4,123 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Any, List, Optional, Tuple, Union
 import logging
-import time
 import gc
+import time
 import os
-import pickle
 import tempfile
+import pickle
 from pathlib import Path
 import warnings
+from abc import ABC, abstractmethod
 
-# Safe imports with error handling
+# Safe library imports
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    warnings.warn("psutil not available. Memory monitoring will be limited.")
+
 try:
     import pyarrow as pa
     import pyarrow.parquet as pq
     PYARROW_AVAILABLE = True
 except ImportError:
     PYARROW_AVAILABLE = False
-    warnings.warn("PyArrow is not installed. Using default pandas loading.")
-
-# Safe Psutil import handling
-try:
-    import psutil
-    PSUTIL_AVAILABLE = True
-except ImportError:
-    PSUTIL_AVAILABLE = False
-    logging.warning("psutil is not installed. Memory monitoring features will be limited.")
+    warnings.warn("PyArrow not available. Parquet reading will be limited.")
 
 from config import Config
 
 logger = logging.getLogger(__name__)
 
-class ProgressReporter:
-    """Progress reporting"""
-    
-    def __init__(self, total_rows: int, operation_name: str = "Data processing"):
-        self.total_rows = total_rows
-        self.processed_rows = 0
-        self.operation_name = operation_name
-        self.start_time = time.time()
-        self.last_report_time = self.start_time
-        self.report_interval = 30  # 30 seconds interval
-        
-    def update(self, processed_count: int):
-        """Update progress"""
-        self.processed_rows += processed_count
-        current_time = time.time()
-        
-        if current_time - self.last_report_time >= self.report_interval:
-            self.report_progress()
-            self.last_report_time = current_time
-    
-    def report_progress(self):
-        """Report current progress"""
-        if self.total_rows <= 0:
-            return
-        
-        elapsed_time = time.time() - self.start_time
-        progress_rate = self.processed_rows / self.total_rows
-        
-        if progress_rate > 0:
-            estimated_total_time = elapsed_time / progress_rate
-            remaining_time = estimated_total_time - elapsed_time
-        else:
-            remaining_time = 0
-        
-        logger.info(f"{self.operation_name}: {self.processed_rows:,}/{self.total_rows:,} "
-                   f"({progress_rate:.1%}) - {elapsed_time:.1f}s elapsed, "
-                   f"~{remaining_time:.1f}s remaining")
-
 class MemoryMonitor:
-    """Memory monitoring class"""
+    """Memory monitoring class with improved efficiency"""
     
     def __init__(self):
-        # More aggressive memory thresholds for 64GB environment
-        self.process_memory_warning = 40.0  # 40GB process memory warning
-        self.process_memory_critical = 45.0  # 45GB process memory critical  
-        self.available_memory_warning = 10.0  # 10GB available memory warning
-        self.available_memory_critical = 5.0  # 5GB available memory critical
+        self.psutil_available = PSUTIL_AVAILABLE
         
     def get_process_memory_gb(self) -> float:
-        """Get current process memory in GB"""
+        """Get process memory usage in GB"""
         try:
-            if PSUTIL_AVAILABLE:
+            if self.psutil_available:
                 process = psutil.Process()
-                memory_mb = process.memory_info().rss / (1024**2)
-                return memory_mb / 1024
-            return 2.0
+                return process.memory_info().rss / (1024**3)
+            else:
+                return 2.0
         except Exception:
             return 2.0
     
-    def get_available_memory_gb(self) -> float:
-        """Get available system memory in GB"""
+    def get_system_memory_gb(self) -> Dict[str, float]:
+        """Get system memory info in GB"""
         try:
-            if PSUTIL_AVAILABLE:
+            if self.psutil_available:
                 vm = psutil.virtual_memory()
-                return vm.available / (1024**3)
-            return 40.0
+                return {
+                    'total': vm.total / (1024**3),
+                    'available': vm.available / (1024**3),
+                    'used': vm.used / (1024**3),
+                    'percent': vm.percent
+                }
+            else:
+                return {
+                    'total': 64.0,
+                    'available': 45.0,
+                    'used': 19.0,
+                    'percent': 30.0
+                }
         except Exception:
-            return 40.0
+            return {
+                'total': 64.0,
+                'available': 45.0,
+                'used': 19.0,
+                'percent': 30.0
+            }
     
     def check_memory_pressure(self) -> Dict[str, Any]:
-        """Check memory pressure status"""
+        """Check memory pressure level"""
         try:
-            process_memory = self.get_process_memory_gb()
-            available_memory = self.get_available_memory_gb()
+            memory_info = self.get_system_memory_gb()
+            available_gb = memory_info['available']
             
-            # More aggressive pressure levels for large data
-            if (process_memory >= self.process_memory_critical or 
-                available_memory <= self.available_memory_critical):
+            # Updated thresholds for 64GB system
+            if available_gb < 3:  # Less than 3GB
                 pressure_level = 'abort'
-                should_abort = True
-                should_cleanup = True
-                should_simplify = True
-                should_reduce_batch = True
-            elif (process_memory >= self.process_memory_warning or 
-                  available_memory <= self.available_memory_warning):
+            elif available_gb < 6:  # Less than 6GB
                 pressure_level = 'critical'
-                should_abort = False
-                should_cleanup = True
-                should_simplify = True
-                should_reduce_batch = True
-            elif (process_memory >= 30 or available_memory <= 15):
+            elif available_gb < 12:  # Less than 12GB
                 pressure_level = 'high'
-                should_abort = False
-                should_cleanup = True
-                should_simplify = False
-                should_reduce_batch = True
-            elif (process_memory >= 20 or available_memory <= 20):
-                pressure_level = 'warning'
-                should_abort = False
-                should_cleanup = False
-                should_simplify = False
-                should_reduce_batch = False
+            elif available_gb < 20:  # Less than 20GB
+                pressure_level = 'medium'
             else:
-                pressure_level = 'normal'
-                should_abort = False
-                should_cleanup = False
-                should_simplify = False
-                should_reduce_batch = False
+                pressure_level = 'low'
             
             return {
                 'pressure_level': pressure_level,
-                'process_memory_gb': process_memory,
-                'available_memory_gb': available_memory,
-                'should_abort': should_abort,
-                'should_cleanup': should_cleanup,
-                'should_simplify': should_simplify,
-                'should_reduce_batch': should_reduce_batch
+                'available_gb': available_gb,
+                'total_gb': memory_info['total'],
+                'should_abort': pressure_level == 'abort',
+                'should_cleanup': pressure_level in ['critical', 'high', 'medium'],
+                'memory_percent': memory_info['percent']
             }
             
         except Exception:
             return {
-                'pressure_level': 'normal',
-                'process_memory_gb': 2.0,
-                'available_memory_gb': 40.0,
+                'pressure_level': 'low',
+                'available_gb': 45.0,
+                'total_gb': 64.0,
                 'should_abort': False,
                 'should_cleanup': False,
-                'should_simplify': False,
-                'should_reduce_batch': False
+                'memory_percent': 30.0
             }
     
-    def log_memory_status(self, operation: str = "", force: bool = False):
-        """Log current memory status"""
+    def log_memory_status(self, context: str = "", force: bool = False):
+        """Log memory status"""
         try:
             pressure = self.check_memory_pressure()
             
-            if force or pressure['pressure_level'] in ['warning', 'high', 'critical', 'abort']:
-                if pressure['pressure_level'] in ['critical', 'abort']:
-                    logger.warning(f"Memory pressure: Process {pressure['process_memory_gb']:.1f}GB, "
-                                 f"Available {pressure['available_memory_gb']:.1f}GB")
-                else:
-                    logger.info(f"{operation} - Memory status: "
-                               f"Process {pressure['process_memory_gb']:.1f}GB, "
-                               f"Available {pressure['available_memory_gb']:.1f}GB")
+            if force or pressure['pressure_level'] != 'low':
+                logger.info(f"Memory status [{context}]: Process {self.get_process_memory_gb():.1f}GB, "
+                           f"Available {pressure['available_gb']:.1f}GB - {pressure['pressure_level'].upper()}")
                 
         except Exception as e:
             logger.warning(f"Memory status logging failed: {e}")
@@ -186,16 +131,16 @@ class MemoryMonitor:
             initial_memory = self.get_process_memory_gb()
             pressure = self.check_memory_pressure()
             
-            # More intensive cleanup for large data
+            # Adjusted cleanup strategy for 64GB system
             if pressure['pressure_level'] == 'abort' or intensive:
-                cleanup_rounds = 30  # Increased from 20 to 30
-                sleep_time = 0.5
+                cleanup_rounds = 25
+                sleep_time = 0.3
             elif pressure['pressure_level'] == 'critical':
                 cleanup_rounds = 20
-                sleep_time = 0.3
+                sleep_time = 0.2
             elif pressure['pressure_level'] == 'high':
                 cleanup_rounds = 15
-                sleep_time = 0.2
+                sleep_time = 0.15
             else:
                 cleanup_rounds = 10
                 sleep_time = 0.1
@@ -206,10 +151,11 @@ class MemoryMonitor:
                 if sleep_time > 0:
                     time.sleep(sleep_time)
                 
-                # Intermediate check
-                if i % 10 == 0:  # More frequent checks
+                # Check effectiveness every 5 rounds
+                if i % 5 == 0 and i > 0:
                     current_memory = self.get_process_memory_gb()
-                    if current_memory < initial_memory * 0.85:  # 15% reduction target
+                    reduction = initial_memory - current_memory
+                    if reduction > 1.0:  # 1GB reduction achieved
                         logger.info(f"Memory cleanup effective at round {i+1}: "
                                    f"{initial_memory:.1f}GB → {current_memory:.1f}GB")
                         break
@@ -227,54 +173,45 @@ class MemoryMonitor:
             return 0.0
 
 class DataColumnAnalyzer:
-    """Data column analyzer"""
+    """Data column analyzer for CTR data"""
     
-    def __init__(self, config: Config):
+    def __init__(self, config: Config = Config):
         self.config = config
-        self.target_candidates = config.TARGET_COLUMN_CANDIDATES
         self.target_config = config.TARGET_DETECTION_CONFIG
-        
+    
     def detect_target_column(self, df: pd.DataFrame) -> Optional[str]:
-        """Detect target column"""
+        """Detect CTR target column"""
         try:
-            # Direct candidate search
-            for candidate in self.target_candidates:
+            # Check candidate columns first
+            for candidate in self.config.TARGET_COLUMN_CANDIDATES:
                 if candidate in df.columns:
-                    if self._validate_target_column(df[candidate]):
+                    if self._is_valid_target_column(df[candidate]):
                         logger.info(f"Target column detected: {candidate}")
                         return candidate
             
-            # Binary column search
-            binary_columns = []
+            # Search all columns if no candidate found
             for col in df.columns:
-                unique_values = set(df[col].dropna().unique())
-                if unique_values.issubset({0, 1}) or unique_values.issubset({0.0, 1.0}):
-                    binary_columns.append(col)
+                if self._is_valid_target_column(df[col]):
+                    logger.info(f"Target column found: {col}")
+                    return col
             
-            if binary_columns:
-                # Select column with CTR-like distribution
-                for col in binary_columns:
-                    if self._validate_target_column(df[col]):
-                        logger.info(f"Target column detected via binary search: {col}")
-                        return col
-                
-                # Fallback to first binary column
-                logger.info(f"Target column detected (fallback): {binary_columns[0]}")
-                return binary_columns[0]
-            
-            logger.warning("Target column not detected")
-            return None
+            # Default fallback
+            logger.warning("No valid target column found, using 'clicked'")
+            return 'clicked'
             
         except Exception as e:
             logger.error(f"Target column detection failed: {e}")
-            return None
+            return 'clicked'
     
-    def _validate_target_column(self, series: pd.Series) -> bool:
-        """Validate target column characteristics"""
+    def _is_valid_target_column(self, series: pd.Series) -> bool:
+        """Check if column is valid CTR target"""
         try:
-            unique_values = set(series.dropna().unique())
+            # Check data type
+            if series.dtype not in ['int64', 'int32', 'int8', 'uint8', 'bool']:
+                return False
             
-            # Binary validation
+            # Check unique values
+            unique_values = set(series.dropna().unique())
             if not unique_values.issubset(self.target_config['binary_values']):
                 return False
             
@@ -400,6 +337,12 @@ class StreamingDataLoader:
             if not PYARROW_AVAILABLE:
                 raise ValueError("PyArrow is required")
             
+            # Initial memory check
+            pressure = self.memory_monitor.check_memory_pressure()
+            if pressure['should_abort']:
+                logger.error(f"Insufficient memory for processing: {pressure['available_gb']:.1f}GB available")
+                raise MemoryError(f"Insufficient memory: {pressure['available_gb']:.1f}GB available")
+            
             parquet_file = pq.ParquetFile(file_path)
             total_rows = parquet_file.metadata.num_rows
             num_row_groups = parquet_file.num_row_groups
@@ -432,7 +375,7 @@ class StreamingDataLoader:
                 rg_end = min(rg_start + batch_size, num_row_groups)
                 
                 try:
-                    # Memory check before processing
+                    # Memory check before processing each batch
                     pressure = self.memory_monitor.check_memory_pressure()
                     if pressure['should_abort']:
                         logger.warning(f"Memory limit approaching - Processed rows: {processed_rows}, continuing attempt")
@@ -483,6 +426,11 @@ class StreamingDataLoader:
                     
                 except Exception as e:
                     logger.error(f"Row group batch {rg_start+1}-{rg_end} processing failed: {e}")
+                    
+                    # Emergency memory cleanup
+                    self.memory_monitor.force_memory_cleanup(intensive=True)
+                    
+                    # Skip this batch and continue
                     continue
             
             # Final combination
@@ -516,26 +464,26 @@ class StreamingDataLoader:
                 
                 if col_type == 'object':
                     # Try to convert to numeric if possible
-                    if df[col].str.replace('.', '', regex=False).str.replace('-', '', regex=False).str.isdigit().all():
-                        try:
-                            df[col] = pd.to_numeric(df[col], errors='coerce')
-                        except:
-                            pass
+                    if df[col].str.isnumeric().all() if hasattr(df[col].str, 'isnumeric') else False:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
                     else:
                         # Convert to category if low cardinality
                         if df[col].nunique() / len(df) < 0.5:
                             df[col] = df[col].astype('category')
                 
-                elif col_type == 'int64':
+                elif col_type in ['int64', 'int32']:
                     # Downcast integers
-                    if df[col].min() >= -128 and df[col].max() <= 127:
-                        df[col] = df[col].astype('int8')
-                    elif df[col].min() >= -32768 and df[col].max() <= 32767:
-                        df[col] = df[col].astype('int16')
-                    elif df[col].min() >= -2147483648 and df[col].max() <= 2147483647:
-                        df[col] = df[col].astype('int32')
+                    c_min = df[col].min()
+                    c_max = df[col].max()
+                    
+                    if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
+                        df[col] = df[col].astype(np.int8)
+                    elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
+                        df[col] = df[col].astype(np.int16)
+                    elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
+                        df[col] = df[col].astype(np.int32)
                 
-                elif col_type == 'float64':
+                elif col_type in ['float64']:
                     # Downcast floats
                     df[col] = pd.to_numeric(df[col], downcast='float')
             
@@ -547,7 +495,7 @@ class StreamingDataLoader:
             return df
             
         except Exception as e:
-            logger.warning(f"DataFrame memory optimization failed: {e}")
+            logger.warning(f"Memory optimization failed: {e}")
             return df
     
     def _combine_chunks_memory_efficient(self, chunks: List[pd.DataFrame]) -> pd.DataFrame:
@@ -559,39 +507,29 @@ class StreamingDataLoader:
             if len(chunks) == 1:
                 return chunks[0]
             
-            logger.info(f"Combining {len(chunks)} chunks with memory efficiency")
+            # Combine chunks progressively to manage memory
+            logger.info(f"Combining {len(chunks)} chunks progressively")
             
-            # Combine in pairs to manage memory
-            while len(chunks) > 1:
-                new_chunks = []
-                
-                for i in range(0, len(chunks), 2):
-                    if i + 1 < len(chunks):
-                        # Combine two chunks
-                        try:
-                            combined = pd.concat([chunks[i], chunks[i+1]], 
-                                               ignore_index=True, copy=False)
-                            new_chunks.append(combined)
-                            
-                            # Clean up original chunks
-                            del chunks[i], chunks[i+1]
-                            
-                        except Exception as e:
-                            logger.warning(f"Chunk combination failed: {e}")
-                            new_chunks.extend([chunks[i], chunks[i+1]])
-                    else:
-                        # Odd chunk
-                        new_chunks.append(chunks[i])
-                
-                chunks = new_chunks
-                
-                # Memory cleanup between iterations
-                gc.collect()
-                
-                logger.info(f"Combination iteration: {len(chunks)} chunks remaining")
+            result = chunks[0]
+            for i, chunk in enumerate(chunks[1:], 1):
+                try:
+                    result = pd.concat([result, chunk], ignore_index=True)
+                    
+                    # Memory cleanup after every few combinations
+                    if i % 3 == 0:
+                        self.memory_monitor.force_memory_cleanup()
+                        
+                        # Check memory pressure
+                        pressure = self.memory_monitor.check_memory_pressure()
+                        if pressure['should_cleanup']:
+                            logger.info(f"Memory cleanup during combination: chunk {i}/{len(chunks)-1}")
+                    
+                except Exception as e:
+                    logger.error(f"Chunk combination failed at chunk {i}: {e}")
+                    continue
             
-            logger.info(f"Chunk combination successful: {len(chunks[0]):,} rows")
-            return chunks[0]
+            logger.info(f"Chunk combination successful: {len(result):,} rows")
+            return result
             
         except Exception as e:
             logger.error(f"Chunk combination failed: {e}")
@@ -614,6 +552,16 @@ class StreamingDataLoader:
             if not test_path.exists():
                 logger.error(f"Test file not found: {test_path}")
                 return False
+            
+            # Check file sizes
+            train_size_mb = train_path.stat().st_size / (1024**2)
+            test_size_mb = test_path.stat().st_size / (1024**2)
+            
+            if train_size_mb < 100:  # Less than 100MB seems too small
+                logger.warning(f"Training file seems small: {train_size_mb:.1f}MB")
+            
+            if test_size_mb < 10:  # Less than 10MB seems too small
+                logger.warning(f"Test file seems small: {test_size_mb:.1f}MB")
             
             logger.info("File validation successful")
             return True
