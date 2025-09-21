@@ -59,77 +59,81 @@ class Config:
         DEVICE = 'cpu'
         GPU_AVAILABLE = False
     
-    GPU_MEMORY_LIMIT = 12
+    GPU_MEMORY_LIMIT = 14
     CUDA_VISIBLE_DEVICES = "0"
     USE_MIXED_PRECISION = True
-    GPU_OPTIMIZATION_LEVEL = 1
+    GPU_OPTIMIZATION_LEVEL = 2
     
-    # Memory settings (optimized for 64GB environment)
-    MAX_MEMORY_GB = 55  # Increased from 50 to 55 for more aggressive use
-    CHUNK_SIZE = 60000  # Increased chunk size for better throughput
-    BATCH_SIZE_GPU = 5120  # Increased batch size for RTX 4060 Ti
-    BATCH_SIZE_CPU = 2048  # Increased CPU batch size
-    PREFETCH_FACTOR = 3  # Increased prefetch factor
-    NUM_WORKERS = 8  # Increased workers for 6C12T CPU
+    # Memory settings (adjusted for performance)
+    MAX_MEMORY_GB = 58
+    CHUNK_SIZE = 80000
+    BATCH_SIZE_GPU = 8192
+    BATCH_SIZE_CPU = 3072
+    PREFETCH_FACTOR = 4
+    NUM_WORKERS = 10
     
-    # Memory thresholds (more aggressive for 64GB environment)
-    MEMORY_WARNING_THRESHOLD = 45  # Increased from 25 to 45GB
-    MEMORY_CRITICAL_THRESHOLD = 50  # New critical threshold at 50GB
-    MEMORY_ABORT_THRESHOLD = 55  # Abort threshold at 55GB
+    # Memory thresholds (more aggressive)
+    MEMORY_WARNING_THRESHOLD = 48
+    MEMORY_CRITICAL_THRESHOLD = 53
+    MEMORY_ABORT_THRESHOLD = 58
     
-    # Data size limits (for large dataset)
-    MAX_TRAIN_SIZE = 15000000  # 15M rows maximum
-    MAX_TEST_SIZE = 2000000    # 2M rows maximum
+    # Data size limits
+    MAX_TRAIN_SIZE = 18000000
+    MAX_TEST_SIZE = 2500000
+    MAX_INTERACTION_FEATURES = 200
     
-    # Model training settings
+    # Model training settings (adjusted parameters)
     MODEL_TRAINING_CONFIG = {
         'lightgbm': {
-            'max_depth': 8,
-            'num_leaves': 64,
-            'min_data_in_leaf': 100,
-            'feature_fraction': 0.9,
-            'bagging_fraction': 0.9,
-            'bagging_freq': 5,
-            'lambda_l1': 0.1,
-            'lambda_l2': 0.2,
-            'min_gain_to_split': 0.02,
-            'max_cat_threshold': 32,
-            'cat_smooth': 10.0,
-            'cat_l2': 10.0
+            'max_depth': 10,
+            'num_leaves': 127,
+            'min_data_in_leaf': 80,
+            'feature_fraction': 0.85,
+            'bagging_fraction': 0.85,
+            'bagging_freq': 7,
+            'lambda_l1': 0.15,
+            'lambda_l2': 0.25,
+            'min_gain_to_split': 0.015,
+            'max_cat_threshold': 48,
+            'cat_smooth': 12.0,
+            'cat_l2': 12.0
         },
         'xgboost': {
-            'max_depth': 8,
-            'learning_rate': 0.05,
-            'n_estimators': 1000,
-            'subsample': 0.9,
-            'colsample_bytree': 0.9,
-            'min_child_weight': 5,
-            'gamma': 0.1,
-            'alpha': 0.1,
-            'lambda': 0.2,
-            'scale_pos_weight': 50.0
+            'max_depth': 9,
+            'learning_rate': 0.04,
+            'n_estimators': 1200,
+            'subsample': 0.85,
+            'colsample_bytree': 0.85,
+            'min_child_weight': 7,
+            'gamma': 0.08,
+            'alpha': 0.12,
+            'lambda': 0.25,
+            'scale_pos_weight': 49.5
         },
         'logistic': {
-            'C': 1.0,
+            'C': 0.8,
             'penalty': 'l2',
             'solver': 'lbfgs',
-            'max_iter': 1000,
+            'max_iter': 2000,
             'class_weight': 'balanced',
             'random_state': 42
         }
     }
     
-    # Feature engineering settings
+    # Feature engineering settings (expanded)
     FEATURE_ENGINEERING_CONFIG = {
         'enable_interaction_features': True,
-        'enable_polynomial_features': False,
+        'enable_polynomial_features': True,
         'enable_binning': True,
         'enable_target_encoding': True,
         'enable_frequency_encoding': True,
-        'max_interaction_degree': 2,
+        'enable_statistical_features': True,
+        'max_interaction_degree': 3,
         'binning_strategy': 'quantile',
-        'n_bins': 10,
-        'min_frequency': 5
+        'n_bins': 15,
+        'min_frequency': 3,
+        'target_encoding_smoothing': 6.0,
+        'enable_cross_validation_encoding': True
     }
     
     # Cross-validation settings
@@ -137,40 +141,42 @@ class Config:
     CV_SHUFFLE = True
     RANDOM_STATE = 42
     
-    # Early stopping settings
-    EARLY_STOPPING_ROUNDS = 100
+    # Early stopping settings (reduced)
+    EARLY_STOPPING_ROUNDS = 350
     EARLY_STOPPING_TOLERANCE = 1e-6
     
     # Hyperparameter tuning settings  
-    OPTUNA_N_TRIALS = 100
-    OPTUNA_TIMEOUT = 3600  # 1 hour
+    OPTUNA_N_TRIALS = 150
+    OPTUNA_TIMEOUT = 4200
     OPTUNA_N_JOBS = 1
     OPTUNA_VERBOSITY = 1
     
-    # Ensemble settings
+    # Ensemble settings (adjusted weights)
     ENSEMBLE_CONFIG = {
-        'voting_weights': {'lightgbm': 0.4, 'xgboost': 0.4, 'logistic': 0.2},
-        'stacking_cv_folds': 3,
-        'blending_ratio': 0.7,
-        'diversity_threshold': 0.1,
-        'performance_threshold': 0.3
+        'voting_weights': {'lightgbm': 0.45, 'xgboost': 0.35, 'logistic': 0.20},
+        'stacking_cv_folds': 4,
+        'blending_ratio': 0.75,
+        'diversity_threshold': 0.08,
+        'performance_threshold': 0.25,
+        'enable_meta_features': True
     }
     
     # Calibration settings
-    CALIBRATION_METHOD = 'sigmoid'
-    CALIBRATION_CV_FOLDS = 3
+    CALIBRATION_METHOD = 'isotonic'
+    CALIBRATION_CV_FOLDS = 4
     
-    # Evaluation configuration
+    # Evaluation configuration (corrected parameters)
     EVALUATION_CONFIG = {
         'ap_weight': 0.6,
         'wll_weight': 0.4,
         'target_combined_score': 0.34,
         'target_ctr': 0.0191,
-        'ctr_tolerance': 0.0005,
-        'bias_penalty_weight': 5.0,
-        'calibration_weight': 0.4,
-        'pos_weight': 49.8,
-        'neg_weight': 1.0
+        'ctr_tolerance': 0.0003,
+        'bias_penalty_weight': 6.0,
+        'calibration_weight': 0.45,
+        'pos_weight': 49.5,
+        'neg_weight': 1.0,
+        'wll_normalization_factor': 2.8
     }
     
     # Evaluation metrics
@@ -185,13 +191,13 @@ class Config:
     LOG_FILE_MAX_SIZE = 10 * 1024 * 1024  # 10MB
     LOG_FILE_BACKUP_COUNT = 5
     
-    # Performance optimization flags
+    # Performance settings
     ENABLE_PARALLEL_PROCESSING = True
     ENABLE_MEMORY_MAPPING = True
     ENABLE_CACHING = True
-    CACHE_SIZE_MB = 1024
+    CACHE_SIZE_MB = 2048
     
-    # RTX 4060 Ti specific optimization
+    # RTX 4060 Ti specific settings
     RTX_4060_TI_OPTIMIZATION = True
     
     @classmethod

@@ -10,7 +10,7 @@ import pickle
 from pathlib import Path
 import warnings
 from abc import ABC, abstractmethod
-from sklearn.preprocessing import LabelEncoder, StandardScaler, RobustScaler
+from sklearn.preprocessing import LabelEncoder, StandardScaler, RobustScaler, QuantileTransformer
 from sklearn.model_selection import StratifiedKFold
 import threading
 import hashlib
@@ -140,6 +140,8 @@ class CTRFeatureEngineer:
         self.temporal_features = []
         self.statistical_features = []
         self.frequency_features = []
+        self.polynomial_features = []
+        self.cross_features = []
         self.removed_columns = []
         self.original_feature_order = []
         self.final_feature_columns = []
@@ -230,35 +232,43 @@ class CTRFeatureEngineer:
             # 4. Basic feature cleanup
             X_train, X_test = self._clean_basic_features(X_train, X_test)
             
-            # Adjusted memory threshold for 64GB environment
+            # Memory check for full processing
             memory_status = self.memory_monitor.get_memory_status()
-            if not memory_status['should_simplify'] and memory_status['available_gb'] > 10:
+            if not memory_status['should_simplify'] and memory_status['available_gb'] > 8:
                 logger.info("Full feature engineering enabled - sufficient memory available")
                 
-                # 5. Interaction feature creation
+                # 5. Interaction feature creation (expanded)
                 X_train, X_test = self._create_interaction_features(X_train, X_test, y_train)
                 
-                # 6. Target encoding
+                # 6. Target encoding (improved)
                 X_train, X_test = self._create_target_encoding_features(X_train, X_test, y_train)
                 
                 # 7. Time-based features
                 X_train, X_test = self._create_temporal_features(X_train, X_test)
                 
-                # 8. Statistical features
+                # 8. Statistical features (expanded)
                 X_train, X_test = self._create_statistical_features(X_train, X_test)
                 
                 # 9. Frequency-based features
                 X_train, X_test = self._create_frequency_features(X_train, X_test)
+                
+                # 10. Polynomial features
+                if self.config.FEATURE_ENGINEERING_CONFIG.get('enable_polynomial_features', True):
+                    X_train, X_test = self._create_polynomial_features(X_train, X_test)
+                
+                # 11. Cross features
+                X_train, X_test = self._create_cross_features(X_train, X_test, y_train)
+                
             else:
                 logger.warning("Simplified feature engineering due to memory constraints")
             
-            # 10. Categorical feature encoding
+            # 12. Categorical feature encoding
             X_train, X_test = self._encode_categorical_features(X_train, X_test, y_train)
             
-            # 11. Numeric feature transformation
+            # 13. Numeric feature transformation
             X_train, X_test = self._create_numeric_features(X_train, X_test)
             
-            # 12. Final data cleanup
+            # 14. Final data cleanup
             X_train, X_test = self._final_data_cleanup(X_train, X_test)
             
             self._finalize_processing(X_train, X_test)
@@ -359,7 +369,7 @@ class CTRFeatureEngineer:
                     logger.warning(f"Column {col} classification failed: {e}")
                     self.numerical_features.append(col)
             
-            logger.info(f"Column classification completed - Numeric: {len(self.numerical_features)}, Categorical: {len(self.categorical_features)}, ID: 0")
+            logger.info(f"Column classification completed - Numeric: {len(self.numerical_features)}, Categorical: {len(self.categorical_features)}")
             
         except Exception as e:
             logger.error(f"Column classification failed: {e}")
@@ -493,21 +503,21 @@ class CTRFeatureEngineer:
     
     def _create_interaction_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, 
                                    y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Interaction feature creation"""
+        """Interaction feature creation (expanded)"""
         logger.info("Interaction feature creation started")
         
         try:
             memory_status = self.memory_monitor.get_memory_status()
-            max_interactions = min(self.config.MAX_INTERACTION_FEATURES if hasattr(self.config, 'MAX_INTERACTION_FEATURES') else 50, 30)
+            max_interactions = min(self.config.MAX_INTERACTION_FEATURES, 200)
             
             if memory_status['should_simplify']:
-                max_interactions = min(max_interactions, 15)
+                max_interactions = min(max_interactions, 50)
             
             # Identify important features for interaction
             important_features = []
             
             # Prioritize feat_ prefixed features
-            feat_cols = [col for col in X_train.columns if str(col).startswith('feat_')][:10]
+            feat_cols = [col for col in X_train.columns if str(col).startswith('feat_')][:15]
             important_features.extend(feat_cols)
             
             # Add high-variance numerical features
@@ -516,7 +526,7 @@ class CTRFeatureEngineer:
                     try:
                         if X_train[col].std() > 0.1:
                             important_features.append(col)
-                            if len(important_features) >= 15:
+                            if len(important_features) >= 25:
                                 break
                     except Exception:
                         continue
@@ -526,28 +536,30 @@ class CTRFeatureEngineer:
                 if col not in important_features:
                     try:
                         unique_count = X_train[col].nunique()
-                        if 2 <= unique_count <= 20:
+                        if 2 <= unique_count <= 30:
                             important_features.append(col)
-                            if len(important_features) >= 20:
+                            if len(important_features) >= 30:
                                 break
                     except Exception:
                         continue
             
-            important_features = important_features[:20]
+            important_features = important_features[:30]
             logger.info(f"Selected {len(important_features)} features for interaction")
             
             interaction_count = 0
+            
+            # Second-order interactions
             for i, feat1 in enumerate(important_features):
-                if interaction_count >= max_interactions:
+                if interaction_count >= max_interactions * 0.7:
                     break
                 
                 for j, feat2 in enumerate(important_features[i+1:], i+1):
-                    if interaction_count >= max_interactions:
+                    if interaction_count >= max_interactions * 0.7:
                         break
                     
                     try:
                         # Memory check
-                        if interaction_count % 5 == 0:
+                        if interaction_count % 10 == 0:
                             memory_status = self.memory_monitor.get_memory_status()
                             if memory_status['should_simplify']:
                                 logger.warning("Stopping interaction creation due to memory pressure")
@@ -582,6 +594,40 @@ class CTRFeatureEngineer:
                 if memory_status['should_simplify']:
                     break
             
+            # Third-order interactions (limited)
+            if not memory_status['should_simplify'] and interaction_count < max_interactions:
+                remaining_slots = max_interactions - interaction_count
+                third_order_limit = min(remaining_slots, 30)
+                
+                top_features = important_features[:10]
+                third_order_count = 0
+                
+                for i, feat1 in enumerate(top_features):
+                    if third_order_count >= third_order_limit:
+                        break
+                    for j, feat2 in enumerate(top_features[i+1:], i+1):
+                        if third_order_count >= third_order_limit:
+                            break
+                        for k, feat3 in enumerate(top_features[j+1:], j+1):
+                            if third_order_count >= third_order_limit:
+                                break
+                            
+                            try:
+                                interaction_name = f"interact3_{feat1}_{feat2}_{feat3}"
+                                
+                                if all(f in self.numerical_features for f in [feat1, feat2, feat3]):
+                                    X_train[interaction_name] = (X_train[feat1] * X_train[feat2] * X_train[feat3]).astype('float32')
+                                    X_test[interaction_name] = (X_test[feat1] * X_test[feat2] * X_test[feat3]).astype('float32')
+                                    
+                                    self.interaction_features.append(interaction_name)
+                                    self.generated_features.append(interaction_name)
+                                    interaction_count += 1
+                                    third_order_count += 1
+                                    
+                            except Exception as e:
+                                logger.warning(f"Third-order interaction failed: {e}")
+                                continue
+            
             logger.info(f"Interaction feature creation completed: {len(self.interaction_features)} features created")
             
         except Exception as e:
@@ -591,7 +637,7 @@ class CTRFeatureEngineer:
     
     def _create_target_encoding_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, 
                                        y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Target encoding feature creation"""
+        """Target encoding feature creation (improved)"""
         logger.info("Target encoding started")
         
         try:
@@ -605,50 +651,106 @@ class CTRFeatureEngineer:
             for col in self.categorical_features:
                 try:
                     unique_count = X_train[col].nunique()
-                    if 2 <= unique_count <= 100:  # Good cardinality for target encoding
+                    if 2 <= unique_count <= 150:  # Expanded range
                         categorical_for_encoding.append(col)
-                        if len(categorical_for_encoding) >= 10:  # Limit for memory
+                        if len(categorical_for_encoding) >= 15:  # Increased limit
                             break
                 except Exception:
                     continue
             
             logger.info(f"Target encoding {len(categorical_for_encoding)} categorical features")
             
-            # Simple target encoding with smoothing
-            for col in categorical_for_encoding:
-                try:
-                    target_col_name = f"target_enc_{col}"
-                    
-                    # Calculate global mean
-                    global_mean = y_train.mean()
-                    
-                    # Calculate category means
-                    category_means = y_train.groupby(X_train[col]).agg(['mean', 'count']).reset_index()
-                    category_means.columns = [col, 'target_mean', 'count']
-                    
-                    # Apply smoothing (Bayesian smoothing)
-                    smoothing_factor = 10
-                    category_means['smoothed_mean'] = (
-                        (category_means['target_mean'] * category_means['count'] + global_mean * smoothing_factor) /
-                        (category_means['count'] + smoothing_factor)
-                    )
-                    
-                    # Create encoding mapping
-                    encoding_map = dict(zip(category_means[col], category_means['smoothed_mean']))
-                    
-                    # Apply encoding
-                    X_train[target_col_name] = X_train[col].map(encoding_map).fillna(global_mean).astype('float32')
-                    X_test[target_col_name] = X_test[col].map(encoding_map).fillna(global_mean).astype('float32')
-                    
-                    self.target_encoding_features.append(target_col_name)
-                    self.generated_features.append(target_col_name)
-                    
-                    # Store encoder for later use
-                    self.target_encoders[col] = encoding_map
-                    
-                except Exception as e:
-                    logger.warning(f"Target encoding for {col} failed: {e}")
-                    continue
+            # Get smoothing factor from config
+            smoothing_factor = self.config.FEATURE_ENGINEERING_CONFIG.get('target_encoding_smoothing', 6.0)
+            
+            # CV-based target encoding for better generalization
+            if self.config.FEATURE_ENGINEERING_CONFIG.get('enable_cross_validation_encoding', True):
+                cv_folds = 4
+                skf = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
+                
+                for col in categorical_for_encoding:
+                    try:
+                        target_col_name = f"target_enc_cv_{col}"
+                        
+                        # Initialize with global mean
+                        global_mean = y_train.mean()
+                        cv_predictions = np.full(len(X_train), global_mean, dtype='float32')
+                        
+                        # Cross-validation encoding
+                        for train_idx, val_idx in skf.split(X_train, y_train):
+                            X_fold_train = X_train.iloc[train_idx]
+                            y_fold_train = y_train.iloc[train_idx]
+                            X_fold_val = X_train.iloc[val_idx]
+                            
+                            # Calculate category means for this fold
+                            category_stats = y_fold_train.groupby(X_fold_train[col]).agg(['mean', 'count']).reset_index()
+                            category_stats.columns = [col, 'target_mean', 'count']
+                            
+                            # Apply smoothing
+                            category_stats['smoothed_mean'] = (
+                                (category_stats['target_mean'] * category_stats['count'] + global_mean * smoothing_factor) /
+                                (category_stats['count'] + smoothing_factor)
+                            )
+                            
+                            # Create encoding mapping for this fold
+                            fold_encoding_map = dict(zip(category_stats[col], category_stats['smoothed_mean']))
+                            
+                            # Apply to validation set
+                            cv_predictions[val_idx] = X_fold_val[col].map(fold_encoding_map).fillna(global_mean).astype('float32')
+                        
+                        X_train[target_col_name] = cv_predictions
+                        
+                        # For test set, use full training data
+                        category_stats_full = y_train.groupby(X_train[col]).agg(['mean', 'count']).reset_index()
+                        category_stats_full.columns = [col, 'target_mean', 'count']
+                        category_stats_full['smoothed_mean'] = (
+                            (category_stats_full['target_mean'] * category_stats_full['count'] + global_mean * smoothing_factor) /
+                            (category_stats_full['count'] + smoothing_factor)
+                        )
+                        
+                        full_encoding_map = dict(zip(category_stats_full[col], category_stats_full['smoothed_mean']))
+                        X_test[target_col_name] = X_test[col].map(full_encoding_map).fillna(global_mean).astype('float32')
+                        
+                        self.target_encoding_features.append(target_col_name)
+                        self.generated_features.append(target_col_name)
+                        self.target_encoders[col] = full_encoding_map
+                        
+                    except Exception as e:
+                        logger.warning(f"CV target encoding for {col} failed: {e}")
+                        continue
+            else:
+                # Simple target encoding with improved smoothing
+                for col in categorical_for_encoding:
+                    try:
+                        target_col_name = f"target_enc_{col}"
+                        
+                        # Calculate global mean
+                        global_mean = y_train.mean()
+                        
+                        # Calculate category means
+                        category_means = y_train.groupby(X_train[col]).agg(['mean', 'count']).reset_index()
+                        category_means.columns = [col, 'target_mean', 'count']
+                        
+                        # Apply improved smoothing
+                        category_means['smoothed_mean'] = (
+                            (category_means['target_mean'] * category_means['count'] + global_mean * smoothing_factor) /
+                            (category_means['count'] + smoothing_factor)
+                        )
+                        
+                        # Create encoding mapping
+                        encoding_map = dict(zip(category_means[col], category_means['smoothed_mean']))
+                        
+                        # Apply encoding
+                        X_train[target_col_name] = X_train[col].map(encoding_map).fillna(global_mean).astype('float32')
+                        X_test[target_col_name] = X_test[col].map(encoding_map).fillna(global_mean).astype('float32')
+                        
+                        self.target_encoding_features.append(target_col_name)
+                        self.generated_features.append(target_col_name)
+                        self.target_encoders[col] = encoding_map
+                        
+                    except Exception as e:
+                        logger.warning(f"Target encoding for {col} failed: {e}")
+                        continue
             
             logger.info(f"Target encoding completed: {len(self.target_encoding_features)} features created")
             
@@ -675,67 +777,82 @@ class CTRFeatureEngineer:
                     time_related_cols.append(col)
             
             if not time_related_cols:
-                # Create synthetic time features if no explicit time columns
-                logger.info("No explicit time columns found, creating synthetic temporal features")
+                # Create synthetic time features based on data index patterns
+                logger.info("No explicit time columns found, creating index-based temporal features")
                 
-                # Create cyclic features based on data patterns
                 n_samples_train = len(X_train)
                 n_samples_test = len(X_test)
                 
-                # Synthetic hour-of-day feature (0-23)
-                hour_feature = np.arange(n_samples_train) % 24
-                X_train['synthetic_hour'] = hour_feature.astype('float32')
-                X_test['synthetic_hour'] = (np.arange(n_samples_test) % 24).astype('float32')
+                # Multiple temporal cycles
+                for cycle_length, cycle_name in [(24, 'hour'), (7, 'day'), (30, 'month')]:
+                    # Training data temporal features
+                    cycle_feature = np.arange(n_samples_train) % cycle_length
+                    X_train[f'temporal_{cycle_name}'] = cycle_feature.astype('float32')
+                    
+                    # Cyclic encoding
+                    X_train[f'{cycle_name}_sin'] = np.sin(2 * np.pi * cycle_feature / cycle_length).astype('float32')
+                    X_train[f'{cycle_name}_cos'] = np.cos(2 * np.pi * cycle_feature / cycle_length).astype('float32')
+                    
+                    # Test data temporal features
+                    test_cycle_feature = np.arange(n_samples_test) % cycle_length
+                    X_test[f'temporal_{cycle_name}'] = test_cycle_feature.astype('float32')
+                    X_test[f'{cycle_name}_sin'] = np.sin(2 * np.pi * test_cycle_feature / cycle_length).astype('float32')
+                    X_test[f'{cycle_name}_cos'] = np.cos(2 * np.pi * test_cycle_feature / cycle_length).astype('float32')
+                    
+                    created_features = [f'temporal_{cycle_name}', f'{cycle_name}_sin', f'{cycle_name}_cos']
+                    self.temporal_features.extend(created_features)
+                    self.generated_features.extend(created_features)
                 
-                # Cyclic encoding of hour
-                X_train['hour_sin'] = np.sin(2 * np.pi * X_train['synthetic_hour'] / 24).astype('float32')
-                X_train['hour_cos'] = np.cos(2 * np.pi * X_train['synthetic_hour'] / 24).astype('float32')
-                X_test['hour_sin'] = np.sin(2 * np.pi * X_test['synthetic_hour'] / 24).astype('float32')
-                X_test['hour_cos'] = np.cos(2 * np.pi * X_test['synthetic_hour'] / 24).astype('float32')
+                # Time trend feature
+                time_trend_train = np.arange(n_samples_train) / n_samples_train
+                time_trend_test = np.arange(n_samples_test) / n_samples_test
                 
-                # Synthetic day-of-week feature (0-6)
-                day_feature = (np.arange(n_samples_train) // 24) % 7
-                X_train['synthetic_day'] = day_feature.astype('float32')
-                X_test['synthetic_day'] = ((np.arange(n_samples_test) // 24) % 7).astype('float32')
+                X_train['time_trend'] = time_trend_train.astype('float32')
+                X_test['time_trend'] = time_trend_test.astype('float32')
                 
-                # Cyclic encoding of day
-                X_train['day_sin'] = np.sin(2 * np.pi * X_train['synthetic_day'] / 7).astype('float32')
-                X_train['day_cos'] = np.cos(2 * np.pi * X_train['synthetic_day'] / 7).astype('float32')
-                X_test['day_sin'] = np.sin(2 * np.pi * X_test['synthetic_day'] / 7).astype('float32')
-                X_test['day_cos'] = np.cos(2 * np.pi * X_test['synthetic_day'] / 7).astype('float32')
+                self.temporal_features.append('time_trend')
+                self.generated_features.append('time_trend')
                 
-                created_features = ['synthetic_hour', 'hour_sin', 'hour_cos', 'synthetic_day', 'day_sin', 'day_cos']
-                self.temporal_features.extend(created_features)
-                self.generated_features.extend(created_features)
             else:
                 # Process existing time-related columns
-                for col in time_related_cols[:3]:  # Limit to 3 columns for memory
+                for col in time_related_cols[:5]:  # Limit to 5 columns for memory
                     try:
-                        # Extract hour if possible
+                        # Extract different temporal components
                         if 'hour' in str(col).lower():
-                            hour_sin_name = f"{col}_hour_sin"
-                            hour_cos_name = f"{col}_hour_cos"
-                            
-                            X_train[hour_sin_name] = np.sin(2 * np.pi * X_train[col] / 24).astype('float32')
-                            X_train[hour_cos_name] = np.cos(2 * np.pi * X_train[col] / 24).astype('float32')
-                            X_test[hour_sin_name] = np.sin(2 * np.pi * X_test[col] / 24).astype('float32')
-                            X_test[hour_cos_name] = np.cos(2 * np.pi * X_test[col] / 24).astype('float32')
-                            
-                            self.temporal_features.extend([hour_sin_name, hour_cos_name])
-                            self.generated_features.extend([hour_sin_name, hour_cos_name])
+                            for func_name, func in [('sin', np.sin), ('cos', np.cos)]:
+                                feature_name = f"{col}_hour_{func_name}"
+                                X_train[feature_name] = func(2 * np.pi * X_train[col] / 24).astype('float32')
+                                X_test[feature_name] = func(2 * np.pi * X_test[col] / 24).astype('float32')
+                                
+                                self.temporal_features.append(feature_name)
+                                self.generated_features.append(feature_name)
                         
-                        # Extract day if possible
                         elif 'day' in str(col).lower():
-                            day_sin_name = f"{col}_day_sin"
-                            day_cos_name = f"{col}_day_cos"
+                            for func_name, func in [('sin', np.sin), ('cos', np.cos)]:
+                                feature_name = f"{col}_day_{func_name}"
+                                X_train[feature_name] = func(2 * np.pi * X_train[col] / 7).astype('float32')
+                                X_test[feature_name] = func(2 * np.pi * X_test[col] / 7).astype('float32')
+                                
+                                self.temporal_features.append(feature_name)
+                                self.generated_features.append(feature_name)
+                        
+                        # Time-based binning
+                        try:
+                            bins = np.percentile(X_train[col], [0, 25, 50, 75, 100])
+                            bins = np.unique(bins)  # Remove duplicates
                             
-                            X_train[day_sin_name] = np.sin(2 * np.pi * X_train[col] / 7).astype('float32')
-                            X_train[day_cos_name] = np.cos(2 * np.pi * X_train[col] / 7).astype('float32')
-                            X_test[day_sin_name] = np.sin(2 * np.pi * X_test[col] / 7).astype('float32')
-                            X_test[day_cos_name] = np.cos(2 * np.pi * X_test[col] / 7).astype('float32')
-                            
-                            self.temporal_features.extend([day_sin_name, day_cos_name])
-                            self.generated_features.extend([day_sin_name, day_cos_name])
+                            if len(bins) > 1:
+                                binned_name = f"{col}_binned"
+                                X_train[binned_name] = pd.cut(X_train[col], bins=bins, labels=False, duplicates='drop').astype('float32')
+                                X_test[binned_name] = pd.cut(X_test[col], bins=bins, labels=False, duplicates='drop').astype('float32')
+                                
+                                X_train[binned_name] = X_train[binned_name].fillna(0).astype('float32')
+                                X_test[binned_name] = X_test[binned_name].fillna(0).astype('float32')
+                                
+                                self.temporal_features.append(binned_name)
+                                self.generated_features.append(binned_name)
+                        except Exception:
+                            pass
                             
                     except Exception as e:
                         logger.warning(f"Temporal feature creation for {col} failed: {e}")
@@ -749,7 +866,7 @@ class CTRFeatureEngineer:
         return X_train, X_test
     
     def _create_statistical_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Statistical feature creation"""
+        """Statistical feature creation (expanded)"""
         logger.info("Statistical feature creation started")
         
         try:
@@ -759,41 +876,70 @@ class CTRFeatureEngineer:
                 return X_train, X_test
             
             # Select numerical features for statistical operations
-            numerical_for_stats = [col for col in self.numerical_features if col in X_train.columns][:10]
+            numerical_for_stats = [col for col in self.numerical_features if col in X_train.columns][:15]
             
             if len(numerical_for_stats) >= 2:
                 # Row-wise statistics
                 numerical_data_train = X_train[numerical_for_stats].values
                 numerical_data_test = X_test[numerical_for_stats].values
                 
-                # Row sum
-                X_train['row_sum'] = np.sum(numerical_data_train, axis=1).astype('float32')
-                X_test['row_sum'] = np.sum(numerical_data_test, axis=1).astype('float32')
+                # Basic statistics
+                stat_features = {
+                    'row_sum': np.sum,
+                    'row_mean': np.mean,
+                    'row_std': np.std,
+                    'row_min': np.min,
+                    'row_max': np.max,
+                    'row_median': np.median
+                }
                 
-                # Row mean
-                X_train['row_mean'] = np.mean(numerical_data_train, axis=1).astype('float32')
-                X_test['row_mean'] = np.mean(numerical_data_test, axis=1).astype('float32')
+                for stat_name, stat_func in stat_features.items():
+                    try:
+                        X_train[stat_name] = stat_func(numerical_data_train, axis=1).astype('float32')
+                        X_test[stat_name] = stat_func(numerical_data_test, axis=1).astype('float32')
+                        
+                        self.statistical_features.append(stat_name)
+                        self.generated_features.append(stat_name)
+                    except Exception as e:
+                        logger.warning(f"Statistical feature {stat_name} failed: {e}")
                 
-                # Row standard deviation
-                X_train['row_std'] = np.std(numerical_data_train, axis=1).astype('float32')
-                X_test['row_std'] = np.std(numerical_data_test, axis=1).astype('float32')
+                # Advanced statistics
+                try:
+                    # Row range
+                    X_train['row_range'] = (np.max(numerical_data_train, axis=1) - np.min(numerical_data_train, axis=1)).astype('float32')
+                    X_test['row_range'] = (np.max(numerical_data_test, axis=1) - np.min(numerical_data_test, axis=1)).astype('float32')
+                    
+                    # Row kurtosis (simplified)
+                    row_mean_train = X_train['row_mean'].values.reshape(-1, 1)
+                    row_mean_test = X_test['row_mean'].values.reshape(-1, 1)
+                    row_std_train = X_train['row_std'].values.reshape(-1, 1)
+                    row_std_test = X_test['row_std'].values.reshape(-1, 1)
+                    
+                    # Avoid division by zero
+                    row_std_train = np.where(row_std_train == 0, 1e-8, row_std_train)
+                    row_std_test = np.where(row_std_test == 0, 1e-8, row_std_test)
+                    
+                    kurtosis_train = np.mean(((numerical_data_train - row_mean_train) / row_std_train) ** 4, axis=1)
+                    kurtosis_test = np.mean(((numerical_data_test - row_mean_test) / row_std_test) ** 4, axis=1)
+                    
+                    X_train['row_kurtosis'] = kurtosis_train.astype('float32')
+                    X_test['row_kurtosis'] = kurtosis_test.astype('float32')
+                    
+                    # Count of zeros and non-zeros
+                    X_train['row_zero_count'] = np.sum(numerical_data_train == 0, axis=1).astype('float32')
+                    X_test['row_zero_count'] = np.sum(numerical_data_test == 0, axis=1).astype('float32')
+                    
+                    X_train['row_nonzero_count'] = np.sum(numerical_data_train != 0, axis=1).astype('float32')
+                    X_test['row_nonzero_count'] = np.sum(numerical_data_test != 0, axis=1).astype('float32')
+                    
+                    advanced_features = ['row_range', 'row_kurtosis', 'row_zero_count', 'row_nonzero_count']
+                    self.statistical_features.extend(advanced_features)
+                    self.generated_features.extend(advanced_features)
+                    
+                except Exception as e:
+                    logger.warning(f"Advanced statistical features failed: {e}")
                 
-                # Row min/max
-                X_train['row_min'] = np.min(numerical_data_train, axis=1).astype('float32')
-                X_test['row_min'] = np.min(numerical_data_test, axis=1).astype('float32')
-                
-                X_train['row_max'] = np.max(numerical_data_train, axis=1).astype('float32')
-                X_test['row_max'] = np.max(numerical_data_test, axis=1).astype('float32')
-                
-                # Row skewness (simplified)
-                X_train['row_skew'] = ((numerical_data_train - X_train['row_mean'].values.reshape(-1, 1)) ** 3).mean(axis=1).astype('float32')
-                X_test['row_skew'] = ((numerical_data_test - X_test['row_mean'].values.reshape(-1, 1)) ** 3).mean(axis=1).astype('float32')
-                
-                created_features = ['row_sum', 'row_mean', 'row_std', 'row_min', 'row_max', 'row_skew']
-                self.statistical_features.extend(created_features)
-                self.generated_features.extend(created_features)
-                
-                logger.info(f"Statistical feature creation completed: {len(created_features)} features created")
+                logger.info(f"Statistical feature creation completed: {len([f for f in self.generated_features if f.startswith('row_')])} features")
             else:
                 logger.info("Insufficient numerical features for statistical operations")
             
@@ -813,21 +959,40 @@ class CTRFeatureEngineer:
                 return X_train, X_test
             
             # Select categorical features for frequency encoding
-            categorical_for_freq = [col for col in self.categorical_features if col in X_train.columns][:5]
+            categorical_for_freq = [col for col in self.categorical_features if col in X_train.columns][:8]
             
             for col in categorical_for_freq:
                 try:
+                    # Basic frequency encoding
                     freq_col_name = f"freq_{col}"
-                    
-                    # Calculate frequency
                     freq_map = X_train[col].value_counts().to_dict()
                     
-                    # Apply frequency encoding
                     X_train[freq_col_name] = X_train[col].map(freq_map).fillna(0).astype('float32')
                     X_test[freq_col_name] = X_test[col].map(freq_map).fillna(0).astype('float32')
                     
                     self.frequency_features.append(freq_col_name)
                     self.generated_features.append(freq_col_name)
+                    
+                    # Frequency rank encoding
+                    freq_rank_col_name = f"freq_rank_{col}"
+                    freq_ranks = X_train[col].value_counts().rank(ascending=False).to_dict()
+                    
+                    X_train[freq_rank_col_name] = X_train[col].map(freq_ranks).fillna(len(freq_ranks) + 1).astype('float32')
+                    X_test[freq_rank_col_name] = X_test[col].map(freq_ranks).fillna(len(freq_ranks) + 1).astype('float32')
+                    
+                    self.frequency_features.append(freq_rank_col_name)
+                    self.generated_features.append(freq_rank_col_name)
+                    
+                    # Relative frequency
+                    total_count = len(X_train)
+                    rel_freq_col_name = f"rel_freq_{col}"
+                    rel_freq_map = {k: v / total_count for k, v in freq_map.items()}
+                    
+                    X_train[rel_freq_col_name] = X_train[col].map(rel_freq_map).fillna(0).astype('float32')
+                    X_test[rel_freq_col_name] = X_test[col].map(rel_freq_map).fillna(0).astype('float32')
+                    
+                    self.frequency_features.append(rel_freq_col_name)
+                    self.generated_features.append(rel_freq_col_name)
                     
                 except Exception as e:
                     logger.warning(f"Frequency encoding for {col} failed: {e}")
@@ -837,6 +1002,159 @@ class CTRFeatureEngineer:
             
         except Exception as e:
             logger.error(f"Frequency feature creation failed: {e}")
+        
+        return X_train, X_test
+    
+    def _create_polynomial_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Polynomial feature creation"""
+        logger.info("Polynomial feature creation started")
+        
+        try:
+            memory_status = self.memory_monitor.get_memory_status()
+            if memory_status['should_simplify']:
+                logger.warning("Skipping polynomial features due to memory constraints")
+                return X_train, X_test
+            
+            # Select top numerical features for polynomial transformation
+            numerical_for_poly = [col for col in self.numerical_features if col in X_train.columns][:10]
+            
+            for col in numerical_for_poly:
+                try:
+                    # Skip if feature has very low variance
+                    if X_train[col].std() <= 1e-8:
+                        continue
+                    
+                    # Quadratic features
+                    quad_col_name = f"poly2_{col}"
+                    X_train[quad_col_name] = (X_train[col] ** 2).astype('float32')
+                    X_test[quad_col_name] = (X_test[col] ** 2).astype('float32')
+                    
+                    self.polynomial_features.append(quad_col_name)
+                    self.generated_features.append(quad_col_name)
+                    
+                    # Cubic features (for selected features)
+                    if col in numerical_for_poly[:5]:  # Only for top 5 features
+                        cubic_col_name = f"poly3_{col}"
+                        X_train[cubic_col_name] = (X_train[col] ** 3).astype('float32')
+                        X_test[cubic_col_name] = (X_test[col] ** 3).astype('float32')
+                        
+                        self.polynomial_features.append(cubic_col_name)
+                        self.generated_features.append(cubic_col_name)
+                    
+                    # Log transformation (for positive values)
+                    if X_train[col].min() > 0:
+                        log_col_name = f"log_{col}"
+                        X_train[log_col_name] = np.log1p(X_train[col]).astype('float32')
+                        X_test[log_col_name] = np.log1p(X_test[col]).astype('float32')
+                        
+                        self.polynomial_features.append(log_col_name)
+                        self.generated_features.append(log_col_name)
+                    
+                    # Square root transformation (for non-negative values)
+                    if X_train[col].min() >= 0:
+                        sqrt_col_name = f"sqrt_{col}"
+                        X_train[sqrt_col_name] = np.sqrt(X_train[col]).astype('float32')
+                        X_test[sqrt_col_name] = np.sqrt(X_test[col]).astype('float32')
+                        
+                        self.polynomial_features.append(sqrt_col_name)
+                        self.generated_features.append(sqrt_col_name)
+                        
+                except Exception as e:
+                    logger.warning(f"Polynomial transformation for {col} failed: {e}")
+                    continue
+            
+            logger.info(f"Polynomial feature creation completed: {len(self.polynomial_features)} features created")
+            
+        except Exception as e:
+            logger.error(f"Polynomial feature creation failed: {e}")
+        
+        return X_train, X_test
+    
+    def _create_cross_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, 
+                             y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Cross feature creation"""
+        logger.info("Cross feature creation started")
+        
+        try:
+            memory_status = self.memory_monitor.get_memory_status()
+            if memory_status['should_simplify']:
+                logger.warning("Skipping cross features due to memory constraints")
+                return X_train, X_test
+            
+            # Identify important features for cross-features
+            important_numerical = [col for col in self.numerical_features if col in X_train.columns][:8]
+            important_categorical = [col for col in self.categorical_features if col in X_train.columns][:8]
+            
+            cross_count = 0
+            max_cross_features = 40
+            
+            # Numerical cross features (ratios and differences)
+            for i, feat1 in enumerate(important_numerical):
+                if cross_count >= max_cross_features * 0.6:
+                    break
+                    
+                for feat2 in important_numerical[i+1:]:
+                    if cross_count >= max_cross_features * 0.6:
+                        break
+                    
+                    try:
+                        # Ratio features
+                        ratio_name = f"ratio_{feat1}_{feat2}"
+                        denominator_train = X_train[feat2].replace(0, 1e-8)
+                        denominator_test = X_test[feat2].replace(0, 1e-8)
+                        
+                        X_train[ratio_name] = (X_train[feat1] / denominator_train).astype('float32')
+                        X_test[ratio_name] = (X_test[feat1] / denominator_test).astype('float32')
+                        
+                        # Difference features
+                        diff_name = f"diff_{feat1}_{feat2}"
+                        X_train[diff_name] = (X_train[feat1] - X_train[feat2]).astype('float32')
+                        X_test[diff_name] = (X_test[feat1] - X_test[feat2]).astype('float32')
+                        
+                        self.cross_features.extend([ratio_name, diff_name])
+                        self.generated_features.extend([ratio_name, diff_name])
+                        cross_count += 2
+                        
+                    except Exception as e:
+                        logger.warning(f"Cross feature {feat1} x {feat2} failed: {e}")
+                        continue
+            
+            # Categorical group statistics
+            for cat_col in important_categorical[:5]:
+                if cross_count >= max_cross_features:
+                    break
+                    
+                for num_col in important_numerical[:4]:
+                    if cross_count >= max_cross_features:
+                        break
+                    
+                    try:
+                        # Group mean
+                        group_mean_name = f"group_mean_{cat_col}_{num_col}"
+                        group_means = X_train.groupby(cat_col)[num_col].mean().to_dict()
+                        
+                        X_train[group_mean_name] = X_train[cat_col].map(group_means).fillna(X_train[num_col].mean()).astype('float32')
+                        X_test[group_mean_name] = X_test[cat_col].map(group_means).fillna(X_train[num_col].mean()).astype('float32')
+                        
+                        # Group std
+                        group_std_name = f"group_std_{cat_col}_{num_col}"
+                        group_stds = X_train.groupby(cat_col)[num_col].std().to_dict()
+                        
+                        X_train[group_std_name] = X_train[cat_col].map(group_stds).fillna(X_train[num_col].std()).astype('float32')
+                        X_test[group_std_name] = X_test[cat_col].map(group_stds).fillna(X_train[num_col].std()).astype('float32')
+                        
+                        self.cross_features.extend([group_mean_name, group_std_name])
+                        self.generated_features.extend([group_mean_name, group_std_name])
+                        cross_count += 2
+                        
+                    except Exception as e:
+                        logger.warning(f"Group statistics {cat_col} x {num_col} failed: {e}")
+                        continue
+            
+            logger.info(f"Cross feature creation completed: {len(self.cross_features)} features created")
+            
+        except Exception as e:
+            logger.error(f"Cross feature creation failed: {e}")
         
         return X_train, X_test
     
@@ -888,7 +1206,7 @@ class CTRFeatureEngineer:
         
         try:
             # Select numerical features for transformation
-            numerical_for_transform = [col for col in self.numerical_features if col in X_train.columns][:10]
+            numerical_for_transform = [col for col in self.numerical_features if col in X_train.columns][:8]
             
             for col in numerical_for_transform:
                 try:
@@ -896,31 +1214,49 @@ class CTRFeatureEngineer:
                     if X_train[col].std() <= 1e-8:
                         continue
                     
-                    # Log transformation (for positive values)
-                    if X_train[col].min() > 0:
-                        log_col_name = f"log_{col}"
-                        X_train[log_col_name] = np.log1p(X_train[col]).astype('float32')
-                        X_test[log_col_name] = np.log1p(X_test[col]).astype('float32')
-                        self.generated_features.append(log_col_name)
+                    # Skip if feature name suggests it's already a transformation
+                    if any(prefix in col for prefix in ['log_', 'sqrt_', 'poly', 'interact', 'target_enc']):
+                        continue
                     
-                    # Square root transformation (for non-negative values)
-                    if X_train[col].min() >= 0:
-                        sqrt_col_name = f"sqrt_{col}"
-                        X_train[sqrt_col_name] = np.sqrt(X_train[col]).astype('float32')
-                        X_test[sqrt_col_name] = np.sqrt(X_test[col]).astype('float32')
-                        self.generated_features.append(sqrt_col_name)
+                    # Robust scaling for outlier handling
+                    try:
+                        robust_col_name = f"robust_{col}"
+                        
+                        # Calculate robust statistics
+                        median_val = X_train[col].median()
+                        mad_val = np.median(np.abs(X_train[col] - median_val))
+                        mad_val = mad_val if mad_val > 0 else 1.0
+                        
+                        X_train[robust_col_name] = ((X_train[col] - median_val) / mad_val).astype('float32')
+                        X_test[robust_col_name] = ((X_test[col] - median_val) / mad_val).astype('float32')
+                        
+                        self.generated_features.append(robust_col_name)
+                        
+                    except Exception:
+                        pass
                     
-                    # Square transformation
-                    square_col_name = f"square_{col}"
-                    X_train[square_col_name] = (X_train[col] ** 2).astype('float32')
-                    X_test[square_col_name] = (X_test[col] ** 2).astype('float32')
-                    self.generated_features.append(square_col_name)
+                    # Rank transformation
+                    try:
+                        rank_col_name = f"rank_{col}"
+                        rank_values = X_train[col].rank(pct=True).astype('float32')
+                        
+                        # For test data, approximate rank based on training data percentiles
+                        train_percentiles = np.percentile(X_train[col], np.arange(0, 101))
+                        test_ranks = np.searchsorted(train_percentiles, X_test[col]) / 100.0
+                        
+                        X_train[rank_col_name] = rank_values
+                        X_test[rank_col_name] = test_ranks.astype('float32')
+                        
+                        self.generated_features.append(rank_col_name)
+                        
+                    except Exception:
+                        pass
                     
                 except Exception as e:
                     logger.warning(f"Numeric transformation for {col} failed: {e}")
                     continue
             
-            logger.info(f"Numeric feature transformation completed: {len([f for f in self.generated_features if any(prefix in f for prefix in ['log_', 'sqrt_', 'square_'])])} features")
+            logger.info(f"Numeric feature transformation completed")
             
         except Exception as e:
             logger.error(f"Numeric feature transformation failed: {e}")
@@ -1049,7 +1385,9 @@ class CTRFeatureEngineer:
                 'target_encoding': len(self.target_encoding_features),
                 'temporal': len(self.temporal_features),
                 'statistical': len(self.statistical_features),
-                'frequency': len(self.frequency_features)
+                'frequency': len(self.frequency_features),
+                'polynomial': len(self.polynomial_features),
+                'cross': len(self.cross_features)
             }
             
             self.processing_stats.update({
@@ -1069,6 +1407,8 @@ class CTRFeatureEngineer:
             logger.info(f"  - Time features: {len(self.temporal_features)}")
             logger.info(f"  - Statistical features: {len(self.statistical_features)}")
             logger.info(f"  - Frequency features: {len(self.frequency_features)}")
+            logger.info(f"  - Polynomial features: {len(self.polynomial_features)}")
+            logger.info(f"  - Cross features: {len(self.cross_features)}")
             
             self.memory_monitor.force_memory_cleanup()
             

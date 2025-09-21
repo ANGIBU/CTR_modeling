@@ -117,9 +117,9 @@ class MemoryMonitor:
     
     def __init__(self):
         self.memory_thresholds = {
-            'warning': 38.5,
-            'critical': 44.0,
-            'abort': 49.5
+            'warning': 40.0,
+            'critical': 46.0,
+            'abort': 52.0
         }
     
     def get_memory_usage(self) -> float:
@@ -175,8 +175,8 @@ class MemoryMonitor:
         try:
             initial_memory = self.get_memory_usage()
             
-            cleanup_rounds = 20 if intensive else 15
-            sleep_time = 0.2 if intensive else 0.1
+            cleanup_rounds = 25 if intensive else 20
+            sleep_time = 0.15 if intensive else 0.1
             
             for i in range(cleanup_rounds):
                 collected = gc.collect()
@@ -185,7 +185,7 @@ class MemoryMonitor:
                 
                 if i % 5 == 0:
                     current_memory = self.get_memory_usage()
-                    if initial_memory - current_memory > 5.0:
+                    if initial_memory - current_memory > 3.0:
                         break
             
             if TORCH_AVAILABLE and torch.cuda.is_available():
@@ -227,6 +227,7 @@ class CTRCalibrator:
         self.best_method = None
         self.bias_correction = 0.0
         self.multiplicative_correction = 1.0
+        self.ensemble_calibrators = {}
     
     def fit_platt_scaling(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
         """Platt Scaling calibration"""
@@ -235,7 +236,7 @@ class CTRCalibrator:
                 logger.info("Platt Scaling calibration training started")
                 
                 from sklearn.linear_model import LogisticRegression
-                platt_model = LogisticRegression()
+                platt_model = LogisticRegression(random_state=42, max_iter=1000)
                 platt_model.fit(y_pred_proba.reshape(-1, 1), y_true)
                 
                 self.calibration_models['platt_scaling'] = platt_model
@@ -270,33 +271,37 @@ class CTRCalibrator:
             logger.error(f"Isotonic Regression calibration failed: {e}")
     
     def fit_temperature_scaling(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Temperature Scaling calibration"""
+        """Temperature Scaling calibration with joint optimization"""
         try:
             logger.info("Temperature Scaling calibration training started")
             
-            from scipy.optimize import minimize_scalar
+            from scipy.optimize import minimize
             
-            def temperature_loss(temperature, y_true, y_pred_logits, bias=0.0):
+            def temperature_loss(params, y_true, y_pred_logits):
+                temperature, bias = params
+                temperature = max(temperature, 0.1)  # Prevent division by zero
+                
                 scaled_logits = y_pred_logits / temperature + bias
                 scaled_proba = 1 / (1 + np.exp(-scaled_logits))
                 scaled_proba = np.clip(scaled_proba, 1e-15, 1 - 1e-15)
-                return -np.mean(y_true * np.log(scaled_proba) + (1 - y_true) * np.log(1 - scaled_proba))
+                
+                # Combined loss: log loss + CTR bias penalty
+                log_loss = -np.mean(y_true * np.log(scaled_proba) + (1 - y_true) * np.log(1 - scaled_proba))
+                ctr_bias = abs(scaled_proba.mean() - y_true.mean())
+                
+                return log_loss + ctr_bias * 10.0
             
             y_pred_logits = np.log(y_pred_proba / (1 - y_pred_proba + 1e-15) + 1e-15)
             
-            result_temp = minimize_scalar(
-                lambda t: temperature_loss(t, y_true, y_pred_logits),
-                bounds=(0.1, 10.0),
-                method='bounded'
+            # Joint optimization of temperature and bias
+            result = minimize(
+                lambda params: temperature_loss(params, y_true, y_pred_logits),
+                x0=[1.0, 0.0],
+                method='L-BFGS-B',
+                bounds=[(0.1, 10.0), (-5.0, 5.0)]
             )
-            optimal_temperature = result_temp.x
             
-            result_bias = minimize_scalar(
-                lambda b: temperature_loss(optimal_temperature, y_true, y_pred_logits, b),
-                bounds=(-5.0, 5.0),
-                method='bounded'
-            )
-            optimal_bias = result_bias.x
+            optimal_temperature, optimal_bias = result.x
             
             self.calibration_models['temperature_scaling'] = {
                 'temperature': optimal_temperature,
@@ -317,56 +322,133 @@ class CTRCalibrator:
             logger.error(f"Temperature Scaling calibration failed: {e}")
     
     def fit_beta_calibration(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Beta calibration"""
+        """Beta calibration with stable optimization"""
         try:
             logger.info("Beta calibration training started")
             
             from scipy.optimize import minimize
-            from scipy.special import betaln
+            from scipy.special import betaln, digamma
             
             def beta_loss(params, y_true, y_pred_proba):
-                a, b = np.exp(params)
+                a, b = np.exp(params)  # Ensure positive parameters
+                a = max(a, 0.1)
+                b = max(b, 0.1)
+                
                 eps = 1e-12
+                y_pred_proba = np.clip(y_pred_proba, eps, 1 - eps)
                 
-                log_proba = np.log(y_pred_proba + eps)
-                log_1_minus_proba = np.log(1 - y_pred_proba + eps)
+                try:
+                    # Beta calibration formula
+                    log_proba = np.log(y_pred_proba)
+                    log_1_minus_proba = np.log(1 - y_pred_proba)
+                    
+                    # Numerically stable beta probability computation
+                    log_beta_proba = (a - 1) * log_proba + (b - 1) * log_1_minus_proba
+                    log_beta_proba -= betaln(a, b)
+                    
+                    beta_proba = np.exp(log_beta_proba)
+                    beta_proba = np.clip(beta_proba, eps, 1 - eps)
+                    
+                    # Log loss with regularization
+                    log_loss = -np.mean(y_true * np.log(beta_proba) + (1 - y_true) * np.log(1 - beta_proba))
+                    
+                    # Add regularization to prevent extreme parameters
+                    reg_term = 0.01 * (np.log(a)**2 + np.log(b)**2)
+                    
+                    return log_loss + reg_term
+                    
+                except Exception:
+                    return 1000.0  # Return high loss for numerical issues
+            
+            # Multiple random starts for better optimization
+            best_loss = float('inf')
+            best_params = None
+            
+            for _ in range(3):
+                initial_params = np.random.normal(0, 0.5, 2)
                 
-                beta_proba = np.exp(betaln(a, b) + (a - 1) * log_proba + (b - 1) * log_1_minus_proba)
-                beta_proba = np.clip(beta_proba, eps, 1 - eps)
+                try:
+                    result = minimize(
+                        lambda params: beta_loss(params, y_true, y_pred_proba),
+                        x0=initial_params,
+                        method='L-BFGS-B',
+                        bounds=[(-3, 3), (-3, 3)]
+                    )
+                    
+                    if result.fun < best_loss:
+                        best_loss = result.fun
+                        best_params = result.x
+                        
+                except Exception:
+                    continue
+            
+            if best_params is not None:
+                optimal_a, optimal_b = np.exp(best_params)
                 
-                return -np.mean(y_true * np.log(beta_proba) + (1 - y_true) * np.log(1 - beta_proba))
-            
-            result = minimize(
-                lambda params: beta_loss(params, y_true, y_pred_proba),
-                x0=[0.0, 0.0],
-                method='BFGS'
-            )
-            
-            optimal_a, optimal_b = np.exp(result.x)
-            
-            self.calibration_models['beta_calibration'] = {
-                'a': optimal_a,
-                'b': optimal_b
-            }
-            
-            eps = 1e-12
-            log_proba = np.log(y_pred_proba + eps)
-            log_1_minus_proba = np.log(1 - y_pred_proba + eps)
-            calibrated_proba = np.exp(betaln(optimal_a, optimal_b) + 
-                                    (optimal_a - 1) * log_proba + 
-                                    (optimal_b - 1) * log_1_minus_proba)
-            calibrated_proba = np.clip(calibrated_proba, eps, 1 - eps)
-            
-            score = self._calculate_calibration_score(y_true, calibrated_proba)
-            self.calibration_scores['beta_calibration'] = score
-            
-            logger.info(f"Beta calibration training complete - score: {score:.4f}")
+                self.calibration_models['beta_calibration'] = {
+                    'a': optimal_a,
+                    'b': optimal_b
+                }
+                
+                # Calculate calibrated probabilities
+                eps = 1e-12
+                y_pred_proba = np.clip(y_pred_proba, eps, 1 - eps)
+                log_proba = np.log(y_pred_proba)
+                log_1_minus_proba = np.log(1 - y_pred_proba)
+                
+                log_calibrated_proba = (optimal_a - 1) * log_proba + (optimal_b - 1) * log_1_minus_proba
+                log_calibrated_proba -= betaln(optimal_a, optimal_b)
+                
+                calibrated_proba = np.exp(log_calibrated_proba)
+                calibrated_proba = np.clip(calibrated_proba, eps, 1 - eps)
+                
+                score = self._calculate_calibration_score(y_true, calibrated_proba)
+                self.calibration_scores['beta_calibration'] = score
+                
+                logger.info(f"Beta calibration training complete - score: {score:.4f}")
+            else:
+                logger.warning("Beta calibration optimization failed")
             
         except Exception as e:
             logger.error(f"Beta calibration failed: {e}")
     
+    def fit_ensemble_calibration(self, y_true: np.ndarray, predictions_dict: Dict[str, np.ndarray]):
+        """Ensemble calibration for multiple model predictions"""
+        try:
+            logger.info("Ensemble calibration training started")
+            
+            if len(predictions_dict) < 2:
+                logger.warning("Insufficient models for ensemble calibration")
+                return
+            
+            # Stack predictions
+            predictions_matrix = np.column_stack(list(predictions_dict.values()))
+            model_names = list(predictions_dict.keys())
+            
+            # Train ensemble calibrator
+            if SKLEARN_AVAILABLE:
+                from sklearn.linear_model import LogisticRegression
+                ensemble_calibrator = LogisticRegression(random_state=42, max_iter=1000)
+                ensemble_calibrator.fit(predictions_matrix, y_true)
+                
+                self.ensemble_calibrators['logistic'] = ensemble_calibrator
+                
+                # Weighted average calibration
+                weights = np.abs(ensemble_calibrator.coef_[0])
+                weights = weights / np.sum(weights)
+                
+                weighted_predictions = np.average(predictions_matrix, weights=weights, axis=1)
+                
+                # Apply individual calibration to weighted predictions
+                self.fit_temperature_scaling(y_true, weighted_predictions)
+                
+                logger.info("Ensemble calibration training complete")
+            
+        except Exception as e:
+            logger.error(f"Ensemble calibration failed: {e}")
+    
     def fit_bias_correction(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Bias correction"""
+        """Bias correction with adaptive scaling"""
         try:
             logger.info("Bias correction training started")
             
@@ -380,27 +462,61 @@ class CTRCalibrator:
             else:
                 self.multiplicative_correction = 1.0
             
+            # Additional adaptive scaling based on prediction distribution
+            pred_std = np.std(y_pred_proba)
+            if pred_std > 0:
+                # Scale based on prediction variance
+                target_std = np.sqrt(actual_ctr * (1 - actual_ctr))
+                std_ratio = target_std / pred_std
+                self.multiplicative_correction *= (0.8 + 0.2 * std_ratio)
+            
             logger.info(f"Bias correction complete - additive: {self.bias_correction:.4f}, multiplicative: {self.multiplicative_correction:.4f}")
             
         except Exception as e:
             logger.error(f"Bias correction training failed: {e}")
     
     def _calculate_calibration_score(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """Calculate calibration score"""
+        """Calculate calibration score with multiple criteria"""
         try:
+            # CTR alignment
             predicted_ctr = np.mean(y_pred_proba)
             actual_ctr = np.mean(y_true)
             ctr_error = abs(predicted_ctr - actual_ctr)
-            ctr_score = max(0, 1 - ctr_error * 1000)
+            ctr_score = max(0, 1 - ctr_error * 2000)  # More sensitive to CTR errors
             
+            # Brier score for calibration
             if SKLEARN_AVAILABLE:
                 from sklearn.metrics import brier_score_loss
                 brier_score = brier_score_loss(y_true, y_pred_proba)
-                brier_score_normalized = max(0, 1 - brier_score * 4)
+                brier_score_normalized = max(0, 1 - brier_score * 5)
             else:
                 brier_score_normalized = 0.5
             
-            return (ctr_score * 0.7) + (brier_score_normalized * 0.3)
+            # Reliability (calibration curve analysis)
+            try:
+                n_bins = 10
+                bin_boundaries = np.linspace(0, 1, n_bins + 1)
+                bin_lowers = bin_boundaries[:-1]
+                bin_uppers = bin_boundaries[1:]
+                
+                reliability_error = 0
+                for bin_lower, bin_upper in zip(bin_lowers, bin_uppers):
+                    in_bin = (y_pred_proba > bin_lower) & (y_pred_proba <= bin_upper)
+                    prop_in_bin = in_bin.mean()
+                    
+                    if prop_in_bin > 0:
+                        accuracy_in_bin = y_true[in_bin].mean()
+                        avg_confidence_in_bin = y_pred_proba[in_bin].mean()
+                        reliability_error += np.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
+                
+                reliability_score = max(0, 1 - reliability_error * 20)
+            except Exception:
+                reliability_score = 0.5
+            
+            # Combined score with emphasis on CTR alignment
+            combined_score = (0.5 * ctr_score + 0.3 * brier_score_normalized + 0.2 * reliability_score)
+            
+            return float(np.clip(combined_score, 0.0, 1.0))
             
         except Exception:
             return 0.0
@@ -421,6 +537,7 @@ class CTRCalibrator:
         if len(y_true) == 0:
             raise ValueError("Empty array cannot be processed")
         
+        # Fit all calibration methods
         if 'platt_scaling' in methods:
             self.fit_platt_scaling(y_true, y_pred_proba)
         
@@ -436,6 +553,7 @@ class CTRCalibrator:
         if 'bias_correction' in methods:
             self.fit_bias_correction(y_true, y_pred_proba)
         
+        # Select best method
         if self.calibration_scores:
             self.best_method = max(self.calibration_scores, key=self.calibration_scores.get)
             logger.info(f"Best calibration method: {self.best_method} (score: {self.calibration_scores[self.best_method]:.4f})")
@@ -475,14 +593,18 @@ class CTRCalibrator:
                 params = self.calibration_models[method]
                 from scipy.special import betaln
                 eps = 1e-12
-                log_proba = np.log(y_pred_proba + eps)
-                log_1_minus_proba = np.log(1 - y_pred_proba + eps)
-                calibrated_proba = np.exp(betaln(params['a'], params['b']) + 
-                                        (params['a'] - 1) * log_proba + 
-                                        (params['b'] - 1) * log_1_minus_proba)
+                y_pred_proba = np.clip(y_pred_proba, eps, 1 - eps)
+                log_proba = np.log(y_pred_proba)
+                log_1_minus_proba = np.log(1 - y_pred_proba)
+                
+                log_calibrated_proba = (params['a'] - 1) * log_proba + (params['b'] - 1) * log_1_minus_proba
+                log_calibrated_proba -= betaln(params['a'], params['b'])
+                
+                calibrated_proba = np.exp(log_calibrated_proba)
                 return np.clip(calibrated_proba, eps, 1 - eps)
             
             else:
+                # Bias correction with adaptive scaling
                 corrected_proba = y_pred_proba + self.bias_correction
                 corrected_proba = corrected_proba * self.multiplicative_correction
                 return np.clip(corrected_proba, 1e-15, 1 - 1e-15)
@@ -490,6 +612,16 @@ class CTRCalibrator:
         except Exception as e:
             logger.warning(f"Calibration prediction failed: {e}")
             return np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
+    
+    def get_calibration_summary(self) -> Dict[str, Any]:
+        """Get calibration summary"""
+        return {
+            'best_method': self.best_method,
+            'calibration_scores': self.calibration_scores,
+            'available_methods': list(self.calibration_models.keys()),
+            'bias_correction': self.bias_correction,
+            'multiplicative_correction': self.multiplicative_correction
+        }
 
 class BaseModel(ABC):
     """Base class for all models"""
@@ -502,7 +634,7 @@ class BaseModel(ABC):
         self.feature_names = None
         self.calibrator = None
         self.is_calibrated = False
-        self.prediction_diversity_threshold = 2000
+        self.prediction_diversity_threshold = 3000
         self.calibration_applied = True
         self.memory_monitor = MemoryMonitor()
     
@@ -545,9 +677,9 @@ class BaseModel(ABC):
             if memory_status['should_cleanup']:
                 self.memory_monitor.force_memory_cleanup()
             
-            if len(X) > 500000:
+            if len(X) > 300000:
                 logger.info(f"Large dataset prediction: {len(X)} rows, using batch processing")
-                batch_size = 100000
+                batch_size = 80000
                 predictions = []
                 
                 for i in range(0, len(X), batch_size):
@@ -574,10 +706,12 @@ class BaseModel(ABC):
                 return predictions
             
             unique_count = len(np.unique(predictions))
-            if unique_count < len(predictions) * 0.1:
-                noise = np.random.normal(0, 0.001, len(predictions))
+            if unique_count < len(predictions) * 0.08:  # More sensitive threshold
+                noise_scale = max(predictions.std() * 0.003, 1e-7)
+                noise = np.random.normal(0, noise_scale, len(predictions))
                 predictions = predictions + noise
                 predictions = np.clip(predictions, 1e-15, 1 - 1e-15)
+                logger.debug(f"Prediction diversity enhanced for {self.name}")
             
             return predictions
         except Exception:
@@ -608,7 +742,7 @@ class BaseModel(ABC):
     def apply_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, method: str = 'auto'):
         """Apply calibration to model"""
         try:
-            logger.info(f"Force applying calibration to {self.name} model: {method}")
+            logger.info(f"Applying calibration to {self.name} model: {method}")
             
             if not self.is_fitted:
                 logger.warning("Model is not fitted, skipping calibration")
@@ -617,7 +751,10 @@ class BaseModel(ABC):
             raw_predictions = self.predict_proba_raw(X_val)
             
             self.calibrator = CTRCalibrator()
-            self.calibrator.fit(y_val.values, raw_predictions)
+            
+            # Use all available calibration methods for better selection
+            calibration_methods = ['platt_scaling', 'isotonic_regression', 'temperature_scaling', 'beta_calibration', 'bias_correction']
+            self.calibrator.fit(y_val.values, raw_predictions, methods=calibration_methods)
             
             original_ctr = np.mean(raw_predictions)
             calibrated_predictions = self.calibrator.predict(raw_predictions)
@@ -626,11 +763,12 @@ class BaseModel(ABC):
             
             self.is_calibrated = True
             
-            logger.info("Forced calibration application complete")
+            logger.info("Calibration application complete")
             logger.info(f"  - Original CTR: {original_ctr:.4f}")
             logger.info(f"  - Calibrated CTR: {calibrated_ctr:.4f}")
             logger.info(f"  - Actual CTR: {actual_ctr:.4f}")
             logger.info(f"  - Best method: {self.calibrator.best_method}")
+            logger.info(f"  - Calibration improvement: {abs(calibrated_ctr - actual_ctr) < abs(original_ctr - actual_ctr)}")
             
         except Exception as e:
             logger.error(f"Calibration application failed: {e}")
@@ -703,7 +841,7 @@ class BaseModel(ABC):
             logger.error(f"Model loading failed: {e}")
 
 class LightGBMModel(BaseModel):
-    """LightGBM model"""
+    """LightGBM model with tuned parameters"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not LIGHTGBM_AVAILABLE:
@@ -713,37 +851,41 @@ class LightGBMModel(BaseModel):
             'objective': 'binary',
             'metric': 'binary_logloss',
             'boosting_type': 'gbdt',
-            'num_leaves': 255,
-            'max_depth': 15,
-            'learning_rate': 0.01,
-            'feature_fraction': 0.9,
-            'bagging_fraction': 0.8,
-            'bagging_freq': 5,
+            'num_leaves': 127,
+            'max_depth': 10,
+            'learning_rate': 0.008,
+            'feature_fraction': 0.85,
+            'bagging_fraction': 0.85,
+            'bagging_freq': 7,
             'verbose': -1,
-            'n_estimators': 8000,
-            'early_stopping_rounds': 800,
+            'n_estimators': 12000,
+            'early_stopping_rounds': 350,
             'random_state': 42,
             'force_col_wise': True,
-            'min_child_samples': 25,
-            'reg_alpha': 2.0,
-            'reg_lambda': 2.0,
-            'scale_pos_weight': 52.0
+            'min_child_samples': 80,
+            'reg_alpha': 0.15,
+            'reg_lambda': 0.25,
+            'scale_pos_weight': 49.5,
+            'min_gain_to_split': 0.015,
+            'max_cat_threshold': 48,
+            'cat_smooth': 12.0,
+            'cat_l2': 12.0
         }
         
         if params:
             default_params.update(params)
         
         super().__init__("LightGBM", default_params)
-        self.prediction_diversity_threshold = 2500
+        self.prediction_diversity_threshold = 3500
     
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         self.params.update({
-            'num_leaves': 127,
-            'max_depth': 10,
-            'n_estimators': 5000,
-            'min_child_samples': 50,
-            'early_stopping_rounds': 500
+            'num_leaves': 63,
+            'max_depth': 8,
+            'n_estimators': 6000,
+            'min_child_samples': 120,
+            'early_stopping_rounds': 250
         })
         logger.info(f"{self.name}: Parameters simplified for memory conservation")
     
@@ -776,7 +918,7 @@ class LightGBMModel(BaseModel):
                 valid_sets.append(valid_data)
                 valid_names.append('valid')
             
-            early_stopping = self.params.get('early_stopping_rounds', 800)
+            early_stopping = self.params.get('early_stopping_rounds', 350)
             
             self.model = lgb.train(
                 self.params,
@@ -789,12 +931,12 @@ class LightGBMModel(BaseModel):
             self.is_fitted = True
             
             if X_val_clean is not None and y_val is not None:
-                logger.info(f"{self.name}: Starting forced calibration application")
+                logger.info(f"{self.name}: Starting calibration application")
                 self.apply_calibration(X_val_clean, y_val, method='auto')
                 if self.is_calibrated:
-                    logger.info(f"{self.name}: Forced calibration application complete")
+                    logger.info(f"{self.name}: Calibration application complete")
                 else:
-                    logger.warning(f"{self.name}: Forced calibration application failed")
+                    logger.warning(f"{self.name}: Calibration application failed")
             
             del X_train_clean
             if X_val_clean is not None:
@@ -826,7 +968,7 @@ class LightGBMModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X)
 
 class XGBoostModel(BaseModel):
-    """XGBoost model with memory management"""
+    """XGBoost model with memory management and tuned parameters"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
@@ -836,23 +978,23 @@ class XGBoostModel(BaseModel):
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
             'tree_method': 'hist',
-            'max_depth': 12,
-            'learning_rate': 0.008,
+            'max_depth': 9,
+            'learning_rate': 0.006,
             'subsample': 0.85,
-            'colsample_bytree': 0.95,
+            'colsample_bytree': 0.85,
             'colsample_bylevel': 0.85,
-            'min_child_weight': 8,
-            'reg_alpha': 2.5,
-            'reg_lambda': 2.5,
-            'scale_pos_weight': 52.0,
+            'min_child_weight': 7,
+            'reg_alpha': 0.12,
+            'reg_lambda': 0.25,
+            'scale_pos_weight': 49.5,
             'random_state': 42,
-            'n_estimators': 8000,
-            'early_stopping_rounds': 800,
+            'n_estimators': 15000,
+            'early_stopping_rounds': 350,
             'max_bin': 255,
             'nthread': 12,
             'grow_policy': 'lossguide',
-            'gamma': 0.0,
-            'max_leaves': 2047
+            'gamma': 0.08,
+            'max_leaves': 1023
         }
         
         if rtx_4060ti_detected and TORCH_AVAILABLE:
@@ -881,18 +1023,18 @@ class XGBoostModel(BaseModel):
             default_params.update(params)
         
         super().__init__("XGBoost", default_params)
-        self.prediction_diversity_threshold = 2500
+        self.prediction_diversity_threshold = 3500
     
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         self.params.update({
-            'max_depth': 8,
-            'n_estimators': 3000,
-            'min_child_weight': 15,
-            'nthread': 6,
+            'max_depth': 7,
+            'n_estimators': 4000,
+            'min_child_weight': 12,
+            'nthread': 8,
             'tree_method': 'hist',
-            'early_stopping_rounds': 300,
-            'max_leaves': 511,
+            'early_stopping_rounds': 200,
+            'max_leaves': 255,
             'max_bin': 128,
             'colsample_bytree': 0.8,
             'subsample': 0.8
@@ -909,9 +1051,9 @@ class XGBoostModel(BaseModel):
         def _fit_internal():
             logger.info(f"{self.name}: Performing memory cleanup before training")
             
-            # Aggressive memory cleanup before DMatrix creation
+            # Memory cleanup before DMatrix creation
             self.memory_monitor.force_memory_cleanup(intensive=True)
-            time.sleep(2)
+            time.sleep(1)
             
             # Check memory status after cleanup
             memory_status = self.memory_monitor.get_memory_status()
@@ -948,7 +1090,7 @@ class XGBoostModel(BaseModel):
             
             # Another memory cleanup before DMatrix
             self.memory_monitor.force_memory_cleanup()
-            time.sleep(1)
+            time.sleep(0.5)
             
             # First attempt: Try GPU training
             gpu_success = False
@@ -972,9 +1114,9 @@ class XGBoostModel(BaseModel):
                     logger.info(f"{self.name}: Starting CPU training")
                     self._train_cpu_mode(X_train_clean, y_train, X_val_clean, y_val)
                     
-                    # Force apply calibration to all XGBoost models
+                    # Apply calibration to all XGBoost models
                     if X_val is not None and y_val is not None:
-                        logger.info(f"{self.name}: Starting forced calibration application")
+                        logger.info(f"{self.name}: Starting calibration application")
                         # Use original validation data for calibration
                         X_val_for_calibration = X_val.fillna(0).copy()
                         for col in X_val_for_calibration.columns:
@@ -985,9 +1127,9 @@ class XGBoostModel(BaseModel):
                         
                         self.apply_calibration(X_val_for_calibration, y_val, method='auto')
                         if self.is_calibrated:
-                            logger.info(f"{self.name}: Forced calibration application complete")
+                            logger.info(f"{self.name}: Calibration application complete")
                         else:
-                            logger.warning(f"{self.name}: Forced calibration application failed")
+                            logger.warning(f"{self.name}: Calibration application failed")
                         
                         del X_val_for_calibration
                     
@@ -998,7 +1140,7 @@ class XGBoostModel(BaseModel):
                     self._cleanup_training_data(locals())
                     
                     # Intensive memory cleanup on failure
-                    cleanup_rounds = 20
+                    cleanup_rounds = 25
                     for i in range(cleanup_rounds):
                         collected = gc.collect()
                         time.sleep(0.1)
@@ -1026,7 +1168,7 @@ class XGBoostModel(BaseModel):
                 free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
                 free_memory_gb = free_memory / (1024**3)
                 
-                if free_memory_gb < 6.0:  # Need at least 6GB for training
+                if free_memory_gb < 8.0:  # Need at least 8GB for training
                     logger.warning(f"{self.name}: Insufficient GPU memory ({free_memory_gb:.2f}GB), switching to CPU")
                     return False
             
@@ -1053,7 +1195,7 @@ class XGBoostModel(BaseModel):
                 )
                 evals.append((dval, 'valid'))
             
-            early_stopping = self.params.get('early_stopping_rounds', 800)
+            early_stopping = self.params.get('early_stopping_rounds', 350)
             
             logger.info(f"{self.name}: Starting XGBoost GPU training")
             self.model = xgb.train(
@@ -1117,7 +1259,7 @@ class XGBoostModel(BaseModel):
                 )
                 evals.append((dval, 'valid'))
             
-            early_stopping = self.params.get('early_stopping_rounds', 800)
+            early_stopping = self.params.get('early_stopping_rounds', 350)
             
             logger.info(f"{self.name}: Starting XGBoost CPU training")
             self.model = xgb.train(
@@ -1154,9 +1296,9 @@ class XGBoostModel(BaseModel):
         
         # Additional CPU optimizations for large data
         if 'nthread' not in self.params:
-            self.params['nthread'] = 8
+            self.params['nthread'] = 10
         
-        logger.info(f"{self.name}: Switched to CPU mode with optimized parameters")
+        logger.info(f"{self.name}: Switched to CPU mode with tuned parameters")
     
     def _cleanup_training_data(self, local_vars: dict):
         """Cleanup training data"""
@@ -1194,17 +1336,17 @@ class XGBoostModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X)
 
 class LogisticModel(BaseModel):
-    """Logistic Regression model"""
+    """Logistic Regression model with tuned parameters"""
     
     def __init__(self, params: Dict[str, Any] = None):
         if not SKLEARN_AVAILABLE:
             raise ImportError("Scikit-learn is not installed.")
         
         default_params = {
-            'C': 0.1,
+            'C': 0.8,
             'penalty': 'l2',
             'solver': 'lbfgs',
-            'max_iter': 3000,
+            'max_iter': 2000,
             'random_state': 42,
             'class_weight': 'balanced',
             'n_jobs': 12
@@ -1215,14 +1357,14 @@ class LogisticModel(BaseModel):
         
         super().__init__("LogisticRegression", default_params)
         self.model = LogisticRegression(**self.params)
-        self.prediction_diversity_threshold = 2500
+        self.prediction_diversity_threshold = 3500
     
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         self.params.update({
             'C': 1.0,
             'max_iter': 1000,
-            'n_jobs': 6
+            'n_jobs': 8
         })
         self.model = LogisticRegression(**self.params)
         logger.info(f"{self.name}: Parameters simplified for memory conservation")
@@ -1242,8 +1384,8 @@ class LogisticModel(BaseModel):
                     X_train_clean[col] = X_train_clean[col].astype('float32')
             
             # Sample for large datasets
-            if len(X_train_clean) > 4000000:
-                sample_size = 4000000
+            if len(X_train_clean) > 5000000:
+                sample_size = 5000000
                 logger.info(f"Large data detected, applying sampling ({len(X_train_clean):,} -> {sample_size:,})")
                 
                 sample_indices = np.random.choice(len(X_train_clean), size=sample_size, replace=False)
@@ -1267,9 +1409,9 @@ class LogisticModel(BaseModel):
                 self.model.fit(X_train_sample, y_train_sample)
                 self.is_fitted = True
             
-            # Force apply calibration to all logistic regression models
+            # Apply calibration to all logistic regression models
             if X_val is not None and y_val is not None:
-                logger.info(f"{self.name}: Starting forced calibration application")
+                logger.info(f"{self.name}: Starting calibration application")
                 X_val_clean = X_val.fillna(0)
                 for col in X_val_clean.columns:
                     if X_val_clean[col].dtype in ['float64']:
@@ -1277,9 +1419,9 @@ class LogisticModel(BaseModel):
                 
                 self.apply_calibration(X_val_clean, y_val, method='auto')
                 if self.is_calibrated:
-                    logger.info(f"{self.name}: Forced calibration application complete")
+                    logger.info(f"{self.name}: Calibration application complete")
                 else:
-                    logger.warning(f"{self.name}: Forced calibration application failed")
+                    logger.warning(f"{self.name}: Calibration application failed")
             
             del X_train_clean
             
@@ -1314,7 +1456,7 @@ class ModelFactory:
         """Create model by type"""
         try:
             memory_monitor = MemoryMonitor()
-            logger.info(f"Creating model: {model_type} (forced calibration application configured)")
+            logger.info(f"Creating model: {model_type} (calibration application configured)")
             logger.info(f"Memory thresholds - warning: {memory_monitor.memory_thresholds['warning']:.1f}GB, critical: {memory_monitor.memory_thresholds['critical']:.1f}GB, abort: {memory_monitor.memory_thresholds['abort']:.1f}GB")
             
             if model_type.lower() == 'lightgbm':
@@ -1333,7 +1475,7 @@ class ModelFactory:
             else:
                 raise ValueError(f"Unsupported model type: {model_type}")
             
-            logger.info(f"{model_type} model creation complete - forced calibration application guaranteed")
+            logger.info(f"{model_type} model creation complete - calibration application guaranteed")
             return model
                 
         except Exception as e:
@@ -1352,7 +1494,7 @@ class ModelFactory:
         if XGBOOST_AVAILABLE:
             available.append('xgboost')
         
-        logger.info(f"Available models: {available} (all models have forced calibration application)")
+        logger.info(f"Available models: {available} (all models have calibration application)")
         return available
     
     @staticmethod
