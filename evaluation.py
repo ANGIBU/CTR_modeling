@@ -53,24 +53,24 @@ class CTRMetrics:
             'wll_weight': 0.4,
             'target_combined_score': 0.34,
             'target_ctr': 0.0191,
-            'ctr_tolerance': 0.0003,
-            'bias_penalty_weight': 6.0,
-            'calibration_weight': 0.45,
-            'pos_weight': 49.5,
+            'ctr_tolerance': 0.0002,
+            'bias_penalty_weight': 8.0,
+            'calibration_weight': 0.5,
+            'pos_weight': 52.3,
             'neg_weight': 1.0,
-            'wll_normalization_factor': 2.8
+            'wll_normalization_factor': 2.6
         })
         
         self.ap_weight = evaluation_config.get('ap_weight', 0.6)
         self.wll_weight = evaluation_config.get('wll_weight', 0.4)
         self.actual_ctr = evaluation_config.get('target_ctr', 0.0191)
-        self.pos_weight = evaluation_config.get('pos_weight', 49.5)
+        self.pos_weight = evaluation_config.get('pos_weight', 52.3)
         self.neg_weight = evaluation_config.get('neg_weight', 1.0)
         self.target_combined_score = evaluation_config.get('target_combined_score', 0.34)
-        self.ctr_tolerance = evaluation_config.get('ctr_tolerance', 0.0003)
-        self.bias_penalty_weight = evaluation_config.get('bias_penalty_weight', 6.0)
-        self.calibration_weight = evaluation_config.get('calibration_weight', 0.45)
-        self.wll_normalization_factor = evaluation_config.get('wll_normalization_factor', 2.8)
+        self.ctr_tolerance = evaluation_config.get('ctr_tolerance', 0.0002)
+        self.bias_penalty_weight = evaluation_config.get('bias_penalty_weight', 8.0)
+        self.calibration_weight = evaluation_config.get('calibration_weight', 0.5)
+        self.wll_normalization_factor = evaluation_config.get('wll_normalization_factor', 2.6)
         
         self.cache = {}
     
@@ -92,7 +92,7 @@ class CTRMetrics:
             ap_score = self.average_precision(y_true, y_pred_proba)
             wll_score = self.weighted_log_loss(y_true, y_pred_proba)
             
-            # Corrected WLL normalization
+            # Corrected WLL normalization with tuned factor
             normalized_wll = max(0, 1 - wll_score / self.wll_normalization_factor)
             combined = (ap_score * self.ap_weight) + (normalized_wll * self.wll_weight)
             
@@ -141,7 +141,7 @@ class CTRMetrics:
             return 0.0
     
     def weighted_log_loss(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """Weighted log loss calculation"""
+        """Weighted log loss calculation with tuned weights"""
         try:
             y_true = np.asarray(y_true).flatten()
             y_pred_proba = np.asarray(y_pred_proba).flatten()
@@ -151,6 +151,7 @@ class CTRMetrics:
             
             y_pred_proba = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
             
+            # Use updated pos_weight from config
             sample_weights = np.where(y_true == 1, self.pos_weight, self.neg_weight)
             
             log_loss_values = -(y_true * np.log(y_pred_proba) + 
@@ -210,13 +211,13 @@ class CTRMetrics:
             actual_ctr = np.mean(y_true)
             ctr_bias = abs(predicted_ctr - actual_ctr)
             
-            # Enhanced bias penalty
+            # Tuned bias penalty with tighter tolerance
             if ctr_bias > self.ctr_tolerance:
-                penalty_factor = min((ctr_bias / self.ctr_tolerance) * 0.15, 0.4)
+                penalty_factor = min((ctr_bias / self.ctr_tolerance) * 0.12, 0.35)
                 ctr_adjusted_score = base_score * (1.0 - penalty_factor)
             else:
                 # Small bonus for accurate CTR prediction
-                bonus_factor = min((self.ctr_tolerance - ctr_bias) / self.ctr_tolerance * 0.02, 0.02)
+                bonus_factor = min((self.ctr_tolerance - ctr_bias) / self.ctr_tolerance * 0.03, 0.03)
                 ctr_adjusted_score = base_score * (1.0 + bonus_factor)
             
             return float(np.clip(ctr_adjusted_score, 0.0, 1.0))
@@ -254,6 +255,45 @@ class CTRMetrics:
             logger.error(f"Diversity score calculation failed: {e}")
             return 0.0
     
+    def stability_score(self, y_true: np.ndarray, y_pred_proba: np.ndarray, n_segments: int = 10) -> float:
+        """Calculate prediction stability across data segments"""
+        try:
+            if len(y_true) < n_segments * 10:
+                return 0.0
+            
+            segment_size = len(y_true) // n_segments
+            segment_scores = []
+            
+            for i in range(n_segments):
+                start_idx = i * segment_size
+                end_idx = (i + 1) * segment_size if i < n_segments - 1 else len(y_true)
+                
+                segment_y = y_true[start_idx:end_idx]
+                segment_pred = y_pred_proba[start_idx:end_idx]
+                
+                if len(segment_y) > 0 and len(np.unique(segment_y)) > 1:
+                    segment_score = self.combined_score(segment_y, segment_pred)
+                    segment_scores.append(segment_score)
+            
+            if len(segment_scores) < 2:
+                return 0.0
+            
+            # Stability is inverse of coefficient of variation
+            mean_score = np.mean(segment_scores)
+            std_score = np.std(segment_scores)
+            
+            if mean_score == 0:
+                return 0.0
+            
+            cv = std_score / mean_score
+            stability = 1.0 / (1.0 + cv)
+            
+            return float(np.clip(stability, 0.0, 1.0))
+            
+        except Exception as e:
+            logger.error(f"Stability score calculation failed: {e}")
+            return 0.0
+    
     def comprehensive_evaluation(self, y_true: np.ndarray, y_pred_proba: np.ndarray, 
                                model_name: str = "Unknown", threshold: float = 0.5) -> Dict[str, Any]:
         """Comprehensive evaluation metrics"""
@@ -271,17 +311,24 @@ class CTRMetrics:
             
             metrics = {'model_name': model_name}
             
-            # Core metrics
+            # Core metrics with tuned parameters
             metrics['ap'] = self.average_precision(y_true, y_pred_proba)
             metrics['wll'] = self.weighted_log_loss(y_true, y_pred_proba)
             metrics['combined_score'] = self.combined_score(y_true, y_pred_proba)
             metrics['ctr_score'] = self.ctr_score(y_true, y_pred_proba)
             
-            # CTR analysis
+            # CTR analysis with corrected target
             metrics['ctr_actual'] = float(y_true.mean())
             metrics['ctr_predicted'] = float(y_pred_proba.mean())
             metrics['ctr_bias'] = metrics['ctr_predicted'] - metrics['ctr_actual']
             metrics['ctr_absolute_error'] = abs(metrics['ctr_bias'])
+            
+            # Target alignment check
+            metrics['ctr_target_aligned'] = abs(metrics['ctr_actual'] - self.actual_ctr) < 0.001
+            metrics['ctr_prediction_aligned'] = abs(metrics['ctr_predicted'] - self.actual_ctr) < self.ctr_tolerance
+            
+            # Stability metrics
+            metrics['stability_score'] = self.stability_score(y_true, y_pred_proba)
             
             # Classification metrics
             if SKLEARN_AVAILABLE and len(np.unique(y_true)) >= 2:
@@ -305,10 +352,10 @@ class CTRMetrics:
                     'f1': 0.0, 'roc_auc': 0.5, 'brier_score': 1.0
                 })
             
-            # Performance tier assessment
+            # Performance tier assessment with adjusted thresholds
             combined_score = metrics['combined_score']
-            if combined_score >= 0.35:
-                metrics['performance_tier'] = 'exceptional'
+            if combined_score >= 0.34:
+                metrics['performance_tier'] = 'target_achieved'
             elif combined_score >= 0.30:
                 metrics['performance_tier'] = 'excellent'
             elif combined_score >= 0.25:
@@ -327,6 +374,16 @@ class CTRMetrics:
             metrics['prediction_entropy'] = float(pred_entropy)
             metrics['prediction_range'] = float(y_pred_proba.max() - y_pred_proba.min())
             
+            # Calibration quality assessment
+            if metrics['brier_score'] < 0.02:
+                metrics['calibration_quality'] = 'excellent'
+            elif metrics['brier_score'] < 0.025:
+                metrics['calibration_quality'] = 'good'
+            elif metrics['brier_score'] < 0.03:
+                metrics['calibration_quality'] = 'fair'
+            else:
+                metrics['calibration_quality'] = 'poor'
+            
             metrics['evaluation_time'] = time.time() - start_time
             
             return metrics
@@ -341,10 +398,11 @@ class CTRMetrics:
             'model_name': model_name,
             'ap': 0.0, 'wll': 100.0, 'combined_score': 0.0, 'ctr_score': 0.0,
             'ctr_actual': self.actual_ctr, 'ctr_predicted': self.actual_ctr, 'ctr_bias': 0.0,
-            'ctr_absolute_error': 0.0, 'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0,
+            'ctr_absolute_error': 0.0, 'ctr_target_aligned': True, 'ctr_prediction_aligned': True,
+            'stability_score': 0.0, 'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0,
             'f1': 0.0, 'roc_auc': 0.5, 'brier_score': 1.0, 'performance_tier': 'poor',
             'prediction_std': 0.0, 'prediction_entropy': 0.0, 'prediction_range': 0.0,
-            'evaluation_time': 0.0
+            'calibration_quality': 'poor', 'evaluation_time': 0.0
         }
     
     def clear_cache(self):
@@ -407,6 +465,7 @@ class ModelComparator:
                 logger.info(f"  - CTR Score: {metrics['ctr_score']:.4f}")
                 logger.info(f"  - CTR Bias: {metrics['ctr_bias']:.4f}")
                 logger.info(f"  - Performance Tier: {metrics['performance_tier']}")
+                logger.info(f"  - Stability Score: {metrics['stability_score']:.4f}")
                 
             except Exception as e:
                 logger.error(f"{model_name} evaluation failed: {str(e)}")
@@ -443,7 +502,9 @@ class EvaluationReporter:
                     'generation_time': time.strftime('%Y-%m-%d %H:%M:%S'),
                     'evaluation_framework': 'CTR Metrics',
                     'target_combined_score': self.metrics_calculator.target_combined_score,
-                    'wll_normalization_factor': self.metrics_calculator.wll_normalization_factor
+                    'wll_normalization_factor': self.metrics_calculator.wll_normalization_factor,
+                    'target_ctr': self.metrics_calculator.actual_ctr,
+                    'pos_weight': self.metrics_calculator.pos_weight
                 },
                 'summary': evaluation_results,
                 'performance_analysis': {
@@ -451,11 +512,17 @@ class EvaluationReporter:
                     'performance_tier': evaluation_results.get('performance_tier', 'poor'),
                     'ctr_bias_analysis': {
                         'bias': evaluation_results.get('ctr_bias', 0.0),
-                        'acceptable': abs(evaluation_results.get('ctr_bias', 1.0)) <= self.metrics_calculator.ctr_tolerance
+                        'acceptable': abs(evaluation_results.get('ctr_bias', 1.0)) <= self.metrics_calculator.ctr_tolerance,
+                        'target_aligned': evaluation_results.get('ctr_target_aligned', False)
                     },
                     'calibration_quality': {
                         'brier_score': evaluation_results.get('brier_score', 1.0),
-                        'prediction_diversity': evaluation_results.get('prediction_std', 0.0)
+                        'prediction_diversity': evaluation_results.get('prediction_std', 0.0),
+                        'calibration_assessment': evaluation_results.get('calibration_quality', 'poor')
+                    },
+                    'stability_assessment': {
+                        'stability_score': evaluation_results.get('stability_score', 0.0),
+                        'prediction_range': evaluation_results.get('prediction_range', 0.0)
                     }
                 }
             }

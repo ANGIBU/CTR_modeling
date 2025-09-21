@@ -142,6 +142,9 @@ class CTRFeatureEngineer:
         self.frequency_features = []
         self.polynomial_features = []
         self.cross_features = []
+        self.binning_features = []
+        self.rank_features = []
+        self.ratio_features = []
         self.removed_columns = []
         self.original_feature_order = []
         self.final_feature_columns = []
@@ -240,7 +243,7 @@ class CTRFeatureEngineer:
                 # 5. Interaction feature creation (expanded)
                 X_train, X_test = self._create_interaction_features(X_train, X_test, y_train)
                 
-                # 6. Target encoding (improved)
+                # 6. Target encoding (tuned)
                 X_train, X_test = self._create_target_encoding_features(X_train, X_test, y_train)
                 
                 # 7. Time-based features
@@ -259,16 +262,26 @@ class CTRFeatureEngineer:
                 # 11. Cross features
                 X_train, X_test = self._create_cross_features(X_train, X_test, y_train)
                 
+                # 12. Binning features
+                if self.config.FEATURE_ENGINEERING_CONFIG.get('enable_binning', True):
+                    X_train, X_test = self._create_binning_features(X_train, X_test)
+                
+                # 13. Rank features
+                X_train, X_test = self._create_rank_features(X_train, X_test)
+                
+                # 14. Ratio features
+                X_train, X_test = self._create_ratio_features(X_train, X_test)
+                
             else:
                 logger.warning("Simplified feature engineering due to memory constraints")
             
-            # 12. Categorical feature encoding
+            # 15. Categorical feature encoding
             X_train, X_test = self._encode_categorical_features(X_train, X_test, y_train)
             
-            # 13. Numeric feature transformation
+            # 16. Numeric feature transformation
             X_train, X_test = self._create_numeric_features(X_train, X_test)
             
-            # 14. Final data cleanup
+            # 17. Final data cleanup
             X_train, X_test = self._final_data_cleanup(X_train, X_test)
             
             self._finalize_processing(X_train, X_test)
@@ -508,16 +521,16 @@ class CTRFeatureEngineer:
         
         try:
             memory_status = self.memory_monitor.get_memory_status()
-            max_interactions = min(self.config.MAX_INTERACTION_FEATURES, 200)
+            max_interactions = min(self.config.MAX_INTERACTION_FEATURES, 250)
             
             if memory_status['should_simplify']:
-                max_interactions = min(max_interactions, 50)
+                max_interactions = min(max_interactions, 80)
             
             # Identify important features for interaction
             important_features = []
             
             # Prioritize feat_ prefixed features
-            feat_cols = [col for col in X_train.columns if str(col).startswith('feat_')][:15]
+            feat_cols = [col for col in X_train.columns if str(col).startswith('feat_')][:20]
             important_features.extend(feat_cols)
             
             # Add high-variance numerical features
@@ -526,7 +539,7 @@ class CTRFeatureEngineer:
                     try:
                         if X_train[col].std() > 0.1:
                             important_features.append(col)
-                            if len(important_features) >= 25:
+                            if len(important_features) >= 35:
                                 break
                     except Exception:
                         continue
@@ -536,30 +549,30 @@ class CTRFeatureEngineer:
                 if col not in important_features:
                     try:
                         unique_count = X_train[col].nunique()
-                        if 2 <= unique_count <= 30:
+                        if 2 <= unique_count <= 40:
                             important_features.append(col)
-                            if len(important_features) >= 30:
+                            if len(important_features) >= 40:
                                 break
                     except Exception:
                         continue
             
-            important_features = important_features[:30]
+            important_features = important_features[:40]
             logger.info(f"Selected {len(important_features)} features for interaction")
             
             interaction_count = 0
             
             # Second-order interactions
             for i, feat1 in enumerate(important_features):
-                if interaction_count >= max_interactions * 0.7:
+                if interaction_count >= max_interactions * 0.75:
                     break
                 
                 for j, feat2 in enumerate(important_features[i+1:], i+1):
-                    if interaction_count >= max_interactions * 0.7:
+                    if interaction_count >= max_interactions * 0.75:
                         break
                     
                     try:
                         # Memory check
-                        if interaction_count % 10 == 0:
+                        if interaction_count % 15 == 0:
                             memory_status = self.memory_monitor.get_memory_status()
                             if memory_status['should_simplify']:
                                 logger.warning("Stopping interaction creation due to memory pressure")
@@ -597,9 +610,9 @@ class CTRFeatureEngineer:
             # Third-order interactions (limited)
             if not memory_status['should_simplify'] and interaction_count < max_interactions:
                 remaining_slots = max_interactions - interaction_count
-                third_order_limit = min(remaining_slots, 30)
+                third_order_limit = min(remaining_slots, 50)
                 
-                top_features = important_features[:10]
+                top_features = important_features[:12]
                 third_order_count = 0
                 
                 for i, feat1 in enumerate(top_features):
@@ -637,7 +650,7 @@ class CTRFeatureEngineer:
     
     def _create_target_encoding_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, 
                                        y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Target encoding feature creation (improved)"""
+        """Target encoding feature creation (tuned)"""
         logger.info("Target encoding started")
         
         try:
@@ -651,21 +664,21 @@ class CTRFeatureEngineer:
             for col in self.categorical_features:
                 try:
                     unique_count = X_train[col].nunique()
-                    if 2 <= unique_count <= 150:  # Expanded range
+                    if 2 <= unique_count <= 200:  # Expanded range
                         categorical_for_encoding.append(col)
-                        if len(categorical_for_encoding) >= 15:  # Increased limit
+                        if len(categorical_for_encoding) >= 20:  # Increased limit
                             break
                 except Exception:
                     continue
             
             logger.info(f"Target encoding {len(categorical_for_encoding)} categorical features")
             
-            # Get smoothing factor from config
-            smoothing_factor = self.config.FEATURE_ENGINEERING_CONFIG.get('target_encoding_smoothing', 6.0)
+            # Get tuned smoothing factor from config
+            smoothing_factor = self.config.FEATURE_ENGINEERING_CONFIG.get('target_encoding_smoothing', 4.0)
             
             # CV-based target encoding for better generalization
             if self.config.FEATURE_ENGINEERING_CONFIG.get('enable_cross_validation_encoding', True):
-                cv_folds = 4
+                cv_folds = 5
                 skf = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
                 
                 for col in categorical_for_encoding:
@@ -686,7 +699,7 @@ class CTRFeatureEngineer:
                             category_stats = y_fold_train.groupby(X_fold_train[col]).agg(['mean', 'count']).reset_index()
                             category_stats.columns = [col, 'target_mean', 'count']
                             
-                            # Apply smoothing
+                            # Apply tuned smoothing
                             category_stats['smoothed_mean'] = (
                                 (category_stats['target_mean'] * category_stats['count'] + global_mean * smoothing_factor) /
                                 (category_stats['count'] + smoothing_factor)
@@ -719,7 +732,7 @@ class CTRFeatureEngineer:
                         logger.warning(f"CV target encoding for {col} failed: {e}")
                         continue
             else:
-                # Simple target encoding with improved smoothing
+                # Simple target encoding with tuned smoothing
                 for col in categorical_for_encoding:
                     try:
                         target_col_name = f"target_enc_{col}"
@@ -731,7 +744,7 @@ class CTRFeatureEngineer:
                         category_means = y_train.groupby(X_train[col]).agg(['mean', 'count']).reset_index()
                         category_means.columns = [col, 'target_mean', 'count']
                         
-                        # Apply improved smoothing
+                        # Apply tuned smoothing
                         category_means['smoothed_mean'] = (
                             (category_means['target_mean'] * category_means['count'] + global_mean * smoothing_factor) /
                             (category_means['count'] + smoothing_factor)
@@ -784,7 +797,7 @@ class CTRFeatureEngineer:
                 n_samples_test = len(X_test)
                 
                 # Multiple temporal cycles
-                for cycle_length, cycle_name in [(24, 'hour'), (7, 'day'), (30, 'month')]:
+                for cycle_length, cycle_name in [(24, 'hour'), (7, 'day'), (30, 'month'), (365, 'year')]:
                     # Training data temporal features
                     cycle_feature = np.arange(n_samples_train) % cycle_length
                     X_train[f'temporal_{cycle_name}'] = cycle_feature.astype('float32')
@@ -810,12 +823,19 @@ class CTRFeatureEngineer:
                 X_train['time_trend'] = time_trend_train.astype('float32')
                 X_test['time_trend'] = time_trend_test.astype('float32')
                 
-                self.temporal_features.append('time_trend')
-                self.generated_features.append('time_trend')
+                # Time acceleration feature
+                time_accel_train = (np.arange(n_samples_train) / n_samples_train) ** 2
+                time_accel_test = (np.arange(n_samples_test) / n_samples_test) ** 2
+                
+                X_train['time_accel'] = time_accel_train.astype('float32')
+                X_test['time_accel'] = time_accel_test.astype('float32')
+                
+                self.temporal_features.extend(['time_trend', 'time_accel'])
+                self.generated_features.extend(['time_trend', 'time_accel'])
                 
             else:
                 # Process existing time-related columns
-                for col in time_related_cols[:5]:  # Limit to 5 columns for memory
+                for col in time_related_cols[:6]:  # Limit to 6 columns for memory
                     try:
                         # Extract different temporal components
                         if 'hour' in str(col).lower():
@@ -836,9 +856,10 @@ class CTRFeatureEngineer:
                                 self.temporal_features.append(feature_name)
                                 self.generated_features.append(feature_name)
                         
-                        # Time-based binning
+                        # Time-based binning with tuned parameters
                         try:
-                            bins = np.percentile(X_train[col], [0, 25, 50, 75, 100])
+                            n_bins = self.config.FEATURE_ENGINEERING_CONFIG.get('n_bins', 20)
+                            bins = np.percentile(X_train[col], np.linspace(0, 100, n_bins + 1))
                             bins = np.unique(bins)  # Remove duplicates
                             
                             if len(bins) > 1:
@@ -876,7 +897,7 @@ class CTRFeatureEngineer:
                 return X_train, X_test
             
             # Select numerical features for statistical operations
-            numerical_for_stats = [col for col in self.numerical_features if col in X_train.columns][:15]
+            numerical_for_stats = [col for col in self.numerical_features if col in X_train.columns][:20]
             
             if len(numerical_for_stats) >= 2:
                 # Row-wise statistics
@@ -905,9 +926,19 @@ class CTRFeatureEngineer:
                 
                 # Advanced statistics
                 try:
-                    # Row range
+                    # Row range and IQR
                     X_train['row_range'] = (np.max(numerical_data_train, axis=1) - np.min(numerical_data_train, axis=1)).astype('float32')
                     X_test['row_range'] = (np.max(numerical_data_test, axis=1) - np.min(numerical_data_test, axis=1)).astype('float32')
+                    
+                    # Row percentiles
+                    X_train['row_q25'] = np.percentile(numerical_data_train, 25, axis=1).astype('float32')
+                    X_test['row_q25'] = np.percentile(numerical_data_test, 25, axis=1).astype('float32')
+                    
+                    X_train['row_q75'] = np.percentile(numerical_data_train, 75, axis=1).astype('float32')
+                    X_test['row_q75'] = np.percentile(numerical_data_test, 75, axis=1).astype('float32')
+                    
+                    X_train['row_iqr'] = (X_train['row_q75'] - X_train['row_q25']).astype('float32')
+                    X_test['row_iqr'] = (X_test['row_q75'] - X_test['row_q25']).astype('float32')
                     
                     # Row kurtosis (simplified)
                     row_mean_train = X_train['row_mean'].values.reshape(-1, 1)
@@ -932,7 +963,21 @@ class CTRFeatureEngineer:
                     X_train['row_nonzero_count'] = np.sum(numerical_data_train != 0, axis=1).astype('float32')
                     X_test['row_nonzero_count'] = np.sum(numerical_data_test != 0, axis=1).astype('float32')
                     
-                    advanced_features = ['row_range', 'row_kurtosis', 'row_zero_count', 'row_nonzero_count']
+                    # Row variance and coefficient of variation
+                    X_train['row_var'] = np.var(numerical_data_train, axis=1).astype('float32')
+                    X_test['row_var'] = np.var(numerical_data_test, axis=1).astype('float32')
+                    
+                    # Coefficient of variation (avoid division by zero)
+                    mean_nonzero_train = np.where(X_train['row_mean'] == 0, 1e-8, X_train['row_mean'])
+                    mean_nonzero_test = np.where(X_test['row_mean'] == 0, 1e-8, X_test['row_mean'])
+                    
+                    X_train['row_cv'] = (X_train['row_std'] / mean_nonzero_train).astype('float32')
+                    X_test['row_cv'] = (X_test['row_std'] / mean_nonzero_test).astype('float32')
+                    
+                    advanced_features = [
+                        'row_range', 'row_q25', 'row_q75', 'row_iqr', 'row_kurtosis', 
+                        'row_zero_count', 'row_nonzero_count', 'row_var', 'row_cv'
+                    ]
                     self.statistical_features.extend(advanced_features)
                     self.generated_features.extend(advanced_features)
                     
@@ -959,7 +1004,8 @@ class CTRFeatureEngineer:
                 return X_train, X_test
             
             # Select categorical features for frequency encoding
-            categorical_for_freq = [col for col in self.categorical_features if col in X_train.columns][:8]
+            categorical_for_freq = [col for col in self.categorical_features if col in X_train.columns][:10]
+            min_frequency = self.config.FEATURE_ENGINEERING_CONFIG.get('min_frequency', 2)
             
             for col in categorical_for_freq:
                 try:
@@ -994,6 +1040,14 @@ class CTRFeatureEngineer:
                     self.frequency_features.append(rel_freq_col_name)
                     self.generated_features.append(rel_freq_col_name)
                     
+                    # Rare category indicator
+                    rare_col_name = f"rare_{col}"
+                    X_train[rare_col_name] = (X_train[freq_col_name] <= min_frequency).astype('float32')
+                    X_test[rare_col_name] = (X_test[freq_col_name] <= min_frequency).astype('float32')
+                    
+                    self.frequency_features.append(rare_col_name)
+                    self.generated_features.append(rare_col_name)
+                    
                 except Exception as e:
                     logger.warning(f"Frequency encoding for {col} failed: {e}")
                     continue
@@ -1016,7 +1070,7 @@ class CTRFeatureEngineer:
                 return X_train, X_test
             
             # Select top numerical features for polynomial transformation
-            numerical_for_poly = [col for col in self.numerical_features if col in X_train.columns][:10]
+            numerical_for_poly = [col for col in self.numerical_features if col in X_train.columns][:12]
             
             for col in numerical_for_poly:
                 try:
@@ -1033,7 +1087,7 @@ class CTRFeatureEngineer:
                     self.generated_features.append(quad_col_name)
                     
                     # Cubic features (for selected features)
-                    if col in numerical_for_poly[:5]:  # Only for top 5 features
+                    if col in numerical_for_poly[:6]:  # Only for top 6 features
                         cubic_col_name = f"poly3_{col}"
                         X_train[cubic_col_name] = (X_train[col] ** 3).astype('float32')
                         X_test[cubic_col_name] = (X_test[col] ** 3).astype('float32')
@@ -1082,11 +1136,11 @@ class CTRFeatureEngineer:
                 return X_train, X_test
             
             # Identify important features for cross-features
-            important_numerical = [col for col in self.numerical_features if col in X_train.columns][:8]
-            important_categorical = [col for col in self.categorical_features if col in X_train.columns][:8]
+            important_numerical = [col for col in self.numerical_features if col in X_train.columns][:10]
+            important_categorical = [col for col in self.categorical_features if col in X_train.columns][:10]
             
             cross_count = 0
-            max_cross_features = 40
+            max_cross_features = 60
             
             # Numerical cross features (ratios and differences)
             for i, feat1 in enumerate(important_numerical):
@@ -1120,11 +1174,11 @@ class CTRFeatureEngineer:
                         continue
             
             # Categorical group statistics
-            for cat_col in important_categorical[:5]:
+            for cat_col in important_categorical[:6]:
                 if cross_count >= max_cross_features:
                     break
                     
-                for num_col in important_numerical[:4]:
+                for num_col in important_numerical[:5]:
                     if cross_count >= max_cross_features:
                         break
                     
@@ -1143,9 +1197,16 @@ class CTRFeatureEngineer:
                         X_train[group_std_name] = X_train[cat_col].map(group_stds).fillna(X_train[num_col].std()).astype('float32')
                         X_test[group_std_name] = X_test[cat_col].map(group_stds).fillna(X_train[num_col].std()).astype('float32')
                         
-                        self.cross_features.extend([group_mean_name, group_std_name])
-                        self.generated_features.extend([group_mean_name, group_std_name])
-                        cross_count += 2
+                        # Group median
+                        group_median_name = f"group_median_{cat_col}_{num_col}"
+                        group_medians = X_train.groupby(cat_col)[num_col].median().to_dict()
+                        
+                        X_train[group_median_name] = X_train[cat_col].map(group_medians).fillna(X_train[num_col].median()).astype('float32')
+                        X_test[group_median_name] = X_test[cat_col].map(group_medians).fillna(X_train[num_col].median()).astype('float32')
+                        
+                        self.cross_features.extend([group_mean_name, group_std_name, group_median_name])
+                        self.generated_features.extend([group_mean_name, group_std_name, group_median_name])
+                        cross_count += 3
                         
                     except Exception as e:
                         logger.warning(f"Group statistics {cat_col} x {num_col} failed: {e}")
@@ -1155,6 +1216,159 @@ class CTRFeatureEngineer:
             
         except Exception as e:
             logger.error(f"Cross feature creation failed: {e}")
+        
+        return X_train, X_test
+    
+    def _create_binning_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Binning feature creation"""
+        logger.info("Binning feature creation started")
+        
+        try:
+            memory_status = self.memory_monitor.get_memory_status()
+            if memory_status['should_simplify']:
+                logger.warning("Skipping binning features due to memory constraints")
+                return X_train, X_test
+            
+            # Select numerical features for binning
+            numerical_for_binning = [col for col in self.numerical_features if col in X_train.columns][:15]
+            n_bins = self.config.FEATURE_ENGINEERING_CONFIG.get('n_bins', 20)
+            binning_strategy = self.config.FEATURE_ENGINEERING_CONFIG.get('binning_strategy', 'quantile')
+            
+            for col in numerical_for_binning:
+                try:
+                    if X_train[col].nunique() <= 5:
+                        continue
+                    
+                    if binning_strategy == 'quantile':
+                        # Quantile-based binning
+                        bins = np.percentile(X_train[col], np.linspace(0, 100, n_bins + 1))
+                    else:
+                        # Equal-width binning
+                        min_val, max_val = X_train[col].min(), X_train[col].max()
+                        bins = np.linspace(min_val, max_val, n_bins + 1)
+                    
+                    bins = np.unique(bins)
+                    
+                    if len(bins) > 1:
+                        binned_name = f"binned_{col}"
+                        X_train[binned_name] = pd.cut(X_train[col], bins=bins, labels=False, duplicates='drop').astype('float32')
+                        X_test[binned_name] = pd.cut(X_test[col], bins=bins, labels=False, duplicates='drop').astype('float32')
+                        
+                        X_train[binned_name] = X_train[binned_name].fillna(-1).astype('float32')
+                        X_test[binned_name] = X_test[binned_name].fillna(-1).astype('float32')
+                        
+                        self.binning_features.append(binned_name)
+                        self.generated_features.append(binned_name)
+                    
+                except Exception as e:
+                    logger.warning(f"Binning for {col} failed: {e}")
+                    continue
+            
+            logger.info(f"Binning feature creation completed: {len(self.binning_features)} features created")
+            
+        except Exception as e:
+            logger.error(f"Binning feature creation failed: {e}")
+        
+        return X_train, X_test
+    
+    def _create_rank_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Rank feature creation"""
+        logger.info("Rank feature creation started")
+        
+        try:
+            memory_status = self.memory_monitor.get_memory_status()
+            if memory_status['should_simplify']:
+                logger.warning("Skipping rank features due to memory constraints")
+                return X_train, X_test
+            
+            # Select numerical features for ranking
+            numerical_for_rank = [col for col in self.numerical_features if col in X_train.columns][:10]
+            
+            for col in numerical_for_rank:
+                try:
+                    # Skip if feature has very low variance
+                    if X_train[col].std() <= 1e-8:
+                        continue
+                    
+                    # Rank transformation
+                    rank_col_name = f"rank_{col}"
+                    rank_values = X_train[col].rank(pct=True).astype('float32')
+                    
+                    # For test data, approximate rank based on training data percentiles
+                    train_percentiles = np.percentile(X_train[col], np.arange(0, 101))
+                    test_ranks = np.searchsorted(train_percentiles, X_test[col]) / 100.0
+                    
+                    X_train[rank_col_name] = rank_values
+                    X_test[rank_col_name] = test_ranks.astype('float32')
+                    
+                    self.rank_features.append(rank_col_name)
+                    self.generated_features.append(rank_col_name)
+                    
+                except Exception as e:
+                    logger.warning(f"Rank transformation for {col} failed: {e}")
+                    continue
+            
+            logger.info(f"Rank feature creation completed: {len(self.rank_features)} features created")
+            
+        except Exception as e:
+            logger.error(f"Rank feature creation failed: {e}")
+        
+        return X_train, X_test
+    
+    def _create_ratio_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Ratio feature creation"""
+        logger.info("Ratio feature creation started")
+        
+        try:
+            memory_status = self.memory_monitor.get_memory_status()
+            if memory_status['should_simplify']:
+                logger.warning("Skipping ratio features due to memory constraints")
+                return X_train, X_test
+            
+            # Select numerical features for ratio calculation
+            numerical_for_ratio = [col for col in self.numerical_features if col in X_train.columns][:8]
+            
+            ratio_count = 0
+            max_ratio_features = 30
+            
+            for i, feat1 in enumerate(numerical_for_ratio):
+                if ratio_count >= max_ratio_features:
+                    break
+                    
+                for feat2 in numerical_for_ratio[i+1:]:
+                    if ratio_count >= max_ratio_features:
+                        break
+                    
+                    try:
+                        # Create ratio with safe division
+                        ratio_name = f"ratio_{feat1}_{feat2}"
+                        
+                        # Safe division (avoid division by zero)
+                        denominator_train = X_train[feat2].replace(0, 1e-8)
+                        denominator_test = X_test[feat2].replace(0, 1e-8)
+                        
+                        ratio_train = X_train[feat1] / denominator_train
+                        ratio_test = X_test[feat1] / denominator_test
+                        
+                        # Clip extreme values
+                        ratio_train = np.clip(ratio_train, -1e6, 1e6)
+                        ratio_test = np.clip(ratio_test, -1e6, 1e6)
+                        
+                        X_train[ratio_name] = ratio_train.astype('float32')
+                        X_test[ratio_name] = ratio_test.astype('float32')
+                        
+                        self.ratio_features.append(ratio_name)
+                        self.generated_features.append(ratio_name)
+                        ratio_count += 1
+                        
+                    except Exception as e:
+                        logger.warning(f"Ratio feature {feat1}/{feat2} failed: {e}")
+                        continue
+            
+            logger.info(f"Ratio feature creation completed: {len(self.ratio_features)} features created")
+            
+        except Exception as e:
+            logger.error(f"Ratio feature creation failed: {e}")
         
         return X_train, X_test
     
@@ -1206,7 +1420,7 @@ class CTRFeatureEngineer:
         
         try:
             # Select numerical features for transformation
-            numerical_for_transform = [col for col in self.numerical_features if col in X_train.columns][:8]
+            numerical_for_transform = [col for col in self.numerical_features if col in X_train.columns][:10]
             
             for col in numerical_for_transform:
                 try:
@@ -1215,7 +1429,7 @@ class CTRFeatureEngineer:
                         continue
                     
                     # Skip if feature name suggests it's already a transformation
-                    if any(prefix in col for prefix in ['log_', 'sqrt_', 'poly', 'interact', 'target_enc']):
+                    if any(prefix in col for prefix in ['log_', 'sqrt_', 'poly', 'interact', 'target_enc', 'rank_', 'ratio_', 'binned_']):
                         continue
                     
                     # Robust scaling for outlier handling
@@ -1231,23 +1445,6 @@ class CTRFeatureEngineer:
                         X_test[robust_col_name] = ((X_test[col] - median_val) / mad_val).astype('float32')
                         
                         self.generated_features.append(robust_col_name)
-                        
-                    except Exception:
-                        pass
-                    
-                    # Rank transformation
-                    try:
-                        rank_col_name = f"rank_{col}"
-                        rank_values = X_train[col].rank(pct=True).astype('float32')
-                        
-                        # For test data, approximate rank based on training data percentiles
-                        train_percentiles = np.percentile(X_train[col], np.arange(0, 101))
-                        test_ranks = np.searchsorted(train_percentiles, X_test[col]) / 100.0
-                        
-                        X_train[rank_col_name] = rank_values
-                        X_test[rank_col_name] = test_ranks.astype('float32')
-                        
-                        self.generated_features.append(rank_col_name)
                         
                     except Exception:
                         pass
@@ -1387,7 +1584,10 @@ class CTRFeatureEngineer:
                 'statistical': len(self.statistical_features),
                 'frequency': len(self.frequency_features),
                 'polynomial': len(self.polynomial_features),
-                'cross': len(self.cross_features)
+                'cross': len(self.cross_features),
+                'binning': len(self.binning_features),
+                'rank': len(self.rank_features),
+                'ratio': len(self.ratio_features)
             }
             
             self.processing_stats.update({
@@ -1409,6 +1609,9 @@ class CTRFeatureEngineer:
             logger.info(f"  - Frequency features: {len(self.frequency_features)}")
             logger.info(f"  - Polynomial features: {len(self.polynomial_features)}")
             logger.info(f"  - Cross features: {len(self.cross_features)}")
+            logger.info(f"  - Binning features: {len(self.binning_features)}")
+            logger.info(f"  - Rank features: {len(self.rank_features)}")
+            logger.info(f"  - Ratio features: {len(self.ratio_features)}")
             
             self.memory_monitor.force_memory_cleanup()
             

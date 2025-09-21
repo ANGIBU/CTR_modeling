@@ -117,9 +117,9 @@ class MemoryMonitor:
     
     def __init__(self):
         self.memory_thresholds = {
-            'warning': 40.0,
-            'critical': 46.0,
-            'abort': 52.0
+            'warning': 45.0,
+            'critical': 50.0,
+            'abort': 55.0
         }
     
     def get_memory_usage(self) -> float:
@@ -134,14 +134,18 @@ class MemoryMonitor:
     
     def get_memory_status(self) -> Dict[str, Any]:
         """Get memory status"""
+        if not PSUTIL_AVAILABLE:
+            return {
+                'usage_gb': 2.0,
+                'available_gb': 40.0,
+                'level': 'normal',
+                'should_cleanup': False
+            }
+        
         try:
-            if PSUTIL_AVAILABLE:
-                vm = psutil.virtual_memory()
-                usage_gb = (vm.total - vm.available) / (1024**3)
-                available_gb = vm.available / (1024**3)
-            else:
-                usage_gb = 20.0
-                available_gb = 40.0
+            vm = psutil.virtual_memory()
+            usage_gb = (vm.total - vm.available) / (1024**3)
+            available_gb = vm.available / (1024**3)
             
             if usage_gb >= self.memory_thresholds['abort']:
                 level = "abort"
@@ -236,7 +240,7 @@ class CTRCalibrator:
                 logger.info("Platt Scaling calibration training started")
                 
                 from sklearn.linear_model import LogisticRegression
-                platt_model = LogisticRegression(random_state=42, max_iter=1000)
+                platt_model = LogisticRegression(random_state=42, max_iter=2000, C=0.8)
                 platt_model.fit(y_pred_proba.reshape(-1, 1), y_true)
                 
                 self.calibration_models['platt_scaling'] = platt_model
@@ -285,11 +289,11 @@ class CTRCalibrator:
                 scaled_proba = 1 / (1 + np.exp(-scaled_logits))
                 scaled_proba = np.clip(scaled_proba, 1e-15, 1 - 1e-15)
                 
-                # Combined loss: log loss + CTR bias penalty
+                # Combined loss: log loss + CTR bias penalty (tuned)
                 log_loss = -np.mean(y_true * np.log(scaled_proba) + (1 - y_true) * np.log(1 - scaled_proba))
                 ctr_bias = abs(scaled_proba.mean() - y_true.mean())
                 
-                return log_loss + ctr_bias * 10.0
+                return log_loss + ctr_bias * 12.0  # Increased penalty weight
             
             y_pred_logits = np.log(y_pred_proba / (1 - y_pred_proba + 1e-15) + 1e-15)
             
@@ -298,7 +302,7 @@ class CTRCalibrator:
                 lambda params: temperature_loss(params, y_true, y_pred_logits),
                 x0=[1.0, 0.0],
                 method='L-BFGS-B',
-                bounds=[(0.1, 10.0), (-5.0, 5.0)]
+                bounds=[(0.1, 8.0), (-3.0, 3.0)]  # Adjusted bounds
             )
             
             optimal_temperature, optimal_bias = result.x
@@ -353,7 +357,7 @@ class CTRCalibrator:
                     log_loss = -np.mean(y_true * np.log(beta_proba) + (1 - y_true) * np.log(1 - beta_proba))
                     
                     # Add regularization to prevent extreme parameters
-                    reg_term = 0.01 * (np.log(a)**2 + np.log(b)**2)
+                    reg_term = 0.008 * (np.log(a)**2 + np.log(b)**2)  # Reduced regularization
                     
                     return log_loss + reg_term
                     
@@ -364,15 +368,15 @@ class CTRCalibrator:
             best_loss = float('inf')
             best_params = None
             
-            for _ in range(3):
-                initial_params = np.random.normal(0, 0.5, 2)
+            for _ in range(5):  # Increased attempts
+                initial_params = np.random.normal(0, 0.3, 2)
                 
                 try:
                     result = minimize(
                         lambda params: beta_loss(params, y_true, y_pred_proba),
                         x0=initial_params,
                         method='L-BFGS-B',
-                        bounds=[(-3, 3), (-3, 3)]
+                        bounds=[(-2.5, 2.5), (-2.5, 2.5)]  # Adjusted bounds
                     )
                     
                     if result.fun < best_loss:
@@ -428,7 +432,7 @@ class CTRCalibrator:
             # Train ensemble calibrator
             if SKLEARN_AVAILABLE:
                 from sklearn.linear_model import LogisticRegression
-                ensemble_calibrator = LogisticRegression(random_state=42, max_iter=1000)
+                ensemble_calibrator = LogisticRegression(random_state=42, max_iter=2000, C=1.2)
                 ensemble_calibrator.fit(predictions_matrix, y_true)
                 
                 self.ensemble_calibrators['logistic'] = ensemble_calibrator
@@ -478,17 +482,17 @@ class CTRCalibrator:
     def _calculate_calibration_score(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
         """Calculate calibration score with multiple criteria"""
         try:
-            # CTR alignment
+            # CTR alignment (tuned weights)
             predicted_ctr = np.mean(y_pred_proba)
             actual_ctr = np.mean(y_true)
             ctr_error = abs(predicted_ctr - actual_ctr)
-            ctr_score = max(0, 1 - ctr_error * 2000)  # More sensitive to CTR errors
+            ctr_score = max(0, 1 - ctr_error * 2500)  # More sensitive to CTR errors
             
             # Brier score for calibration
             if SKLEARN_AVAILABLE:
                 from sklearn.metrics import brier_score_loss
                 brier_score = brier_score_loss(y_true, y_pred_proba)
-                brier_score_normalized = max(0, 1 - brier_score * 5)
+                brier_score_normalized = max(0, 1 - brier_score * 6)  # Adjusted factor
             else:
                 brier_score_normalized = 0.5
             
@@ -509,12 +513,12 @@ class CTRCalibrator:
                         avg_confidence_in_bin = y_pred_proba[in_bin].mean()
                         reliability_error += np.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
                 
-                reliability_score = max(0, 1 - reliability_error * 20)
+                reliability_score = max(0, 1 - reliability_error * 25)
             except Exception:
                 reliability_score = 0.5
             
             # Combined score with emphasis on CTR alignment
-            combined_score = (0.5 * ctr_score + 0.3 * brier_score_normalized + 0.2 * reliability_score)
+            combined_score = (0.55 * ctr_score + 0.25 * brier_score_normalized + 0.2 * reliability_score)
             
             return float(np.clip(combined_score, 0.0, 1.0))
             
@@ -634,7 +638,7 @@ class BaseModel(ABC):
         self.feature_names = None
         self.calibrator = None
         self.is_calibrated = False
-        self.prediction_diversity_threshold = 3000
+        self.prediction_diversity_threshold = 2500
         self.calibration_applied = True
         self.memory_monitor = MemoryMonitor()
     
@@ -706,8 +710,8 @@ class BaseModel(ABC):
                 return predictions
             
             unique_count = len(np.unique(predictions))
-            if unique_count < len(predictions) * 0.08:  # More sensitive threshold
-                noise_scale = max(predictions.std() * 0.003, 1e-7)
+            if unique_count < len(predictions) * 0.1:  # More sensitive threshold
+                noise_scale = max(predictions.std() * 0.002, 1e-7)
                 noise = np.random.normal(0, noise_scale, len(predictions))
                 predictions = predictions + noise
                 predictions = np.clip(predictions, 1e-15, 1 - 1e-15)
@@ -851,41 +855,41 @@ class LightGBMModel(BaseModel):
             'objective': 'binary',
             'metric': 'binary_logloss',
             'boosting_type': 'gbdt',
-            'num_leaves': 127,
-            'max_depth': 10,
-            'learning_rate': 0.008,
-            'feature_fraction': 0.85,
-            'bagging_fraction': 0.85,
-            'bagging_freq': 7,
+            'num_leaves': 63,
+            'max_depth': 8,
+            'learning_rate': 0.01,
+            'feature_fraction': 0.88,
+            'bagging_fraction': 0.88,
+            'bagging_freq': 5,
             'verbose': -1,
-            'n_estimators': 12000,
-            'early_stopping_rounds': 350,
+            'n_estimators': 8000,
+            'early_stopping_rounds': 250,
             'random_state': 42,
             'force_col_wise': True,
-            'min_child_samples': 80,
-            'reg_alpha': 0.15,
-            'reg_lambda': 0.25,
-            'scale_pos_weight': 49.5,
-            'min_gain_to_split': 0.015,
-            'max_cat_threshold': 48,
-            'cat_smooth': 12.0,
-            'cat_l2': 12.0
+            'min_child_samples': 50,
+            'reg_alpha': 0.1,
+            'reg_lambda': 0.2,
+            'scale_pos_weight': 52.3,
+            'min_gain_to_split': 0.01,
+            'max_cat_threshold': 32,
+            'cat_smooth': 8.0,
+            'cat_l2': 8.0
         }
         
         if params:
             default_params.update(params)
         
         super().__init__("LightGBM", default_params)
-        self.prediction_diversity_threshold = 3500
+        self.prediction_diversity_threshold = 2800
     
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         self.params.update({
-            'num_leaves': 63,
-            'max_depth': 8,
-            'n_estimators': 6000,
-            'min_child_samples': 120,
-            'early_stopping_rounds': 250
+            'num_leaves': 31,
+            'max_depth': 6,
+            'n_estimators': 4000,
+            'min_child_samples': 80,
+            'early_stopping_rounds': 150
         })
         logger.info(f"{self.name}: Parameters simplified for memory conservation")
     
@@ -918,7 +922,7 @@ class LightGBMModel(BaseModel):
                 valid_sets.append(valid_data)
                 valid_names.append('valid')
             
-            early_stopping = self.params.get('early_stopping_rounds', 350)
+            early_stopping = self.params.get('early_stopping_rounds', 250)
             
             self.model = lgb.train(
                 self.params,
@@ -978,23 +982,23 @@ class XGBoostModel(BaseModel):
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
             'tree_method': 'hist',
-            'max_depth': 9,
-            'learning_rate': 0.006,
-            'subsample': 0.85,
-            'colsample_bytree': 0.85,
-            'colsample_bylevel': 0.85,
-            'min_child_weight': 7,
-            'reg_alpha': 0.12,
-            'reg_lambda': 0.25,
-            'scale_pos_weight': 49.5,
+            'max_depth': 7,
+            'learning_rate': 0.008,
+            'subsample': 0.88,
+            'colsample_bytree': 0.88,
+            'colsample_bylevel': 0.88,
+            'min_child_weight': 5,
+            'reg_alpha': 0.08,
+            'reg_lambda': 0.2,
+            'scale_pos_weight': 52.3,
             'random_state': 42,
-            'n_estimators': 15000,
-            'early_stopping_rounds': 350,
+            'n_estimators': 10000,
+            'early_stopping_rounds': 250,
             'max_bin': 255,
             'nthread': 12,
             'grow_policy': 'lossguide',
-            'gamma': 0.08,
-            'max_leaves': 1023
+            'gamma': 0.05,
+            'max_leaves': 511
         }
         
         if rtx_4060ti_detected and TORCH_AVAILABLE:
@@ -1023,18 +1027,18 @@ class XGBoostModel(BaseModel):
             default_params.update(params)
         
         super().__init__("XGBoost", default_params)
-        self.prediction_diversity_threshold = 3500
+        self.prediction_diversity_threshold = 2800
     
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         self.params.update({
-            'max_depth': 7,
-            'n_estimators': 4000,
-            'min_child_weight': 12,
+            'max_depth': 5,
+            'n_estimators': 3000,
+            'min_child_weight': 8,
             'nthread': 8,
             'tree_method': 'hist',
-            'early_stopping_rounds': 200,
-            'max_leaves': 255,
+            'early_stopping_rounds': 150,
+            'max_leaves': 127,
             'max_bin': 128,
             'colsample_bytree': 0.8,
             'subsample': 0.8
@@ -1168,7 +1172,7 @@ class XGBoostModel(BaseModel):
                 free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
                 free_memory_gb = free_memory / (1024**3)
                 
-                if free_memory_gb < 8.0:  # Need at least 8GB for training
+                if free_memory_gb < 10.0:  # Need at least 10GB for training
                     logger.warning(f"{self.name}: Insufficient GPU memory ({free_memory_gb:.2f}GB), switching to CPU")
                     return False
             
@@ -1195,7 +1199,7 @@ class XGBoostModel(BaseModel):
                 )
                 evals.append((dval, 'valid'))
             
-            early_stopping = self.params.get('early_stopping_rounds', 350)
+            early_stopping = self.params.get('early_stopping_rounds', 250)
             
             logger.info(f"{self.name}: Starting XGBoost GPU training")
             self.model = xgb.train(
@@ -1259,7 +1263,7 @@ class XGBoostModel(BaseModel):
                 )
                 evals.append((dval, 'valid'))
             
-            early_stopping = self.params.get('early_stopping_rounds', 350)
+            early_stopping = self.params.get('early_stopping_rounds', 250)
             
             logger.info(f"{self.name}: Starting XGBoost CPU training")
             self.model = xgb.train(
@@ -1343,10 +1347,10 @@ class LogisticModel(BaseModel):
             raise ImportError("Scikit-learn is not installed.")
         
         default_params = {
-            'C': 0.8,
+            'C': 1.2,
             'penalty': 'l2',
             'solver': 'lbfgs',
-            'max_iter': 2000,
+            'max_iter': 3000,
             'random_state': 42,
             'class_weight': 'balanced',
             'n_jobs': 12
@@ -1357,13 +1361,13 @@ class LogisticModel(BaseModel):
         
         super().__init__("LogisticRegression", default_params)
         self.model = LogisticRegression(**self.params)
-        self.prediction_diversity_threshold = 3500
+        self.prediction_diversity_threshold = 2800
     
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         self.params.update({
             'C': 1.0,
-            'max_iter': 1000,
+            'max_iter': 1500,
             'n_jobs': 8
         })
         self.model = LogisticRegression(**self.params)
@@ -1384,8 +1388,8 @@ class LogisticModel(BaseModel):
                     X_train_clean[col] = X_train_clean[col].astype('float32')
             
             # Sample for large datasets
-            if len(X_train_clean) > 5000000:
-                sample_size = 5000000
+            if len(X_train_clean) > 6000000:
+                sample_size = 6000000
                 logger.info(f"Large data detected, applying sampling ({len(X_train_clean):,} -> {sample_size:,})")
                 
                 sample_indices = np.random.choice(len(X_train_clean), size=sample_size, replace=False)
