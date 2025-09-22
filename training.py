@@ -36,11 +36,12 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 class LargeDataMemoryTracker:
-    """Memory tracking for large dataset processing"""
+    """Memory tracking for large dataset processing with quick mode support"""
     
     def __init__(self):
         self.rtx_4060ti_optimized = False
         self.optimization_logged = False
+        self.quick_mode = False
         
         if TORCH_AVAILABLE and torch.cuda.is_available():
             try:
@@ -49,6 +50,12 @@ class LargeDataMemoryTracker:
                     self.rtx_4060ti_optimized = True
             except Exception:
                 pass
+    
+    def set_quick_mode(self, enabled: bool):
+        """Enable quick mode with relaxed memory management"""
+        self.quick_mode = enabled
+        if enabled:
+            logger.info("Memory tracker set to quick mode - relaxed monitoring")
     
     def get_memory_usage(self) -> float:
         """Get current memory usage in GB"""
@@ -130,6 +137,14 @@ class HyperparameterOptimizer:
         self.best_params_cache = {}
         self.gpu_available = TORCH_AVAILABLE and torch.cuda.is_available()
         self.optimization_logged = False
+        self.quick_mode = False
+        
+    def set_quick_mode(self, enabled: bool):
+        """Enable quick mode for faster optimization"""
+        self.quick_mode = enabled
+        self.memory_tracker.set_quick_mode(enabled)
+        if enabled:
+            logger.info("Hyperparameter optimizer set to quick mode")
         
     def optimize_hyperparameters(self, 
                                 model_type: str,
@@ -145,8 +160,14 @@ class HyperparameterOptimizer:
             logger.warning("Optuna not available, using default parameters")
             return self._get_default_params(model_type)
         
-        logger.info(f"Hyperparameter optimization started: {model_type}")
-        logger.info(f"Trials: {n_trials}, Timeout: {timeout}s")
+        # Quick mode adjustments
+        if self.quick_mode:
+            n_trials = min(n_trials, 3)
+            timeout = min(timeout, 30)
+            logger.info(f"Quick mode hyperparameter optimization: {n_trials} trials, {timeout}s timeout")
+        else:
+            logger.info(f"Hyperparameter optimization started: {model_type}")
+            logger.info(f"Trials: {n_trials}, Timeout: {timeout}s")
         
         if not self.optimization_logged:
             self.memory_tracker.optimize_gpu_memory()
@@ -155,7 +176,7 @@ class HyperparameterOptimizer:
         try:
             study_name = f"{model_type}_optimization_{int(time.time())}"
             
-            if self.gpu_available:
+            if self.gpu_available and not self.quick_mode:
                 sampler = optuna.samplers.TPESampler(
                     multivariate=True,
                     group=True,
@@ -174,7 +195,16 @@ class HyperparameterOptimizer:
                 model_type, X_train, y_train, X_val, y_val
             )
             
-            if self.gpu_available and model_type.lower() in ['xgboost', 'lightgbm']:
+            # Quick mode uses simplified optimization
+            if self.quick_mode:
+                study.optimize(
+                    objective,
+                    n_trials=n_trials,
+                    timeout=timeout,
+                    n_jobs=1,
+                    show_progress_bar=False
+                )
+            elif self.gpu_available and model_type.lower() in ['xgboost', 'lightgbm']:
                 study.optimize(
                     objective,
                     n_trials=n_trials,
@@ -231,7 +261,7 @@ class HyperparameterOptimizer:
                 else:
                     return 0.0
                 
-                model = ModelFactory.create_model(model_type, params=params)
+                model = ModelFactory.create_model(model_type, params=params, quick_mode=self.quick_mode)
                 model.fit(X_train, y_train, X_val, y_val)
                 
                 if X_val is not None and y_val is not None:
@@ -263,6 +293,19 @@ class HyperparameterOptimizer:
     
     def _suggest_lightgbm_params(self, trial) -> Dict[str, Any]:
         """Suggest LightGBM parameters"""
+        if self.quick_mode:
+            return {
+                'objective': 'binary',
+                'metric': 'binary_logloss',
+                'boosting_type': 'gbdt',
+                'num_leaves': 15,
+                'max_depth': 4,
+                'learning_rate': 0.1,
+                'n_estimators': 50,
+                'verbosity': -1,
+                'random_state': 42
+            }
+        
         return {
             'objective': 'binary',
             'metric': 'binary_logloss',
@@ -285,6 +328,17 @@ class HyperparameterOptimizer:
     
     def _suggest_xgboost_params(self, trial) -> Dict[str, Any]:
         """Suggest XGBoost parameters"""
+        if self.quick_mode:
+            return {
+                'objective': 'binary:logistic',
+                'eval_metric': 'logloss',
+                'max_depth': 3,
+                'learning_rate': 0.1,
+                'n_estimators': 50,
+                'tree_method': 'hist',
+                'random_state': 42
+            }
+        
         params = {
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
@@ -316,6 +370,15 @@ class HyperparameterOptimizer:
     
     def _suggest_logistic_params(self, trial) -> Dict[str, Any]:
         """Suggest Logistic Regression parameters"""
+        if self.quick_mode:
+            return {
+                'C': 1.0,
+                'penalty': 'l2',
+                'solver': 'lbfgs',
+                'max_iter': 100,
+                'random_state': 42
+            }
+        
         return {
             'C': trial.suggest_float('C', 0.1, 10.0),
             'penalty': trial.suggest_categorical('penalty', ['l1', 'l2']),
@@ -338,6 +401,19 @@ class HyperparameterOptimizer:
     def _get_default_params(self, model_type: str) -> Dict[str, Any]:
         """Get default parameters by model type"""
         if model_type.lower() == 'lightgbm':
+            if self.quick_mode:
+                return {
+                    'objective': 'binary',
+                    'metric': 'binary_logloss',
+                    'boosting_type': 'gbdt',
+                    'num_leaves': 15,
+                    'max_depth': 4,
+                    'learning_rate': 0.1,
+                    'n_estimators': 50,
+                    'verbosity': -1,
+                    'random_state': 42
+                }
+            
             return {
                 'objective': 'binary',
                 'metric': 'binary_logloss',
@@ -359,6 +435,17 @@ class HyperparameterOptimizer:
             }
         
         elif model_type.lower() == 'xgboost':
+            if self.quick_mode:
+                return {
+                    'objective': 'binary:logistic',
+                    'eval_metric': 'logloss',
+                    'max_depth': 3,
+                    'learning_rate': 0.1,
+                    'n_estimators': 50,
+                    'tree_method': 'hist',
+                    'random_state': 42
+                }
+            
             params = {
                 'objective': 'binary:logistic',
                 'eval_metric': 'logloss',
@@ -388,8 +475,19 @@ class HyperparameterOptimizer:
                         'gpu_id': 0,
                         'predictor': 'gpu_predictor'
                     })
+            
+            return params
         
         elif model_type.lower() == 'logistic':
+            if self.quick_mode:
+                return {
+                    'C': 1.0,
+                    'penalty': 'l2',
+                    'solver': 'lbfgs',
+                    'max_iter': 100,
+                    'random_state': 42
+                }
+            
             return {
                 'penalty': 'l2',
                 'C': 1.0,
@@ -398,7 +496,7 @@ class HyperparameterOptimizer:
                 'random_state': 42
             }
         
-        return params
+        return {}
     
     def get_optimization_summary(self) -> Dict[str, Any]:
         """Get optimization summary"""
@@ -413,7 +511,8 @@ class HyperparameterOptimizer:
                 for model, info in self.optimization_history.items()
             },
             'gpu_available': self.gpu_available,
-            'gpu_info': self.memory_tracker.get_gpu_memory_usage()
+            'gpu_info': self.memory_tracker.get_gpu_memory_usage(),
+            'quick_mode': self.quick_mode
         }
 
 class CTRModelTrainer:
@@ -430,7 +529,7 @@ class CTRModelTrainer:
         self.gpu_available = False
         self.parallel_training = False
         self.trainer_initialized = False
-        self.quick_mode = False  # Quick mode flag for 50-sample testing
+        self.quick_mode = False
         
         try:
             if TORCH_AVAILABLE and torch.cuda.is_available():
@@ -454,13 +553,11 @@ class CTRModelTrainer:
             logger.info("CPU training environment - Ryzen 5 5600X 6 cores 12 threads")
     
     def set_quick_mode(self, enabled: bool):
-        """
-        Enable or disable quick mode for rapid testing
-        
-        Args:
-            enabled: If True, use minimal training for speed (50 samples)
-        """
+        """Enable or disable quick mode for rapid testing"""
         self.quick_mode = enabled
+        self.memory_tracker.set_quick_mode(enabled)
+        self.hyperparameter_optimizer.set_quick_mode(enabled)
+        
         if enabled:
             logger.info("Trainer quick mode enabled - minimal hyperparameter tuning")
         else:
@@ -475,15 +572,12 @@ class CTRModelTrainer:
                           params: Optional[Dict[str, Any]] = None,
                           apply_calibration: bool = True,
                           optimize_hyperparameters: bool = True) -> BaseModel:
-        """
-        Model training with GPU optimization and hyperparameter tuning
-        Supports quick mode for rapid testing with minimal optimization
-        """
+        """Model training with GPU optimization and hyperparameter tuning"""
         
         # Override settings for quick mode
         if self.quick_mode:
-            optimize_hyperparameters = False  # Skip optimization for speed
-            apply_calibration = False         # Skip calibration for speed
+            optimize_hyperparameters = False
+            apply_calibration = False
             logger.info(f"{model_type} quick mode training - minimal optimization")
         else:
             logger.info(f"{model_type} full mode training - complete optimization")
@@ -500,7 +594,10 @@ class CTRModelTrainer:
             data_size_gb = (X_train.memory_usage(deep=True).sum() + y_train.memory_usage(deep=True)) / (1024**3)
             logger.info(f"Data size: {data_size_gb:.2f}GB, available memory: {available_memory:.2f}GB")
             
-            if available_memory < 3:
+            # More relaxed memory check for quick mode
+            memory_threshold = 1.0 if self.quick_mode else 3.0
+            
+            if available_memory < memory_threshold:
                 logger.warning(f"Low memory detected: {available_memory:.2f}GB available")
                 logger.info("Applying memory efficient processing")
                 X_train, y_train, X_val, y_val = self._apply_memory_efficient_sampling(
@@ -510,14 +607,13 @@ class CTRModelTrainer:
             if optimize_hyperparameters and params is None:
                 logger.info(f"Starting hyperparameter optimization for {model_type}")
                 
-                # Determine number of trials based on mode and available resources
                 if self.quick_mode:
-                    n_trials = 3  # Minimal trials for quick testing
-                    timeout = 30  # 30 seconds max for quick mode
+                    n_trials = 3
+                    timeout = 30
                     logger.info(f"Quick mode: Using {n_trials} trials with {timeout}s timeout")
                 else:
                     n_trials = self._calculate_optimal_trials(available_memory, gpu_memory)
-                    timeout = 1800  # 30 minutes max for full mode
+                    timeout = 1800
                 
                 optimized_params = self.hyperparameter_optimizer.optimize_hyperparameters(
                     model_type=model_type,
@@ -536,7 +632,6 @@ class CTRModelTrainer:
             if params:
                 params = self._validate_and_apply_params(model_type, params)
             else:
-                # Use quick mode parameters if in quick mode
                 if self.quick_mode:
                     params = self._get_quick_mode_params(model_type)
                     logger.info(f"Using quick mode parameters for {model_type}")
@@ -544,17 +639,15 @@ class CTRModelTrainer:
                     params = self.hyperparameter_optimizer._get_default_params(model_type)
             
             model_kwargs = {'params': params, 'quick_mode': self.quick_mode}
-            if model_type.lower() == 'deepctr':
-                model_kwargs['input_dim'] = X_train.shape[1]
             
             model = ModelFactory.create_model(model_type, **model_kwargs)
             
-            if self.gpu_available and model_type.lower() in ['xgboost', 'lightgbm']:
+            if self.gpu_available and model_type.lower() in ['xgboost', 'lightgbm'] and not self.quick_mode:
                 self.memory_tracker.optimize_gpu_memory()
             
             model.fit(X_train, y_train, X_val, y_val)
             
-            if apply_calibration and X_val is not None and y_val is not None:
+            if apply_calibration and X_val is not None and y_val is not None and not self.quick_mode:
                 current_memory = self.memory_tracker.get_available_memory()
                 if current_memory > 3:
                     self._apply_calibration(model, X_val, y_val)
@@ -567,19 +660,20 @@ class CTRModelTrainer:
             gpu_info_after = self.memory_tracker.get_gpu_memory_usage()
             
             logger.info(f"{model_type} model training complete (time taken: {training_time:.2f}s)")
-            logger.info(f"Memory usage: {memory_before:.2f}GB → {memory_after:.2f}GB")
+            logger.info(f"Memory usage: {memory_before:.2f}GB -> {memory_after:.2f}GB")
             
             if self.gpu_available:
                 gpu_before = gpu_info_before.get('memory_allocated', 0)
                 gpu_after = gpu_info_after.get('memory_allocated', 0)
-                logger.info(f"GPU memory utilization: {gpu_before:.1f}% → {gpu_after:.1f}%")
+                logger.info(f"GPU memory utilization: {gpu_before:.1f}% -> {gpu_after:.1f}%")
             
             self.trained_models[model_type] = {
                 'model': model,
                 'training_time': training_time,
                 'memory_usage': memory_after - memory_before,
                 'calibrated': apply_calibration and model.is_calibrated,
-                'gpu_used': self.gpu_available and model_type.lower() in ['xgboost', 'lightgbm']
+                'gpu_used': self.gpu_available and model_type.lower() in ['xgboost', 'lightgbm'],
+                'quick_mode': self.quick_mode
             }
             
             self.memory_tracker.force_cleanup()
@@ -592,24 +686,16 @@ class CTRModelTrainer:
             raise
     
     def _get_quick_mode_params(self, model_type: str) -> Dict[str, Any]:
-        """
-        Get simplified parameters for quick mode testing
-        
-        Args:
-            model_type: Type of model (lightgbm, xgboost, logistic)
-            
-        Returns:
-            Dictionary of quick mode parameters
-        """
+        """Get simplified parameters for quick mode testing"""
         if model_type.lower() == 'lightgbm':
             return {
                 'objective': 'binary',
                 'metric': 'binary_logloss',
                 'boosting_type': 'gbdt',
-                'num_leaves': 15,        # Reduced from 63
-                'max_depth': 4,          # Reduced from 8
-                'learning_rate': 0.1,    # Increased for faster convergence
-                'n_estimators': 50,      # Greatly reduced from 10000
+                'num_leaves': 15,
+                'max_depth': 4,
+                'learning_rate': 0.1,
+                'n_estimators': 50,
                 'verbosity': -1,
                 'random_state': 42,
                 'num_threads': 4
@@ -619,25 +705,23 @@ class CTRModelTrainer:
             params = {
                 'objective': 'binary:logistic',
                 'eval_metric': 'logloss',
-                'max_depth': 3,          # Reduced from 7
-                'learning_rate': 0.1,    # Increased for faster convergence
-                'n_estimators': 50,      # Greatly reduced from 10000
+                'max_depth': 3,
+                'learning_rate': 0.1,
+                'n_estimators': 50,
                 'random_state': 42,
                 'nthread': 4,
-                'tree_method': 'hist'    # Use CPU method for simplicity
+                'tree_method': 'hist'
             }
-            
-            # No GPU settings for quick mode to avoid complications
             return params
         
         elif model_type.lower() == 'logistic':
             return {
-                'C': 1.0,               # Default regularization
+                'C': 1.0,
                 'penalty': 'l2',
                 'solver': 'lbfgs',
-                'max_iter': 100,        # Reduced from 3000
+                'max_iter': 100,
                 'random_state': 42,
-                'n_jobs': 2             # Reduced from 12
+                'n_jobs': 2
             }
         
         else:
@@ -667,6 +751,10 @@ class CTRModelTrainer:
         try:
             current_size = len(X_train)
             
+            # More relaxed sampling for quick mode
+            if self.quick_mode:
+                return X_train, y_train, X_val, y_val
+            
             if available_memory < 2:
                 target_size = min(current_size, 3000000)
             elif available_memory < 5:
@@ -675,7 +763,7 @@ class CTRModelTrainer:
                 return X_train, y_train, X_val, y_val
             
             if current_size > target_size:
-                logger.info(f"Applying memory efficient sampling: {current_size:,} → {target_size:,}")
+                logger.info(f"Applying memory efficient sampling: {current_size:,} -> {target_size:,}")
                 
                 sample_indices = np.random.choice(current_size, size=target_size, replace=False)
                 X_train_sampled = X_train.iloc[sample_indices].reset_index(drop=True)
@@ -706,7 +794,7 @@ class CTRModelTrainer:
         """Validate and apply parameters"""
         try:
             if model_type.lower() == 'xgboost':
-                if self.gpu_available:
+                if self.gpu_available and not self.quick_mode:
                     gpu_info = self.memory_tracker.get_gpu_memory_usage()
                     if gpu_info['rtx_4060_ti_optimized']:
                         params.update({
@@ -824,7 +912,8 @@ class CTRModelTrainer:
             'training_environment': {
                 'gpu_available': self.gpu_available,
                 'parallel_training': self.parallel_training,
-                'rtx_4060_ti_optimized': self.memory_tracker.get_gpu_memory_usage().get('rtx_4060_ti_optimized', False)
+                'rtx_4060_ti_optimized': self.memory_tracker.get_gpu_memory_usage().get('rtx_4060_ti_optimized', False),
+                'quick_mode': self.quick_mode
             }
         }
 
@@ -836,7 +925,7 @@ class CTRTrainingPipeline:
         self.trainer = CTRModelTrainer(config)
         self.memory_tracker = LargeDataMemoryTracker()
         self.pipeline_initialized = False
-        self.quick_mode = False  # Quick mode flag for pipeline
+        self.quick_mode = False
         
         if not self.pipeline_initialized:
             self.memory_tracker.optimize_gpu_memory()
@@ -847,14 +936,10 @@ class CTRTrainingPipeline:
             self.pipeline_initialized = True
     
     def set_quick_mode(self, enabled: bool):
-        """
-        Enable or disable quick mode for the entire training pipeline
-        
-        Args:
-            enabled: If True, use quick mode for rapid testing
-        """
+        """Enable or disable quick mode for the entire training pipeline"""
         self.quick_mode = enabled
-        self.trainer.set_quick_mode(enabled)  # Propagate to trainer
+        self.trainer.set_quick_mode(enabled)
+        self.memory_tracker.set_quick_mode(enabled)
         
         if enabled:
             logger.info("Training pipeline set to quick mode - rapid testing with minimal optimization")
@@ -889,8 +974,8 @@ class CTRTrainingPipeline:
                 y_train=y_train,
                 X_val=X_val,
                 y_val=y_val,
-                apply_calibration=True,
-                optimize_hyperparameters=tune_hyperparameters
+                apply_calibration=not self.quick_mode,
+                optimize_hyperparameters=tune_hyperparameters and not self.quick_mode
             )
             
             execution_time = time.time() - start_time
@@ -900,10 +985,11 @@ class CTRTrainingPipeline:
                 'execution_time': execution_time,
                 'successful_models': list(trained_models.keys()),
                 'failed_models': [m for m in models_to_train if m not in trained_models],
-                'training_summary': self.trainer.get_training_summary()
+                'training_summary': self.trainer.get_training_summary(),
+                'quick_mode': self.quick_mode
             }
             
-            logger.info(f"Full training pipeline completed - Time: {execution_time:.2f}s")
+            logger.info(f"Training pipeline completed - Time: {execution_time:.2f}s")
             logger.info(f"Successful models: {len(trained_models)}/{len(models_to_train)}")
             
             return pipeline_summary

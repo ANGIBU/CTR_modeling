@@ -112,16 +112,26 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 class MemoryMonitor:
-    """Memory monitoring with RTX 4060 Ti optimization"""
+    """Memory monitoring with quick mode support"""
     
     def __init__(self):
+        # Memory thresholds based on available memory (not total usage)
         self.memory_thresholds = {
-            'warning': 45.0,
-            'critical': 50.0,
-            'abort': 55.0
+            'warning': 15.0,    # Warning if less than 15GB available
+            'critical': 10.0,   # Critical if less than 10GB available
+            'abort': 5.0        # Abort if less than 5GB available
         }
+        
+        # Quick mode thresholds (much more relaxed)
+        self.quick_mode_thresholds = {
+            'warning': 5.0,     # Warning if less than 5GB available
+            'critical': 3.0,    # Critical if less than 3GB available
+            'abort': 1.0        # Abort if less than 1GB available
+        }
+        
         self.rtx_4060ti_optimized = False
         self.memory_logged = False
+        self.quick_mode = False
         
         if TORCH_AVAILABLE and torch.cuda.is_available():
             try:
@@ -130,6 +140,12 @@ class MemoryMonitor:
                     self.rtx_4060ti_optimized = True
             except Exception:
                 pass
+    
+    def set_quick_mode(self, enabled: bool):
+        """Enable quick mode with relaxed memory thresholds"""
+        self.quick_mode = enabled
+        if enabled:
+            logger.info("Memory monitor set to quick mode - relaxed thresholds")
     
     def get_memory_usage(self) -> float:
         """Get current memory usage in GB"""
@@ -144,7 +160,7 @@ class MemoryMonitor:
         return 64.0
     
     def get_memory_status(self) -> Dict[str, Any]:
-        """Get current memory status"""
+        """Get current memory status with mode-appropriate thresholds"""
         if not PSUTIL_AVAILABLE:
             return {
                 'usage_gb': 0.0,
@@ -158,17 +174,20 @@ class MemoryMonitor:
         usage_gb = vm.used / (1024**3)
         available_gb = vm.available / (1024**3)
         
+        # Use appropriate thresholds based on mode
+        thresholds = self.quick_mode_thresholds if self.quick_mode else self.memory_thresholds
+        
         level = 'normal'
         should_simplify = False
         should_abort = False
         
-        if available_gb < self.memory_thresholds['abort']:
+        if available_gb < thresholds['abort']:
             level = 'abort'
             should_abort = True
-        elif available_gb < self.memory_thresholds['critical']:
+        elif available_gb < thresholds['critical']:
             level = 'critical'
             should_simplify = True
-        elif available_gb < self.memory_thresholds['warning']:
+        elif available_gb < thresholds['warning']:
             level = 'warning'
             should_simplify = True
         
@@ -177,7 +196,9 @@ class MemoryMonitor:
             'available_gb': available_gb,
             'level': level,
             'should_simplify': should_simplify,
-            'should_abort': should_abort
+            'should_abort': should_abort,
+            'quick_mode': self.quick_mode,
+            'thresholds': thresholds
         }
     
     def get_gpu_memory_usage(self) -> Dict[str, Any]:
@@ -218,9 +239,10 @@ class MultiMethodCalibrator:
     def fit(self, y_true: np.ndarray, y_pred_proba: np.ndarray, method: str = 'auto') -> bool:
         """Fit calibration model with multiple methods"""
         try:
-            if len(y_true) < 100:
+            if len(y_true) < 10:  # Lowered minimum requirement for quick mode
                 logger.warning("Insufficient validation data for calibration")
-                return False
+                self._fit_bias_correction(y_true, y_pred_proba)
+                return True
             
             y_true = np.array(y_true)
             y_pred_proba = np.array(y_pred_proba).flatten()
@@ -423,33 +445,30 @@ class BaseModel(ABC):
         self.prediction_diversity_threshold = 2500
         self.calibration_applied = True
         self.memory_monitor = MemoryMonitor()
-        self.quick_mode = False  # Quick mode flag for simplified training
+        self.quick_mode = False
     
     def set_quick_mode(self, enabled: bool):
-        """
-        Enable or disable quick mode for model training
-        
-        Args:
-            enabled: If True, use simplified parameters for rapid training
-        """
+        """Enable or disable quick mode for model training"""
         self.quick_mode = enabled
+        self.memory_monitor.set_quick_mode(enabled)
         if enabled:
             logger.info(f"{self.name}: Quick mode enabled - simplified parameters")
         else:
             logger.info(f"{self.name}: Full mode enabled - complete parameter set")
     
     def _memory_safe_fit(self, fit_function, *args, **kwargs):
-        """Memory safe fitting"""
+        """Memory safe fitting with quick mode support"""
         try:
             memory_status = self.memory_monitor.get_memory_status()
             
-            if not self.memory_monitor.memory_logged:
-                logger.info(f"Memory thresholds - warning: {self.memory_monitor.memory_thresholds['warning']:.1f}GB, critical: {self.memory_monitor.memory_thresholds['critical']:.1f}GB, abort: {self.memory_monitor.memory_thresholds['abort']:.1f}GB")
-                self.memory_monitor.memory_logged = True
+            # Skip memory check in quick mode for small datasets
+            if self.quick_mode and hasattr(args[0], '__len__') and len(args[0]) < 100:
+                logger.info(f"{self.name}: Quick mode small dataset - skipping memory check")
+                return fit_function(*args, **kwargs)
             
             if memory_status['should_abort']:
-                logger.error(f"Memory limit reached, aborting fit: {memory_status['usage_gb']:.2f}GB")
-                raise MemoryError(f"Memory limit reached: {memory_status['usage_gb']:.2f}GB")
+                logger.error(f"Memory limit reached: {memory_status['available_gb']:.2f}GB available")
+                raise MemoryError(f"Memory limit reached: {memory_status['available_gb']:.2f}GB available")
             
             if memory_status['should_simplify']:
                 logger.warning(f"Memory pressure detected: {memory_status['available_gb']:.2f}GB available")
@@ -464,6 +483,10 @@ class BaseModel(ABC):
     def _memory_safe_predict(self, predict_function, X, batch_size=100000):
         """Memory safe prediction with batching"""
         try:
+            # For quick mode with small datasets, skip batching
+            if self.quick_mode and len(X) < 1000:
+                return predict_function(X)
+            
             if len(X) <= batch_size:
                 return predict_function(X)
             
@@ -521,8 +544,9 @@ class BaseModel(ABC):
                 logger.warning("Model not fitted, cannot apply calibration")
                 return False
             
-            if len(X_val) < 100:
-                logger.warning("Insufficient validation data for calibration")
+            # Skip calibration in quick mode if dataset is too small
+            if self.quick_mode and len(X_val) < 5:
+                logger.info("Quick mode: Skipping calibration for small dataset")
                 return False
             
             raw_predictions = self.predict_proba_raw(X_val)
@@ -622,14 +646,14 @@ class LightGBMModel(BaseModel):
     def _apply_quick_mode_params(self):
         """Apply quick mode parameters for rapid testing"""
         quick_params = {
-            'num_leaves': 15,        # Much smaller tree
-            'max_depth': 4,          # Shallow depth
-            'n_estimators': 50,      # Very few iterations
-            'learning_rate': 0.1,    # Faster learning
-            'min_data_in_leaf': 20,  # Smaller minimum
-            'num_threads': 4,        # Fewer threads
-            'max_bin': 64,           # Fewer bins
-            'early_stopping_rounds': 10,  # Early stopping
+            'num_leaves': 15,
+            'max_depth': 4,
+            'n_estimators': 50,
+            'learning_rate': 0.1,
+            'min_data_in_leaf': 5,
+            'num_threads': 4,
+            'max_bin': 64,
+            'early_stopping_rounds': 10,
             'feature_fraction': 0.8,
             'bagging_fraction': 0.8,
             'verbosity': -1
@@ -646,7 +670,6 @@ class LightGBMModel(BaseModel):
         def _fit_internal():
             self.feature_names = list(X_train.columns)
             
-            # Apply quick mode parameters if enabled
             if self.quick_mode:
                 self._apply_quick_mode_params()
             
@@ -684,7 +707,7 @@ class LightGBMModel(BaseModel):
             
             self.is_fitted = True
             
-            if X_val_clean is not None and y_val is not None:
+            if X_val_clean is not None and y_val is not None and not self.quick_mode:
                 logger.info(f"{self.name}: Starting calibration application")
                 self.apply_calibration(X_val_clean, y_val, method='auto')
                 if self.is_calibrated:
@@ -802,18 +825,17 @@ class XGBoostModel(BaseModel):
     def _apply_quick_mode_params(self):
         """Apply quick mode parameters for rapid testing"""
         quick_params = {
-            'max_depth': 3,          # Very shallow
-            'n_estimators': 50,      # Very few iterations
-            'learning_rate': 0.1,    # Faster learning
-            'nthread': 4,            # Fewer threads
-            'tree_method': 'hist',   # CPU method for simplicity
-            'max_bin': 64,           # Fewer bins
+            'max_depth': 3,
+            'n_estimators': 50,
+            'learning_rate': 0.1,
+            'nthread': 4,
+            'tree_method': 'hist',
+            'max_bin': 64,
             'subsample': 0.8,
             'colsample_bytree': 0.8
         }
         
         self.params.update(quick_params)
-        # Remove GPU settings for quick mode
         self.params.pop('gpu_id', None)
         self.params.pop('predictor', None)
         logger.info(f"{self.name}: Quick mode parameters applied")
@@ -826,7 +848,6 @@ class XGBoostModel(BaseModel):
         def _fit_internal():
             self.feature_names = list(X_train.columns)
             
-            # Apply quick mode parameters if enabled
             if self.quick_mode:
                 self._apply_quick_mode_params()
             
@@ -835,7 +856,6 @@ class XGBoostModel(BaseModel):
             if TORCH_AVAILABLE and torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            logger.info(f"{self.name}: Attempting GPU training")
             X_train_clean = X_train.fillna(0)
             
             for col in X_train_clean.columns:
@@ -844,14 +864,14 @@ class XGBoostModel(BaseModel):
                 elif X_train_clean[col].dtype in ['int64']:
                     X_train_clean[col] = X_train_clean[col].astype('int32')
             
-            logger.info(f"{self.name}: Creating training DMatrix (GPU mode)")
+            logger.info(f"{self.name}: Creating training DMatrix")
             dtrain = xgb.DMatrix(X_train_clean, label=y_train, feature_names=list(X_train_clean.columns))
             
             eval_set = [(dtrain, 'train')]
             dval = None
             
             if X_val is not None and y_val is not None:
-                logger.info(f"{self.name}: Creating validation DMatrix (GPU mode)")
+                logger.info(f"{self.name}: Creating validation DMatrix")
                 X_val_clean = X_val.fillna(0)
                 for col in X_val_clean.columns:
                     if X_val_clean[col].dtype in ['float64']:
@@ -864,7 +884,7 @@ class XGBoostModel(BaseModel):
             
             early_stopping = self.params.pop('early_stopping_rounds', 250)
             
-            logger.info(f"{self.name}: Starting XGBoost GPU training")
+            logger.info(f"{self.name}: Starting XGBoost training")
             self.model = xgb.train(
                 self.params,
                 dtrain,
@@ -874,10 +894,10 @@ class XGBoostModel(BaseModel):
                 verbose_eval=0
             )
             
-            logger.info(f"{self.name}: GPU training completed successfully")
+            logger.info(f"{self.name}: Training completed successfully")
             self.is_fitted = True
             
-            if dval is not None:
+            if dval is not None and not self.quick_mode:
                 logger.info(f"{self.name}: Starting calibration application")
                 X_val_clean = X_val.fillna(0)
                 for col in X_val_clean.columns:
@@ -966,10 +986,10 @@ class LogisticModel(BaseModel):
     def _apply_quick_mode_params(self):
         """Apply quick mode parameters for rapid testing"""
         quick_params = {
-            'C': 1.0,               # Default regularization
-            'max_iter': 100,        # Much fewer iterations
-            'n_jobs': 2,            # Fewer jobs
-            'solver': 'lbfgs'       # Simple solver
+            'C': 1.0,
+            'max_iter': 100,
+            'n_jobs': 2,
+            'solver': 'lbfgs'
         }
         
         self.params.update(quick_params)
@@ -984,7 +1004,6 @@ class LogisticModel(BaseModel):
         def _fit_internal():
             self.feature_names = list(X_train.columns)
             
-            # Apply quick mode parameters if enabled
             if self.quick_mode:
                 self._apply_quick_mode_params()
             
@@ -994,17 +1013,22 @@ class LogisticModel(BaseModel):
                 if X_train_clean[col].dtype in ['float64']:
                     X_train_clean[col] = X_train_clean[col].astype('float32')
             
-            if len(X_train_clean) > 6000000 and not self.sampling_logged:
-                sample_size = 6000000
-                logger.info(f"Large data detected, applying sampling ({len(X_train_clean):,} -> {sample_size:,})")
-                self.sampling_logged = True
-                
-                sample_indices = np.random.choice(len(X_train_clean), size=sample_size, replace=False)
-                X_train_sample = X_train_clean.iloc[sample_indices]
-                y_train_sample = y_train.iloc[sample_indices]
-            else:
+            # No sampling needed for small datasets in quick mode
+            if self.quick_mode or len(X_train_clean) <= 6000000:
                 X_train_sample = X_train_clean
                 y_train_sample = y_train
+            else:
+                if not self.sampling_logged:
+                    sample_size = 6000000
+                    logger.info(f"Large data detected, applying sampling ({len(X_train_clean):,} -> {sample_size:,})")
+                    self.sampling_logged = True
+                    
+                    sample_indices = np.random.choice(len(X_train_clean), size=sample_size, replace=False)
+                    X_train_sample = X_train_clean.iloc[sample_indices]
+                    y_train_sample = y_train.iloc[sample_indices]
+                else:
+                    X_train_sample = X_train_clean
+                    y_train_sample = y_train
             
             try:
                 start_time = time.time()
@@ -1020,7 +1044,7 @@ class LogisticModel(BaseModel):
                 self.model.fit(X_train_sample, y_train_sample)
                 self.is_fitted = True
             
-            if X_val is not None and y_val is not None:
+            if X_val is not None and y_val is not None and not self.quick_mode:
                 logger.info(f"{self.name}: Starting calibration application")
                 X_val_clean = X_val.fillna(0)
                 for col in X_val_clean.columns:
@@ -1065,24 +1089,22 @@ class ModelFactory:
     
     @staticmethod
     def create_model(model_type: str, **kwargs) -> BaseModel:
-        """
-        Create model by type with optional quick mode support
-        
-        Args:
-            model_type: Type of model to create
-            **kwargs: Additional parameters including 'params' and 'quick_mode'
-        
-        Returns:
-            Created model instance
-        """
+        """Create model by type with optional quick mode support"""
         try:
             if not ModelFactory._factory_logged:
                 memory_monitor = MemoryMonitor()
                 logger.info(f"Creating model: {model_type} (calibration application configured)")
-                logger.info(f"Memory thresholds - warning: {memory_monitor.memory_thresholds['warning']:.1f}GB, critical: {memory_monitor.memory_thresholds['critical']:.1f}GB, abort: {memory_monitor.memory_thresholds['abort']:.1f}GB")
+                
+                # Get appropriate thresholds for logging
+                if kwargs.get('quick_mode', False):
+                    thresholds = memory_monitor.quick_mode_thresholds
+                    logger.info(f"Quick mode thresholds - warning: {thresholds['warning']:.1f}GB, critical: {thresholds['critical']:.1f}GB, abort: {thresholds['abort']:.1f}GB")
+                else:
+                    thresholds = memory_monitor.memory_thresholds
+                    logger.info(f"Memory thresholds - warning: {thresholds['warning']:.1f}GB, critical: {thresholds['critical']:.1f}GB, abort: {thresholds['abort']:.1f}GB")
+                
                 ModelFactory._factory_logged = True
             
-            # Extract quick mode setting
             quick_mode = kwargs.get('quick_mode', False)
             
             if model_type.lower() == 'lightgbm':
@@ -1101,7 +1123,6 @@ class ModelFactory:
             else:
                 raise ValueError(f"Unsupported model type: {model_type}")
             
-            # Set quick mode if specified
             if quick_mode:
                 model.set_quick_mode(True)
             
