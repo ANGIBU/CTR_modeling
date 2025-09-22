@@ -130,7 +130,7 @@ class MemoryMonitor:
         }
         
         self.rtx_4060ti_optimized = False
-        self.memory_logged = False
+        self.optimization_logged = False
         self.quick_mode = False
         
         if TORCH_AVAILABLE and torch.cuda.is_available():
@@ -716,12 +716,17 @@ class LightGBMModel(BaseModel):
             # Safe data preprocessing
             X_train_clean = self._safe_data_preprocessing(X_train)
             
-            # Memory efficient dataset creation
+            # Memory efficient dataset creation with fixed callback handling
+            train_params = {
+                'max_bin': self.params.get('max_bin', 128),
+                'verbosity': -1
+            }
+            
             train_data = lgb.Dataset(
                 X_train_clean, 
                 label=y_train, 
-                free_raw_data=True,  # Free raw data after creating dataset
-                params={'max_bin': self.params.get('max_bin', 128)}
+                free_raw_data=True,
+                params=train_params
             )
             
             valid_sets = [train_data]
@@ -736,23 +741,25 @@ class LightGBMModel(BaseModel):
                     label=y_val, 
                     reference=train_data, 
                     free_raw_data=True,
-                    params={'max_bin': self.params.get('max_bin', 128)}
+                    params=train_params
                 )
                 valid_sets.append(valid_data)
                 valid_names.append('valid')
             
-            early_stopping = self.params.get('early_stopping_rounds', 100)
+            # Extract callback parameters from main params
+            early_stopping = self.params.pop('early_stopping_rounds', 100)
+            n_estimators = self.params.pop('n_estimators', 3000)
             
             # Train with memory efficient callbacks
             self.model = lgb.train(
                 self.params,
                 train_data,
+                num_boost_round=n_estimators,
                 valid_sets=valid_sets,
                 valid_names=valid_names,
                 callbacks=[
                     lgb.early_stopping(early_stopping), 
-                    lgb.log_evaluation(0),
-                    lgb.reset_parameter(max_bin=self.params.get('max_bin', 128))
+                    lgb.log_evaluation(0)
                 ]
             )
             
@@ -1046,6 +1053,63 @@ class LogisticModel(BaseModel):
         self.model = LogisticRegression(**self.params)
         logger.info(f"{self.name}: Quick mode parameters applied")
     
+    def _safe_sampling(self, X_train: pd.DataFrame, y_train: pd.Series, target_size: int) -> Tuple[pd.DataFrame, pd.Series]:
+        """Safe stratified sampling with bounds checking"""
+        try:
+            current_size = len(X_train)
+            if current_size <= target_size:
+                return X_train, y_train
+            
+            # Ensure indices are valid
+            if X_train.index.max() >= current_size or y_train.index.max() >= current_size:
+                # Reset indices to ensure they are in proper range
+                X_train = X_train.reset_index(drop=True)
+                y_train = y_train.reset_index(drop=True)
+            
+            positive_mask = y_train == 1
+            negative_mask = y_train == 0
+            
+            positive_indices = X_train.index[positive_mask].tolist()
+            negative_indices = X_train.index[negative_mask].tolist()
+            
+            positive_ratio = len(positive_indices) / current_size
+            target_positive = max(int(target_size * positive_ratio), 500)
+            target_negative = target_size - target_positive
+            
+            # Safe sampling with bounds checking
+            if len(positive_indices) > target_positive:
+                sampled_positive = np.random.choice(positive_indices, size=target_positive, replace=False)
+            else:
+                sampled_positive = positive_indices
+            
+            if len(negative_indices) > target_negative:
+                sampled_negative = np.random.choice(negative_indices, size=target_negative, replace=False)
+            else:
+                sampled_negative = negative_indices[:target_negative]
+            
+            # Combine and validate indices
+            sample_indices = list(sampled_positive) + list(sampled_negative)
+            sample_indices = [idx for idx in sample_indices if idx < current_size]  # Bounds check
+            
+            np.random.shuffle(sample_indices)
+            
+            # Safe indexing
+            X_train_sample = X_train.iloc[sample_indices].copy()
+            y_train_sample = y_train.iloc[sample_indices].copy()
+            
+            # Reset indices to prevent future issues
+            X_train_sample = X_train_sample.reset_index(drop=True)
+            y_train_sample = y_train_sample.reset_index(drop=True)
+            
+            logger.info(f"Safe sampling completed: {current_size:,} -> {len(X_train_sample):,}")
+            
+            return X_train_sample, y_train_sample
+            
+        except Exception as e:
+            logger.error(f"Safe sampling failed: {e}")
+            # Return original data if sampling fails
+            return X_train, y_train
+    
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
         """Logistic Regression model training with quick mode support"""
@@ -1060,40 +1124,17 @@ class LogisticModel(BaseModel):
             # Safe data preprocessing
             X_train_clean = self._safe_data_preprocessing(X_train)
             
-            # More aggressive sampling for large datasets
-            if self.quick_mode or len(X_train_clean) <= 2000000:  # Reduced from 6M
+            # Safe sampling for large datasets
+            if self.quick_mode or len(X_train_clean) <= 2000000:
                 X_train_sample = X_train_clean
                 y_train_sample = y_train
             else:
                 if not self.sampling_logged:
-                    sample_size = 2000000  # Reduced from 6M
+                    sample_size = 2000000
                     logger.info(f"Large data detected, applying sampling ({len(X_train_clean):,} -> {sample_size:,})")
                     self.sampling_logged = True
                     
-                    # Stratified sampling
-                    positive_indices = y_train[y_train == 1].index
-                    negative_indices = y_train[y_train == 0].index
-                    
-                    positive_ratio = len(positive_indices) / len(y_train)
-                    target_positive = max(int(sample_size * positive_ratio), 500)  # At least 500 positive
-                    target_negative = sample_size - target_positive
-                    
-                    # Sample positive and negative separately
-                    if len(positive_indices) > target_positive:
-                        sampled_positive = np.random.choice(positive_indices, size=target_positive, replace=False)
-                    else:
-                        sampled_positive = positive_indices
-                    
-                    if len(negative_indices) > target_negative:
-                        sampled_negative = np.random.choice(negative_indices, size=target_negative, replace=False)
-                    else:
-                        sampled_negative = negative_indices[:target_negative]
-                    
-                    sample_indices = np.concatenate([sampled_positive, sampled_negative])
-                    np.random.shuffle(sample_indices)
-                    
-                    X_train_sample = X_train_clean.iloc[sample_indices]
-                    y_train_sample = y_train.iloc[sample_indices]
+                    X_train_sample, y_train_sample = self._safe_sampling(X_train_clean, y_train, sample_size)
                 else:
                     X_train_sample = X_train_clean
                     y_train_sample = y_train

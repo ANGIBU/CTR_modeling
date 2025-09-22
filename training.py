@@ -248,7 +248,7 @@ class HyperparameterOptimizer:
                                  y_train: pd.Series,
                                  X_val: Optional[pd.DataFrame],
                                  y_val: Optional[pd.Series]):
-        """Create optimization objective function"""
+        """Create optimization objective function with enhanced error handling"""
         
         def objective(trial):
             try:
@@ -261,25 +261,46 @@ class HyperparameterOptimizer:
                 else:
                     return 0.0
                 
-                model = ModelFactory.create_model(model_type, params=params, quick_mode=self.quick_mode)
-                model.fit(X_train, y_train, X_val, y_val)
+                # Create safe sample for optimization
+                X_sample, y_sample = self._create_safe_optimization_sample(X_train, y_train)
+                X_val_sample, y_val_sample = None, None
                 
                 if X_val is not None and y_val is not None:
-                    predictions = model.predict_proba(X_val)
-                    score = self._calculate_score(y_val, predictions)
+                    X_val_sample, y_val_sample = self._create_safe_optimization_sample(X_val, y_val, sample_size=50000)
+                
+                model = ModelFactory.create_model(model_type, params=params, quick_mode=self.quick_mode)
+                
+                # Safe model fitting with error handling
+                try:
+                    model.fit(X_sample, y_sample, X_val_sample, y_val_sample)
+                except Exception as fit_error:
+                    logger.warning(f"Model fitting failed in trial: {fit_error}")
+                    return 0.0
+                
+                if X_val_sample is not None and y_val_sample is not None:
+                    try:
+                        predictions = model.predict_proba(X_val_sample)
+                        score = self._calculate_score(y_val_sample, predictions)
+                    except Exception as pred_error:
+                        logger.warning(f"Prediction failed in trial: {pred_error}")
+                        return 0.0
                 else:
-                    from sklearn.model_selection import cross_val_score
-                    from sklearn.metrics import roc_auc_score
-                    
-                    scores = cross_val_score(
-                        model.model, 
-                        X_train.fillna(0), 
-                        y_train, 
-                        cv=3, 
-                        scoring='roc_auc',
-                        n_jobs=1
-                    )
-                    score = np.mean(scores)
+                    try:
+                        from sklearn.model_selection import cross_val_score
+                        from sklearn.metrics import roc_auc_score
+                        
+                        scores = cross_val_score(
+                            model.model, 
+                            X_sample.fillna(0), 
+                            y_sample, 
+                            cv=3, 
+                            scoring='roc_auc',
+                            n_jobs=1
+                        )
+                        score = np.mean(scores)
+                    except Exception as cv_error:
+                        logger.warning(f"Cross-validation failed in trial: {cv_error}")
+                        return 0.0
                 
                 self.memory_tracker.force_cleanup()
                 
@@ -290,6 +311,57 @@ class HyperparameterOptimizer:
                 return 0.0
         
         return objective
+    
+    def _create_safe_optimization_sample(self, X: pd.DataFrame, y: pd.Series, sample_size: int = 100000) -> Tuple[pd.DataFrame, pd.Series]:
+        """Create safe sample for optimization with bounds checking"""
+        try:
+            if len(X) <= sample_size:
+                # Reset indices to ensure safety
+                X_safe = X.reset_index(drop=True)
+                y_safe = y.reset_index(drop=True)
+                return X_safe, y_safe
+            
+            # Ensure indices are in proper range
+            X_reset = X.reset_index(drop=True)
+            y_reset = y.reset_index(drop=True)
+            
+            # Safe stratified sampling
+            positive_mask = y_reset == 1
+            negative_mask = y_reset == 0
+            
+            positive_indices = X_reset.index[positive_mask].tolist()
+            negative_indices = X_reset.index[negative_mask].tolist()
+            
+            positive_ratio = len(positive_indices) / len(X_reset)
+            target_positive = max(int(sample_size * positive_ratio), 100)
+            target_negative = sample_size - target_positive
+            
+            # Safe sampling with bounds checking
+            if len(positive_indices) > target_positive:
+                sampled_positive = np.random.choice(positive_indices, size=target_positive, replace=False)
+            else:
+                sampled_positive = positive_indices
+            
+            if len(negative_indices) > target_negative:
+                sampled_negative = np.random.choice(negative_indices, size=target_negative, replace=False)
+            else:
+                sampled_negative = negative_indices[:target_negative]
+            
+            # Combine and validate indices
+            sample_indices = list(sampled_positive) + list(sampled_negative)
+            sample_indices = [idx for idx in sample_indices if idx < len(X_reset)]
+            
+            np.random.shuffle(sample_indices)
+            
+            X_sample = X_reset.iloc[sample_indices].copy().reset_index(drop=True)
+            y_sample = y_reset.iloc[sample_indices].copy().reset_index(drop=True)
+            
+            return X_sample, y_sample
+            
+        except Exception as e:
+            logger.warning(f"Safe sampling failed: {e}")
+            # Return reset indices as fallback
+            return X.reset_index(drop=True), y.reset_index(drop=True)
     
     def _suggest_lightgbm_params(self, trial) -> Dict[str, Any]:
         """Suggest LightGBM parameters"""
@@ -563,6 +635,91 @@ class CTRModelTrainer:
         else:
             logger.info("Trainer full mode enabled - complete hyperparameter optimization")
     
+    def _safe_data_split_and_sample(self, X_train: pd.DataFrame, y_train: pd.Series,
+                                   X_val: Optional[pd.DataFrame], y_val: Optional[pd.Series],
+                                   available_memory: float) -> Tuple[pd.DataFrame, pd.Series, 
+                                                                   Optional[pd.DataFrame], Optional[pd.Series]]:
+        """Safe data sampling with memory management and bounds checking"""
+        try:
+            current_size = len(X_train)
+            
+            # Calculate target size based on available memory and data size
+            if available_memory < 1:
+                target_size = min(current_size, self.config.MIN_SAMPLE_SIZE)  # 1M samples
+            elif available_memory < 2:
+                target_size = min(current_size, 2000000)  # 2M samples
+            elif available_memory < 3:
+                target_size = min(current_size, 3000000)  # 3M samples
+            else:
+                target_size = min(current_size, self.config.MAX_SAMPLE_SIZE)  # 5M samples
+            
+            if current_size > target_size:
+                logger.info(f"Applying memory sampling: {current_size:,} -> {target_size:,}")
+                
+                # Ensure indices are valid
+                X_train_reset = X_train.reset_index(drop=True)
+                y_train_reset = y_train.reset_index(drop=True)
+                
+                # Stratified sampling to maintain class balance
+                positive_mask = y_train_reset == 1
+                negative_mask = y_train_reset == 0
+                
+                positive_indices = X_train_reset.index[positive_mask].tolist()
+                negative_indices = X_train_reset.index[negative_mask].tolist()
+                
+                positive_ratio = len(positive_indices) / current_size
+                target_positive = max(int(target_size * positive_ratio), 1000)  # At least 1000 positive samples
+                target_negative = target_size - target_positive
+                
+                # Sample positive and negative separately with bounds checking
+                if len(positive_indices) > target_positive:
+                    sampled_positive = np.random.choice(positive_indices, size=target_positive, replace=False)
+                else:
+                    sampled_positive = positive_indices
+                
+                if len(negative_indices) > target_negative:
+                    sampled_negative = np.random.choice(negative_indices, size=target_negative, replace=False)
+                else:
+                    sampled_negative = negative_indices[:target_negative]
+                
+                # Combine samples with validation
+                sample_indices = list(sampled_positive) + list(sampled_negative)
+                sample_indices = [idx for idx in sample_indices if idx < current_size]  # Bounds check
+                np.random.shuffle(sample_indices)
+                
+                X_train_sampled = X_train_reset.iloc[sample_indices].copy().reset_index(drop=True)
+                y_train_sampled = y_train_reset.iloc[sample_indices].copy().reset_index(drop=True)
+                
+                logger.info(f"Sampled data: {len(X_train_sampled):,} samples with CTR: {y_train_sampled.mean():.4f}")
+                
+                # Also sample validation data if provided
+                if X_val is not None and y_val is not None:
+                    val_size = min(len(X_val), target_size // 10)  # 10% of training size
+                    if len(X_val) > val_size:
+                        val_indices = np.random.choice(len(X_val), size=val_size, replace=False)
+                        X_val_sampled = X_val.iloc[val_indices].copy().reset_index(drop=True)
+                        y_val_sampled = y_val.iloc[val_indices].copy().reset_index(drop=True)
+                    else:
+                        X_val_sampled = X_val.reset_index(drop=True)
+                        y_val_sampled = y_val.reset_index(drop=True)
+                else:
+                    X_val_sampled = X_val
+                    y_val_sampled = y_val
+                
+                return X_train_sampled, y_train_sampled, X_val_sampled, y_val_sampled
+            
+            # Reset indices even if no sampling needed
+            return X_train.reset_index(drop=True), y_train.reset_index(drop=True), \
+                   X_val.reset_index(drop=True) if X_val is not None else None, \
+                   y_val.reset_index(drop=True) if y_val is not None else None
+            
+        except Exception as e:
+            logger.warning(f"Safe data sampling failed: {e}")
+            # Return reset indices as fallback
+            return X_train.reset_index(drop=True), y_train.reset_index(drop=True), \
+                   X_val.reset_index(drop=True) if X_val is not None else None, \
+                   y_val.reset_index(drop=True) if y_val is not None else None
+    
     def train_single_model(self, 
                           model_type: str,
                           X_train: pd.DataFrame,
@@ -594,15 +751,23 @@ class CTRModelTrainer:
             data_size_gb = (X_train.memory_usage(deep=True).sum() + y_train.memory_usage(deep=True)) / (1024**3)
             logger.info(f"Data size: {data_size_gb:.2f}GB, available memory: {available_memory:.2f}GB")
             
-            # More aggressive memory check and sampling for large datasets
-            memory_threshold = 0.5 if self.quick_mode else 1.0  # Much lower threshold
+            # Safe data sampling with enhanced bounds checking
+            memory_threshold = 0.5 if self.quick_mode else 1.0
             
             if available_memory < memory_threshold or data_size_gb > available_memory * 0.8:
                 logger.warning(f"Low memory detected: {available_memory:.2f}GB available, data size: {data_size_gb:.2f}GB")
-                logger.info("Applying aggressive memory efficient processing")
-                X_train, y_train, X_val, y_val = self._apply_aggressive_memory_sampling(
+                logger.info("Applying memory efficient processing")
+                X_train, y_train, X_val, y_val = self._safe_data_split_and_sample(
                     X_train, y_train, X_val, y_val, available_memory
                 )
+            else:
+                # Reset indices even with sufficient memory
+                X_train = X_train.reset_index(drop=True)
+                y_train = y_train.reset_index(drop=True)
+                if X_val is not None:
+                    X_val = X_val.reset_index(drop=True)
+                if y_val is not None:
+                    y_val = y_val.reset_index(drop=True)
             
             if optimize_hyperparameters and params is None:
                 logger.info(f"Starting hyperparameter optimization for {model_type}")
@@ -684,77 +849,6 @@ class CTRModelTrainer:
             logger.error(f"Model training failed ({model_type}): {e}")
             self.memory_tracker.force_cleanup()
             raise
-    
-    def _apply_aggressive_memory_sampling(self, X_train: pd.DataFrame, y_train: pd.Series,
-                                        X_val: Optional[pd.DataFrame], y_val: Optional[pd.Series],
-                                        available_memory: float) -> Tuple[pd.DataFrame, pd.Series, 
-                                                                        Optional[pd.DataFrame], Optional[pd.Series]]:
-        """Apply aggressive memory efficient sampling for large datasets"""
-        try:
-            current_size = len(X_train)
-            
-            # Calculate target size based on available memory and data size
-            if available_memory < 1:
-                target_size = min(current_size, self.config.MIN_SAMPLE_SIZE)  # 1M samples
-            elif available_memory < 2:
-                target_size = min(current_size, 2000000)  # 2M samples
-            elif available_memory < 3:
-                target_size = min(current_size, 3000000)  # 3M samples
-            else:
-                target_size = min(current_size, self.config.MAX_SAMPLE_SIZE)  # 5M samples
-            
-            if current_size > target_size:
-                logger.info(f"Applying aggressive sampling: {current_size:,} -> {target_size:,}")
-                
-                # Stratified sampling to maintain class balance
-                positive_indices = y_train[y_train == 1].index
-                negative_indices = y_train[y_train == 0].index
-                
-                positive_ratio = len(positive_indices) / current_size
-                target_positive = max(int(target_size * positive_ratio), 1000)  # At least 1000 positive samples
-                target_negative = target_size - target_positive
-                
-                # Sample positive and negative separately
-                if len(positive_indices) > target_positive:
-                    sampled_positive = np.random.choice(positive_indices, size=target_positive, replace=False)
-                else:
-                    sampled_positive = positive_indices
-                
-                if len(negative_indices) > target_negative:
-                    sampled_negative = np.random.choice(negative_indices, size=target_negative, replace=False)
-                else:
-                    sampled_negative = negative_indices[:target_negative]
-                
-                # Combine samples
-                sample_indices = np.concatenate([sampled_positive, sampled_negative])
-                np.random.shuffle(sample_indices)
-                
-                X_train_sampled = X_train.iloc[sample_indices].reset_index(drop=True)
-                y_train_sampled = y_train.iloc[sample_indices].reset_index(drop=True)
-                
-                logger.info(f"Sampled data: {len(X_train_sampled):,} samples with CTR: {y_train_sampled.mean():.4f}")
-                
-                # Also sample validation data if provided
-                if X_val is not None and y_val is not None:
-                    val_size = min(len(X_val), target_size // 10)  # 10% of training size
-                    if len(X_val) > val_size:
-                        val_indices = np.random.choice(len(X_val), size=val_size, replace=False)
-                        X_val_sampled = X_val.iloc[val_indices].reset_index(drop=True)
-                        y_val_sampled = y_val.iloc[val_indices].reset_index(drop=True)
-                    else:
-                        X_val_sampled = X_val
-                        y_val_sampled = y_val
-                else:
-                    X_val_sampled = X_val
-                    y_val_sampled = y_val
-                
-                return X_train_sampled, y_train_sampled, X_val_sampled, y_val_sampled
-            
-            return X_train, y_train, X_val, y_val
-            
-        except Exception as e:
-            logger.warning(f"Aggressive memory sampling failed: {e}")
-            return X_train, y_train, X_val, y_val
     
     def _get_quick_mode_params(self, model_type: str) -> Dict[str, Any]:
         """Get simplified parameters for quick mode testing"""
