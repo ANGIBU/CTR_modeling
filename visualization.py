@@ -2,24 +2,23 @@
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, List, Optional, Tuple, Union
+from typing import Dict, Any, List, Optional
 import logging
 import warnings
 from pathlib import Path
-import json
-import base64
-from io import BytesIO
+from datetime import datetime
+import gc
 warnings.filterwarnings('ignore')
 
 # Safe imports for visualization libraries
 try:
     import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
-    from matplotlib.colors import LinearSegmentedColormap
-    import matplotlib.font_manager as fm
-    
-    # Korean font setup for better text rendering
+    import matplotlib.backends.backend_pdf
+    plt.rcParams['font.family'] = ['DejaVu Sans', 'Arial', 'sans-serif']
     plt.rcParams['axes.unicode_minus'] = False
+    plt.rcParams['figure.figsize'] = (12, 8)
+    plt.rcParams['savefig.dpi'] = 300
+    plt.rcParams['savefig.bbox'] = 'tight'
     plt.style.use('default')
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
@@ -30,193 +29,177 @@ try:
     import seaborn as sns
     if MATPLOTLIB_AVAILABLE:
         sns.set_style("whitegrid")
-        sns.set_palette("husl")
     SEABORN_AVAILABLE = True
 except ImportError:
     SEABORN_AVAILABLE = False
     logging.warning("seaborn not available for enhanced visualization")
 
-try:
-    from reportlab.lib.pagesizes import letter, A4
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import inch
-    from reportlab.lib import colors
-    REPORTLAB_AVAILABLE = True
-except ImportError:
-    REPORTLAB_AVAILABLE = False
-    logging.warning("reportlab not available for PDF generation")
-
 logger = logging.getLogger(__name__)
 
 class CTRVisualizationEngine:
-    """CTR model performance visualization engine with publication quality charts"""
+    """CTR model performance visualization engine with professional quality output"""
     
-    def __init__(self, style: str = 'professional'):
-        self.style = style
+    def __init__(self):
         self.results_dir = Path("results")
         self.results_dir.mkdir(exist_ok=True)
+        self.figures = {}
+        self.performance_data = []
         
-        # Color schemes optimized for CTR analysis
+        # Professional color schemes
         self.colors = {
-            'primary': '#4472C4',      # Professional blue (matching sample)
-            'secondary': '#70AD47',     # Success green
-            'accent': '#E15759',        # Warning red
-            'neutral': '#A5A5A5',       # Neutral gray
-            'background': '#F8F9FA',    # Light background
-            'text': '#333333'           # Dark text
+            'primary_gradient': plt.cm.Blues(np.linspace(0.4, 0.9, 10)) if MATPLOTLIB_AVAILABLE else None,
+            'secondary_gradient': plt.cm.Oranges(np.linspace(0.4, 0.9, 10)) if MATPLOTLIB_AVAILABLE else None,
+            'success': '#27ae60',
+            'warning': '#f39c12', 
+            'danger': '#e74c3c',
+            'info': '#3498db',
+            'neutral': '#95a5a6'
         }
         
-        # Configure matplotlib for high quality output
-        if MATPLOTLIB_AVAILABLE:
-            plt.rcParams.update({
-                'figure.figsize': (12, 8),
-                'figure.dpi': 100,
-                'savefig.dpi': 300,
-                'savefig.bbox': 'tight',
-                'savefig.facecolor': 'white',
-                'axes.spines.top': False,
-                'axes.spines.right': False,
-                'axes.grid': True,
-                'grid.alpha': 0.3,
-                'font.size': 11,
-                'axes.titlesize': 14,
-                'axes.labelsize': 12,
-                'xtick.labelsize': 10,
-                'ytick.labelsize': 10,
-                'legend.fontsize': 10
-            })
-        
-        logger.info("CTR Visualization Engine initialized")
+        logger.info("CTR Visualization Engine initialized with professional styling")
     
-    def create_model_performance_chart(self, summary_df: pd.DataFrame, save_path: Optional[str] = None) -> bool:
-        """Create model performance overview chart (Feature Importance style)"""
+    def load_summary_data(self) -> Optional[pd.DataFrame]:
+        """Load summary CSV data"""
+        try:
+            csv_path = self.results_dir / "summary.csv"
+            if not csv_path.exists():
+                logger.error("Summary CSV not found")
+                return None
+            
+            summary_df = pd.read_csv(csv_path)
+            self.performance_data = summary_df.to_dict('records')
+            logger.info(f"Loaded {len(summary_df)} model records")
+            return summary_df
+            
+        except Exception as e:
+            logger.error(f"Failed to load summary data: {e}")
+            return None
+    
+    def create_model_performance_chart(self, summary_df: pd.DataFrame) -> bool:
+        """Create professional model performance comparison chart"""
         try:
             if not MATPLOTLIB_AVAILABLE:
-                logger.warning("Matplotlib not available, skipping chart creation")
+                logger.warning("Matplotlib not available")
                 return False
             
             logger.info("Creating model performance chart")
             
-            # Prepare data
-            models = summary_df['model_name'].tolist()
-            scores = summary_df['combined_score'].tolist()
+            # Sort by combined_score for better visualization
+            sorted_df = summary_df.sort_values('combined_score', ascending=True)
+            models = sorted_df['model_name'].tolist()
+            scores = sorted_df['combined_score'].tolist()
             
-            # Sort by score for better visualization
-            sorted_data = sorted(zip(models, scores), key=lambda x: x[1], reverse=True)
-            models_sorted, scores_sorted = zip(*sorted_data) if sorted_data else ([], [])
+            fig, ax = plt.subplots(figsize=(14, max(8, len(models) * 0.8)))
             
-            # Create figure
-            fig, ax = plt.subplots(figsize=(12, max(6, len(models) * 0.8)))
+            # Create color gradient based on performance
+            colors = plt.cm.Blues(np.linspace(0.4, 0.9, len(models)))
             
-            # Create horizontal bars (matching sample style)
-            bars = ax.barh(models_sorted, scores_sorted, 
-                          color=self.colors['primary'], 
-                          alpha=0.8, 
-                          height=0.6)
+            # Create horizontal bars with improved styling
+            bars = ax.barh(models, scores, color=colors, height=0.6, alpha=0.8)
             
-            # Add value labels on the right side of bars (matching sample)
-            for i, (bar, score) in enumerate(zip(bars, scores_sorted)):
-                ax.text(bar.get_width() + max(scores_sorted) * 0.01, 
+            # Add value labels on the right (Feature Importance style)
+            for i, (bar, score) in enumerate(zip(bars, scores)):
+                ax.text(bar.get_width() + max(scores) * 0.01, 
                        bar.get_y() + bar.get_height()/2, 
                        f'{score:.4f}', 
-                       va='center', ha='left',
-                       fontsize=11, fontweight='bold')
+                       va='center', ha='left', fontweight='bold', fontsize=12)
             
-            # Styling (matching sample clean style)
-            ax.set_title('Model Performance Overview - Combined Score', 
-                        fontsize=14, fontweight='bold', pad=20)
-            ax.set_xlabel('Combined Score', fontsize=12)
-            ax.set_xlim(0, max(scores_sorted) * 1.15 if scores_sorted else 1)
+            # Add performance tier reference lines
+            target_excellent = 0.34
+            target_good = 0.30
             
-            # Remove top and right spines for cleaner look
+            if max(scores) > target_excellent:
+                ax.axvline(x=target_excellent, color=self.colors['success'], 
+                          linestyle='--', alpha=0.7, linewidth=2, label='Excellent (0.34+)')
+            
+            if max(scores) > target_good:
+                ax.axvline(x=target_good, color=self.colors['warning'], 
+                          linestyle='--', alpha=0.7, linewidth=2, label='Good (0.30+)')
+            
+            # Professional styling
+            ax.set_xlabel('Combined Score', fontsize=14, fontweight='bold')
+            ax.set_title('CTR Model Performance Comparison - Combined Score Analysis', 
+                        fontsize=16, fontweight='bold', pad=20)
+            ax.set_xlim(0, max(max(scores) * 1.15, 0.4))
+            ax.grid(axis='x', alpha=0.3)
             ax.spines['top'].set_visible(False)
             ax.spines['right'].set_visible(False)
             
-            # Add performance tier indicators
-            if scores_sorted:
-                excellent_line = 0.34
-                good_line = 0.30
-                
-                if max(scores_sorted) > excellent_line:
-                    ax.axvline(x=excellent_line, color=self.colors['secondary'], 
-                              linestyle='--', alpha=0.7, label='Excellent (0.34+)')
-                
-                if max(scores_sorted) > good_line:
-                    ax.axvline(x=good_line, color=self.colors['accent'], 
-                              linestyle='--', alpha=0.7, label='Good (0.30+)')
-                
+            if max(scores) > target_good:
                 ax.legend(loc='lower right', frameon=True, fancybox=True, shadow=True)
             
             plt.tight_layout()
             
             # Save chart
-            if save_path is None:
-                save_path = self.results_dir / "model_performance.png"
+            chart_path = self.results_dir / "model_performance.png"
+            plt.savefig(chart_path, dpi=300, bbox_inches='tight', facecolor='white')
             
-            plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
-            plt.close()
-            
-            logger.info(f"Model performance chart saved: {save_path}")
+            self.figures['model_performance'] = fig
+            logger.info(f"Model performance chart saved: {chart_path}")
             return True
             
         except Exception as e:
             logger.error(f"Model performance chart creation failed: {e}")
             return False
     
-    def create_ctr_analysis_chart(self, summary_df: pd.DataFrame, save_path: Optional[str] = None) -> bool:
-        """Create CTR analysis chart showing bias and quality"""
+    def create_ctr_analysis_dashboard(self, summary_df: pd.DataFrame) -> bool:
+        """Create comprehensive CTR analysis dashboard"""
         try:
             if not MATPLOTLIB_AVAILABLE:
-                logger.warning("Matplotlib not available, skipping chart creation")
+                logger.warning("Matplotlib not available")
                 return False
             
-            logger.info("Creating CTR analysis chart")
+            logger.info("Creating CTR analysis dashboard")
             
-            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
-            fig.suptitle('CTR Analysis Dashboard', fontsize=16, fontweight='bold')
+            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+            fig.suptitle('CTR Analysis Dashboard - Comprehensive Performance Overview', 
+                        fontsize=18, fontweight='bold', y=0.98)
             
-            # Chart 1: CTR Bias Analysis
+            # Chart 1: CTR Bias Analysis (Horizontal bars)
             models = summary_df['model_name']
             ctr_bias = summary_df['ctr_bias']
-            colors_bias = [self.colors['accent'] if abs(bias) > 0.001 else self.colors['primary'] for bias in ctr_bias]
+            colors_bias = [self.colors['danger'] if abs(bias) > 0.001 else self.colors['info'] for bias in ctr_bias]
             
-            bars1 = ax1.barh(models, ctr_bias, color=colors_bias, alpha=0.8)
-            ax1.set_title('CTR Bias by Model', fontsize=12, fontweight='bold')
+            bars1 = ax1.barh(models, ctr_bias, color=colors_bias, alpha=0.8, height=0.6)
+            ax1.set_title('CTR Bias Analysis by Model', fontsize=14, fontweight='bold')
             ax1.set_xlabel('CTR Bias (Predicted - Actual)')
-            ax1.axvline(x=0, color='black', linestyle='-', alpha=0.3)
-            ax1.axvline(x=0.001, color=self.colors['accent'], linestyle='--', alpha=0.7, label='Warning (+0.001)')
-            ax1.axvline(x=-0.001, color=self.colors['accent'], linestyle='--', alpha=0.7, label='Warning (-0.001)')
-            ax1.legend()
+            ax1.axvline(x=0, color='black', linestyle='-', alpha=0.5, linewidth=1)
+            ax1.axvline(x=0.001, color=self.colors['danger'], linestyle='--', alpha=0.7, label='Warning (+0.001)')
+            ax1.axvline(x=-0.001, color=self.colors['danger'], linestyle='--', alpha=0.7, label='Warning (-0.001)')
+            ax1.legend(loc='best', fontsize=10)
+            ax1.grid(axis='x', alpha=0.3)
             
             # Add bias values
             for bar, bias in zip(bars1, ctr_bias):
-                ax1.text(bias + (max(ctr_bias) - min(ctr_bias)) * 0.02 if bias >= 0 else bias - (max(ctr_bias) - min(ctr_bias)) * 0.02,
-                        bar.get_y() + bar.get_height()/2,
-                        f'{bias:.6f}', va='center', ha='left' if bias >= 0 else 'right', fontsize=9)
+                x_pos = bias + (max(ctr_bias) - min(ctr_bias)) * 0.02 if bias >= 0 else bias - (max(ctr_bias) - min(ctr_bias)) * 0.02
+                ax1.text(x_pos, bar.get_y() + bar.get_height()/2,
+                        f'{bias:.6f}', va='center', ha='left' if bias >= 0 else 'right', fontsize=10)
             
-            # Chart 2: CTR Quality Distribution
-            quality_counts = summary_df['ctr_quality'].value_counts()
-            colors_quality = [self.colors['secondary'] if q in ['EXCELLENT', 'GOOD'] else 
-                             (self.colors['primary'] if q == 'FAIR' else self.colors['accent']) 
-                             for q in quality_counts.index]
+            # Chart 2: Performance Tier Distribution
+            tier_counts = summary_df['performance_tier'].value_counts()
+            tier_colors = {'EXCELLENT': self.colors['success'], 'GOOD': self.colors['info'], 
+                          'FAIR': self.colors['warning'], 'POOR': self.colors['danger']}
+            colors_pie = [tier_colors.get(tier, self.colors['neutral']) for tier in tier_counts.index]
             
-            wedges, texts, autotexts = ax2.pie(quality_counts.values, labels=quality_counts.index, 
-                                              colors=colors_quality, autopct='%1.1f%%', startangle=90)
-            ax2.set_title('CTR Quality Distribution', fontsize=12, fontweight='bold')
+            wedges, texts, autotexts = ax2.pie(tier_counts.values, labels=tier_counts.index, 
+                                              colors=colors_pie, autopct='%1.1f%%', 
+                                              startangle=90, textprops={'fontsize': 11})
+            ax2.set_title('Performance Tier Distribution', fontsize=14, fontweight='bold')
             
-            # Chart 3: Actual vs Predicted CTR
+            # Chart 3: Actual vs Predicted CTR Scatter Plot
             ax3.scatter(summary_df['actual_ctr'], summary_df['predicted_ctr'], 
-                       c=self.colors['primary'], alpha=0.7, s=100)
+                       s=120, alpha=0.7, c=self.colors['info'], edgecolors='black')
             
             # Perfect prediction line
             min_ctr = min(min(summary_df['actual_ctr']), min(summary_df['predicted_ctr']))
             max_ctr = max(max(summary_df['actual_ctr']), max(summary_df['predicted_ctr']))
-            ax3.plot([min_ctr, max_ctr], [min_ctr, max_ctr], 'r--', alpha=0.7, label='Perfect Prediction')
+            ax3.plot([min_ctr, max_ctr], [min_ctr, max_ctr], 
+                    color=self.colors['success'], linestyle='--', alpha=0.8, 
+                    linewidth=2, label='Perfect Prediction')
             
-            ax3.set_xlabel('Actual CTR')
-            ax3.set_ylabel('Predicted CTR')
-            ax3.set_title('Actual vs Predicted CTR', fontsize=12, fontweight='bold')
+            ax3.set_xlabel('Actual CTR', fontweight='bold')
+            ax3.set_ylabel('Predicted CTR', fontweight='bold')
+            ax3.set_title('Actual vs Predicted CTR Analysis', fontsize=14, fontweight='bold')
             ax3.legend()
             ax3.grid(True, alpha=0.3)
             
@@ -225,107 +208,114 @@ class CTRVisualizationEngine:
                 ax3.annotate(model, (summary_df['actual_ctr'].iloc[i], summary_df['predicted_ctr'].iloc[i]),
                            xytext=(5, 5), textcoords='offset points', fontsize=9, alpha=0.8)
             
-            # Chart 4: Performance Tier Summary
-            tier_counts = summary_df['performance_tier'].value_counts()
-            colors_tier = [self.colors['secondary'] if tier == 'EXCELLENT' else
-                          (self.colors['primary'] if tier == 'GOOD' else
-                           (self.colors['neutral'] if tier == 'FAIR' else self.colors['accent']))
-                          for tier in tier_counts.index]
+            # Chart 4: Deployment Readiness Analysis
+            deployment_counts = summary_df['deployment_ready'].value_counts()
+            deployment_labels = ['Ready' if x else 'Not Ready' for x in deployment_counts.index]
+            deployment_colors = [self.colors['success'] if x else self.colors['danger'] for x in deployment_counts.index]
             
-            bars4 = ax4.bar(tier_counts.index, tier_counts.values, color=colors_tier, alpha=0.8)
-            ax4.set_title('Performance Tier Distribution', fontsize=12, fontweight='bold')
-            ax4.set_ylabel('Number of Models')
+            bars4 = ax4.bar(deployment_labels, deployment_counts.values, 
+                           color=deployment_colors, alpha=0.8, width=0.6)
+            ax4.set_title('Model Deployment Readiness', fontsize=14, fontweight='bold')
+            ax4.set_ylabel('Number of Models', fontweight='bold')
+            ax4.grid(axis='y', alpha=0.3)
             
             # Add count labels on bars
             for bar in bars4:
                 height = bar.get_height()
                 ax4.text(bar.get_x() + bar.get_width()/2., height + 0.05,
-                        f'{int(height)}', ha='center', va='bottom', fontweight='bold')
+                        f'{int(height)}', ha='center', va='bottom', fontweight='bold', fontsize=12)
             
             plt.tight_layout()
             
             # Save chart
-            if save_path is None:
-                save_path = self.results_dir / "ctr_analysis.png"
+            chart_path = self.results_dir / "ctr_analysis.png"
+            plt.savefig(chart_path, dpi=300, bbox_inches='tight', facecolor='white')
             
-            plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
-            plt.close()
-            
-            logger.info(f"CTR analysis chart saved: {save_path}")
+            self.figures['ctr_analysis'] = fig
+            logger.info(f"CTR analysis dashboard saved: {chart_path}")
             return True
             
         except Exception as e:
-            logger.error(f"CTR analysis chart creation failed: {e}")
+            logger.error(f"CTR analysis dashboard creation failed: {e}")
             return False
     
-    def create_execution_summary_chart(self, summary_df: pd.DataFrame, save_path: Optional[str] = None) -> bool:
+    def create_execution_summary_chart(self, summary_df: pd.DataFrame) -> bool:
         """Create execution performance summary chart"""
         try:
             if not MATPLOTLIB_AVAILABLE:
-                logger.warning("Matplotlib not available, skipping chart creation")
+                logger.warning("Matplotlib not available")
                 return False
             
             logger.info("Creating execution summary chart")
             
-            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
-            fig.suptitle('Execution Performance Summary', fontsize=16, fontweight='bold')
+            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 7))
+            fig.suptitle('System Execution Performance Analysis', 
+                        fontsize=18, fontweight='bold', y=0.98)
             
             models = summary_df['model_name']
             
-            # Chart 1: Execution Time (Feature Importance style)
+            # Chart 1: Training Time Analysis (Horizontal bars)
             exec_times = summary_df['execution_time_sec']
-            bars1 = ax1.barh(models, exec_times, color=self.colors['primary'], alpha=0.8)
-            ax1.set_title('Training Time by Model', fontsize=12, fontweight='bold')
-            ax1.set_xlabel('Execution Time (seconds)')
+            colors1 = plt.cm.Oranges(np.linspace(0.4, 0.9, len(models)))
+            
+            bars1 = ax1.barh(models, exec_times, color=colors1, alpha=0.8, height=0.6)
+            ax1.set_title('Training Time Comparison', fontsize=14, fontweight='bold')
+            ax1.set_xlabel('Execution Time (seconds)', fontweight='bold')
+            ax1.grid(axis='x', alpha=0.3)
             
             # Add time labels
             for bar, time_val in zip(bars1, exec_times):
-                ax1.text(bar.get_width() + max(exec_times) * 0.01,
+                ax1.text(bar.get_width() + max(exec_times) * 0.02,
                         bar.get_y() + bar.get_height()/2,
                         f'{time_val:.1f}s', va='center', ha='left', fontweight='bold')
             
-            # Chart 2: Memory Usage
+            # Chart 2: Memory Usage Analysis (Horizontal bars)
             memory_usage = summary_df['memory_peak_gb']
-            bars2 = ax2.barh(models, memory_usage, color=self.colors['secondary'], alpha=0.8)
-            ax2.set_title('Peak Memory Usage by Model', fontsize=12, fontweight='bold')
-            ax2.set_xlabel('Memory Usage (GB)')
+            colors2 = plt.cm.Greens(np.linspace(0.4, 0.9, len(models)))
+            
+            bars2 = ax2.barh(models, memory_usage, color=colors2, alpha=0.8, height=0.6)
+            ax2.set_title('Peak Memory Usage', fontsize=14, fontweight='bold')
+            ax2.set_xlabel('Memory Usage (GB)', fontweight='bold')
+            ax2.grid(axis='x', alpha=0.3)
             
             # Add memory labels
             for bar, mem_val in zip(bars2, memory_usage):
-                ax2.text(bar.get_width() + max(memory_usage) * 0.01,
+                ax2.text(bar.get_width() + max(memory_usage) * 0.02,
                         bar.get_y() + bar.get_height()/2,
                         f'{mem_val:.1f}GB', va='center', ha='left', fontweight='bold')
             
-            # Chart 3: GPU Utilization
+            # Chart 3: GPU Utilization Analysis (Horizontal bars)
             gpu_usage = summary_df['gpu_utilization_pct']
-            colors_gpu = [self.colors['secondary'] if gpu > 50 else self.colors['accent'] for gpu in gpu_usage]
-            bars3 = ax3.barh(models, gpu_usage, color=colors_gpu, alpha=0.8)
-            ax3.set_title('GPU Utilization by Model', fontsize=12, fontweight='bold')
-            ax3.set_xlabel('GPU Utilization (%)')
-            ax3.set_xlim(0, 100)
+            colors_gpu = [self.colors['success'] if gpu > 50 else self.colors['warning'] for gpu in gpu_usage]
             
-            # Add GPU labels
+            bars3 = ax3.barh(models, gpu_usage, color=colors_gpu, alpha=0.8, height=0.6)
+            ax3.set_title('GPU Utilization Analysis', fontsize=14, fontweight='bold')
+            ax3.set_xlabel('GPU Utilization (%)', fontweight='bold')
+            ax3.set_xlim(0, 100)
+            ax3.grid(axis='x', alpha=0.3)
+            
+            # Add GPU labels and reference line
+            ax3.axvline(x=50, color=self.colors['info'], linestyle='--', alpha=0.7, label='Target (50%)')
             for bar, gpu_val in zip(bars3, gpu_usage):
                 ax3.text(bar.get_width() + 2,
                         bar.get_y() + bar.get_height()/2,
                         f'{gpu_val:.1f}%', va='center', ha='left', fontweight='bold')
             
+            ax3.legend(loc='lower right')
+            
             # Style all charts
             for ax in [ax1, ax2, ax3]:
                 ax.spines['top'].set_visible(False)
                 ax.spines['right'].set_visible(False)
-                ax.grid(True, alpha=0.3)
             
             plt.tight_layout()
             
             # Save chart
-            if save_path is None:
-                save_path = self.results_dir / "execution_summary.png"
+            chart_path = self.results_dir / "execution_summary.png"
+            plt.savefig(chart_path, dpi=300, bbox_inches='tight', facecolor='white')
             
-            plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
-            plt.close()
-            
-            logger.info(f"Execution summary chart saved: {save_path}")
+            self.figures['execution_summary'] = fig
+            logger.info(f"Execution summary chart saved: {chart_path}")
             return True
             
         except Exception as e:
@@ -333,238 +323,197 @@ class CTRVisualizationEngine:
             return False
     
     def create_comprehensive_pdf_report(self, summary_df: pd.DataFrame, analysis_results: Dict[str, Any]) -> bool:
-        """Create comprehensive PDF report with all analysis results"""
+        """Create comprehensive PDF report using matplotlib backend"""
         try:
-            if not REPORTLAB_AVAILABLE:
-                logger.warning("ReportLab not available, creating simple HTML report instead")
-                return self._create_html_report(summary_df, analysis_results)
+            if not MATPLOTLIB_AVAILABLE:
+                logger.warning("Matplotlib not available for PDF creation")
+                return False
             
             logger.info("Creating comprehensive PDF report")
             
             pdf_path = self.results_dir / "comprehensive_report.pdf"
-            doc = SimpleDocTemplate(str(pdf_path), pagesize=A4)
             
-            # Build story
-            story = []
-            styles = getSampleStyleSheet()
-            
-            # Title
-            title_style = ParagraphStyle(
-                'CustomTitle',
-                parent=styles['Heading1'],
-                fontSize=20,
-                spaceAfter=30,
-                alignment=1  # Center alignment
-            )
-            story.append(Paragraph("CTR Modeling Performance Analysis Report", title_style))
-            story.append(Spacer(1, 20))
-            
-            # Executive Summary
-            story.append(Paragraph("Executive Summary", styles['Heading2']))
-            
-            # Create summary table
-            summary_table_data = [['Model', 'Combined Score', 'CTR Quality', 'Performance Tier', 'Deployment Ready']]
-            
-            for _, row in summary_df.iterrows():
-                summary_table_data.append([
-                    str(row['model_name']),
-                    f"{row['combined_score']:.4f}",
-                    str(row['ctr_quality']),
-                    str(row['performance_tier']),
-                    'Yes' if row['deployment_ready'] else 'No'
-                ])
-            
-            summary_table = Table(summary_table_data)
-            summary_table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, 0), 10),
-                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-                ('GRID', (0, 0), (-1, -1), 1, colors.black)
-            ]))
-            
-            story.append(summary_table)
-            story.append(Spacer(1, 20))
-            
-            # Key Findings
-            story.append(Paragraph("Key Findings", styles['Heading2']))
-            
-            best_model = summary_df.loc[summary_df['combined_score'].idxmax()]
-            worst_model = summary_df.loc[summary_df['combined_score'].idxmin()]
-            
-            findings = [
-                f"• Best performing model: {best_model['model_name']} (Score: {best_model['combined_score']:.4f})",
-                f"• Lowest performing model: {worst_model['model_name']} (Score: {worst_model['combined_score']:.4f})",
-                f"• Models ready for deployment: {len(summary_df[summary_df['deployment_ready']])} out of {len(summary_df)}",
-                f"• Average CTR bias: {summary_df['ctr_bias'].abs().mean():.6f}",
-                f"• Models with excellent CTR quality: {len(summary_df[summary_df['ctr_quality'] == 'EXCELLENT'])}"
-            ]
-            
-            for finding in findings:
-                story.append(Paragraph(finding, styles['Normal']))
-            
-            story.append(Spacer(1, 20))
-            
-            # Recommendations
-            story.append(Paragraph("Recommendations", styles['Heading2']))
-            
-            recommendations = [
-                "• Focus on the best performing model for production deployment",
-                "• Monitor CTR bias closely to ensure prediction accuracy",
-                "• Consider ensemble methods to improve overall performance",
-                "• Implement regular model retraining schedule",
-                "• Set up monitoring for model drift detection"
-            ]
-            
-            for recommendation in recommendations:
-                story.append(Paragraph(recommendation, styles['Normal']))
-            
-            # Build PDF
-            doc.build(story)
+            with matplotlib.backends.backend_pdf.PdfPages(pdf_path) as pdf:
+                # Cover page
+                fig_cover = plt.figure(figsize=(8.27, 11.69))  # A4 size
+                fig_cover.text(0.5, 0.8, 'CTR Model Performance Analysis Report', 
+                              ha='center', fontsize=24, fontweight='bold')
+                fig_cover.text(0.5, 0.7, 'Comprehensive Analysis and Recommendations', 
+                              ha='center', fontsize=16, color='#34495e')
+                fig_cover.text(0.5, 0.6, f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', 
+                              ha='center', fontsize=12, color='#7f8c8d')
+                
+                # Executive summary
+                best_model = summary_df.loc[summary_df['combined_score'].idxmax()]
+                deployment_ready_count = len(summary_df[summary_df['deployment_ready']])
+                avg_ctr_bias = summary_df['ctr_bias'].abs().mean()
+                
+                fig_cover.text(0.5, 0.45, 'Executive Summary', ha='center', fontsize=16, fontweight='bold')
+                fig_cover.text(0.5, 0.38, f"Best Model: {best_model['model_name']}", ha='center', fontsize=12)
+                fig_cover.text(0.5, 0.34, f"Best Combined Score: {best_model['combined_score']:.4f}", ha='center', fontsize=12)
+                fig_cover.text(0.5, 0.30, f"Models Deployment Ready: {deployment_ready_count}/{len(summary_df)}", ha='center', fontsize=12)
+                fig_cover.text(0.5, 0.26, f"Average CTR Bias: {avg_ctr_bias:.6f}", ha='center', fontsize=12)
+                fig_cover.text(0.5, 0.22, f"Total Models Analyzed: {len(summary_df)}", ha='center', fontsize=12)
+                
+                # Key recommendations
+                fig_cover.text(0.5, 0.15, 'Key Recommendations', ha='center', fontsize=16, fontweight='bold')
+                fig_cover.text(0.5, 0.08, f"• Deploy {best_model['model_name']} for production", ha='center', fontsize=11)
+                fig_cover.text(0.5, 0.05, "• Implement CTR bias monitoring system", ha='center', fontsize=11)
+                fig_cover.text(0.5, 0.02, "• Consider ensemble methods for improved performance", ha='center', fontsize=11)
+                
+                pdf.savefig(fig_cover, bbox_inches='tight')
+                plt.close(fig_cover)
+                
+                # Add all generated charts to PDF
+                for fig_name, fig in self.figures.items():
+                    if fig is not None:
+                        pdf.savefig(fig, bbox_inches='tight')
+                        logger.info(f"Added {fig_name} to PDF report")
             
             logger.info(f"Comprehensive PDF report saved: {pdf_path}")
             return True
             
         except Exception as e:
             logger.error(f"PDF report creation failed: {e}")
-            return self._create_html_report(summary_df, analysis_results)
+            return False
     
-    def _create_html_report(self, summary_df: pd.DataFrame, analysis_results: Dict[str, Any]) -> bool:
-        """Create HTML report as fallback"""
+    def print_console_summary(self, summary_df: pd.DataFrame):
+        """Print professional ASCII summary to console"""
         try:
-            logger.info("Creating HTML report as fallback")
+            print("\n" + "="*85)
+            print("CTR MODEL PERFORMANCE ANALYSIS - EXECUTION SUMMARY")
+            print("="*85)
             
-            html_path = self.results_dir / "comprehensive_report.html"
+            # Sort by combined_score for display
+            top_models = summary_df.sort_values('combined_score', ascending=False).head(5)
             
-            html_content = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>CTR Modeling Performance Analysis Report</title>
-                <style>
-                    body {{ font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }}
-                    h1 {{ color: #2c3e50; text-align: center; }}
-                    h2 {{ color: #34495e; border-bottom: 2px solid #ecf0f1; padding-bottom: 10px; }}
-                    table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
-                    th, td {{ border: 1px solid #ddd; padding: 12px; text-align: center; }}
-                    th {{ background-color: #f2f2f2; font-weight: bold; }}
-                    tr:nth-child(even) {{ background-color: #f9f9f9; }}
-                    .highlight {{ background-color: #e8f5e8; }}
-                    .warning {{ background-color: #fff3cd; }}
-                    .danger {{ background-color: #f8d7da; }}
-                    ul {{ margin-left: 20px; }}
-                    li {{ margin: 10px 0; }}
-                </style>
-            </head>
-            <body>
-                <h1>CTR Modeling Performance Analysis Report</h1>
-                
-                <h2>Executive Summary</h2>
-                {summary_df.to_html(index=False, classes='summary-table', escape=False)}
-                
-                <h2>Key Findings</h2>
-                <ul>
-                    <li>Total models analyzed: {len(summary_df)}</li>
-                    <li>Best performing model: {summary_df.loc[summary_df['combined_score'].idxmax(), 'model_name']} 
-                        (Score: {summary_df['combined_score'].max():.4f})</li>
-                    <li>Models ready for deployment: {len(summary_df[summary_df['deployment_ready']])} out of {len(summary_df)}</li>
-                    <li>Average CTR bias: {summary_df['ctr_bias'].abs().mean():.6f}</li>
-                </ul>
-                
-                <h2>Recommendations</h2>
-                <ul>
-                    <li>Focus on the best performing model for production deployment</li>
-                    <li>Monitor CTR bias closely to ensure prediction accuracy</li>
-                    <li>Consider ensemble methods to improve overall performance</li>
-                    <li>Implement regular model retraining schedule</li>
-                </ul>
-                
-                <h2>Generated Charts</h2>
-                <p>The following visualization files have been generated:</p>
-                <ul>
-                    <li><strong>model_performance.png</strong> - Model performance comparison</li>
-                    <li><strong>ctr_analysis.png</strong> - CTR bias and quality analysis</li>
-                    <li><strong>execution_summary.png</strong> - Training time and resource usage</li>
-                </ul>
-                
-                <p><em>Report generated on: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}</em></p>
-            </body>
-            </html>
-            """
+            print("\nTop 5 Model Performance (Combined Score):")
+            print("┌" + "─"*75 + "┐")
+            print("│" + " "*27 + "Model Performance Overview" + " "*22 + "│")
+            print("├" + "─"*75 + "┤")
             
-            with open(html_path, 'w', encoding='utf-8') as f:
-                f.write(html_content)
+            max_score = top_models['combined_score'].max() if len(top_models) > 0 else 1
             
-            logger.info(f"HTML report saved: {html_path}")
-            return True
+            for _, model in top_models.iterrows():
+                name = str(model['model_name'])[:15]
+                score = model['combined_score']
+                bar_length = int((score / max_score) * 35) if max_score > 0 else 0
+                bar = "█" * bar_length
+                
+                print(f"│ {name:<15} {bar:<35} {score:.4f} │")
+            
+            print("└" + "─"*75 + "┘")
+            
+            # Key metrics summary
+            best_model = summary_df.loc[summary_df['combined_score'].idxmax()]
+            deployment_ready_count = len(summary_df[summary_df['deployment_ready']])
+            excellent_count = len(summary_df[summary_df['performance_tier'] == 'EXCELLENT'])
+            avg_ctr_bias = summary_df['ctr_bias'].abs().mean()
+            
+            print(f"\n🎯 Best Performing Model: {best_model['model_name']}")
+            print(f"📊 Combined Score: {best_model['combined_score']:.4f}")
+            print(f"🎯 CTR Quality: {best_model['ctr_quality']}")
+            print(f"⏱️  Training Time: {best_model['execution_time_sec']:.1f}s")
+            print(f"✅ Deployment Ready: {'Yes' if best_model['deployment_ready'] else 'No'}")
+            print(f"\n📈 System Overview:")
+            print(f"   • Total Models: {len(summary_df)}")
+            print(f"   • Deployment Ready: {deployment_ready_count}")
+            print(f"   • Excellent Tier: {excellent_count}")
+            print(f"   • Avg CTR Bias: {avg_ctr_bias:.6f}")
+            
+            print(f"\n📁 Analysis Results Location: {self.results_dir}")
+            print("="*85)
             
         except Exception as e:
-            logger.error(f"HTML report creation failed: {e}")
-            return False
+            logger.error(f"Console summary printing failed: {e}")
     
     def generate_all_visualizations(self, analysis_results: Dict[str, Any]) -> bool:
-        """Generate all visualizations from analysis results"""
+        """Generate all visualizations and reports"""
         try:
-            logger.info("Generating all visualizations")
+            logger.info("Starting comprehensive visualization generation")
             
-            # Load summary CSV
-            csv_path = self.results_dir / "summary.csv"
-            if not csv_path.exists():
-                logger.error("Summary CSV not found, cannot create visualizations")
+            # Load summary data
+            summary_df = self.load_summary_data()
+            if summary_df is None:
                 return False
             
-            summary_df = pd.read_csv(csv_path)
-            
             success_count = 0
+            total_tasks = 4
             
-            # Create model performance chart
+            # 1. Create model performance chart
             if self.create_model_performance_chart(summary_df):
                 success_count += 1
+                logger.info("✓ Model performance chart created")
             
-            # Create CTR analysis chart
-            if self.create_ctr_analysis_chart(summary_df):
+            # 2. Create CTR analysis dashboard
+            if self.create_ctr_analysis_dashboard(summary_df):
                 success_count += 1
+                logger.info("✓ CTR analysis dashboard created")
             
-            # Create execution summary chart
+            # 3. Create execution summary chart
             if self.create_execution_summary_chart(summary_df):
                 success_count += 1
+                logger.info("✓ Execution summary chart created")
             
-            # Create comprehensive report
+            # 4. Create comprehensive PDF report
             if self.create_comprehensive_pdf_report(summary_df, analysis_results):
                 success_count += 1
+                logger.info("✓ Comprehensive PDF report created")
             
-            logger.info(f"Visualization generation completed: {success_count}/4 successful")
+            # Print console summary
+            self.print_console_summary(summary_df)
             
-            return success_count >= 3  # At least 3 out of 4 should succeed
+            # Final status
+            logger.info(f"Visualization generation completed: {success_count}/{total_tasks} successful")
+            
+            if success_count >= 3:
+                logger.info("Results saved in 'results' folder:")
+                logger.info("  - summary.csv (comprehensive metrics)")
+                logger.info("  - model_performance.png (performance comparison)")
+                logger.info("  - ctr_analysis.png (4-panel CTR dashboard)")
+                logger.info("  - execution_summary.png (resource usage)")
+                logger.info("  - comprehensive_report.pdf (complete analysis)")
+                return True
+            else:
+                logger.warning("Some visualizations failed to create")
+                return False
             
         except Exception as e:
-            logger.error(f"Visualization generation failed: {e}")
+            logger.error(f"Visualization generation process failed: {e}")
             return False
+    
+    def clear_visualizations(self):
+        """Clear all visualization data and figures"""
+        try:
+            # Close all matplotlib figures
+            for fig in self.figures.values():
+                try:
+                    plt.close(fig)
+                except:
+                    pass
+            
+            self.figures.clear()
+            self.performance_data.clear()
+            gc.collect()
+            
+            logger.info("Visualization data cleared")
+            
+        except Exception as e:
+            logger.warning(f"Visualization cleanup failed: {e}")
 
 def create_all_visualizations(analysis_results: Dict[str, Any]) -> bool:
-    """Create all visualizations for CTR analysis results"""
+    """Main function to create all CTR visualizations and reports"""
     try:
-        logger.info("Starting visualization creation process")
+        logger.info("Initializing CTR visualization system")
         
         visualizer = CTRVisualizationEngine()
         success = visualizer.generate_all_visualizations(analysis_results)
         
-        if success:
-            logger.info("All visualizations created successfully")
-            logger.info("Results saved in 'results' folder:")
-            logger.info("  - summary.csv (comprehensive metrics)")
-            logger.info("  - model_performance.png (performance comparison)")
-            logger.info("  - ctr_analysis.png (CTR bias and quality)")
-            logger.info("  - execution_summary.png (resource usage)")
-            logger.info("  - comprehensive_report.pdf/html (full report)")
-        else:
-            logger.warning("Some visualizations failed to create")
+        # Cleanup
+        visualizer.clear_visualizations()
         
         return success
         
     except Exception as e:
-        logger.error(f"Visualization creation process failed: {e}")
+        logger.error(f"CTR visualization system failed: {e}")
         return False
