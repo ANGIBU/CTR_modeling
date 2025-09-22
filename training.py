@@ -594,13 +594,13 @@ class CTRModelTrainer:
             data_size_gb = (X_train.memory_usage(deep=True).sum() + y_train.memory_usage(deep=True)) / (1024**3)
             logger.info(f"Data size: {data_size_gb:.2f}GB, available memory: {available_memory:.2f}GB")
             
-            # More relaxed memory check for quick mode
-            memory_threshold = 1.0 if self.quick_mode else 3.0
+            # More aggressive memory check and sampling for large datasets
+            memory_threshold = 0.5 if self.quick_mode else 1.0  # Much lower threshold
             
-            if available_memory < memory_threshold:
-                logger.warning(f"Low memory detected: {available_memory:.2f}GB available")
-                logger.info("Applying memory efficient processing")
-                X_train, y_train, X_val, y_val = self._apply_memory_efficient_sampling(
+            if available_memory < memory_threshold or data_size_gb > available_memory * 0.8:
+                logger.warning(f"Low memory detected: {available_memory:.2f}GB available, data size: {data_size_gb:.2f}GB")
+                logger.info("Applying aggressive memory efficient processing")
+                X_train, y_train, X_val, y_val = self._apply_aggressive_memory_sampling(
                     X_train, y_train, X_val, y_val, available_memory
                 )
             
@@ -649,7 +649,7 @@ class CTRModelTrainer:
             
             if apply_calibration and X_val is not None and y_val is not None and not self.quick_mode:
                 current_memory = self.memory_tracker.get_available_memory()
-                if current_memory > 3:
+                if current_memory > 1:  # Much lower threshold
                     self._apply_calibration(model, X_val, y_val)
                     logger.info(f"{model_type} calibration applied successfully")
                 else:
@@ -684,6 +684,77 @@ class CTRModelTrainer:
             logger.error(f"Model training failed ({model_type}): {e}")
             self.memory_tracker.force_cleanup()
             raise
+    
+    def _apply_aggressive_memory_sampling(self, X_train: pd.DataFrame, y_train: pd.Series,
+                                        X_val: Optional[pd.DataFrame], y_val: Optional[pd.Series],
+                                        available_memory: float) -> Tuple[pd.DataFrame, pd.Series, 
+                                                                        Optional[pd.DataFrame], Optional[pd.Series]]:
+        """Apply aggressive memory efficient sampling for large datasets"""
+        try:
+            current_size = len(X_train)
+            
+            # Calculate target size based on available memory and data size
+            if available_memory < 1:
+                target_size = min(current_size, self.config.MIN_SAMPLE_SIZE)  # 1M samples
+            elif available_memory < 2:
+                target_size = min(current_size, 2000000)  # 2M samples
+            elif available_memory < 3:
+                target_size = min(current_size, 3000000)  # 3M samples
+            else:
+                target_size = min(current_size, self.config.MAX_SAMPLE_SIZE)  # 5M samples
+            
+            if current_size > target_size:
+                logger.info(f"Applying aggressive sampling: {current_size:,} -> {target_size:,}")
+                
+                # Stratified sampling to maintain class balance
+                positive_indices = y_train[y_train == 1].index
+                negative_indices = y_train[y_train == 0].index
+                
+                positive_ratio = len(positive_indices) / current_size
+                target_positive = max(int(target_size * positive_ratio), 1000)  # At least 1000 positive samples
+                target_negative = target_size - target_positive
+                
+                # Sample positive and negative separately
+                if len(positive_indices) > target_positive:
+                    sampled_positive = np.random.choice(positive_indices, size=target_positive, replace=False)
+                else:
+                    sampled_positive = positive_indices
+                
+                if len(negative_indices) > target_negative:
+                    sampled_negative = np.random.choice(negative_indices, size=target_negative, replace=False)
+                else:
+                    sampled_negative = negative_indices[:target_negative]
+                
+                # Combine samples
+                sample_indices = np.concatenate([sampled_positive, sampled_negative])
+                np.random.shuffle(sample_indices)
+                
+                X_train_sampled = X_train.iloc[sample_indices].reset_index(drop=True)
+                y_train_sampled = y_train.iloc[sample_indices].reset_index(drop=True)
+                
+                logger.info(f"Sampled data: {len(X_train_sampled):,} samples with CTR: {y_train_sampled.mean():.4f}")
+                
+                # Also sample validation data if provided
+                if X_val is not None and y_val is not None:
+                    val_size = min(len(X_val), target_size // 10)  # 10% of training size
+                    if len(X_val) > val_size:
+                        val_indices = np.random.choice(len(X_val), size=val_size, replace=False)
+                        X_val_sampled = X_val.iloc[val_indices].reset_index(drop=True)
+                        y_val_sampled = y_val.iloc[val_indices].reset_index(drop=True)
+                    else:
+                        X_val_sampled = X_val
+                        y_val_sampled = y_val
+                else:
+                    X_val_sampled = X_val
+                    y_val_sampled = y_val
+                
+                return X_train_sampled, y_train_sampled, X_val_sampled, y_val_sampled
+            
+            return X_train, y_train, X_val, y_val
+            
+        except Exception as e:
+            logger.warning(f"Aggressive memory sampling failed: {e}")
+            return X_train, y_train, X_val, y_val
     
     def _get_quick_mode_params(self, model_type: str) -> Dict[str, Any]:
         """Get simplified parameters for quick mode testing"""
@@ -742,53 +813,6 @@ class CTRModelTrainer:
         logger.info(f"Factors - Memory: {memory_factor:.1f}x, GPU: {gpu_factor:.1f}x, CPU: {cpu_factor:.1f}x")
         
         return max(10, min(optimal_trials, 200))
-    
-    def _apply_memory_efficient_sampling(self, X_train: pd.DataFrame, y_train: pd.Series,
-                                       X_val: Optional[pd.DataFrame], y_val: Optional[pd.Series],
-                                       available_memory: float) -> Tuple[pd.DataFrame, pd.Series, 
-                                                                       Optional[pd.DataFrame], Optional[pd.Series]]:
-        """Apply memory efficient sampling"""
-        try:
-            current_size = len(X_train)
-            
-            # More relaxed sampling for quick mode
-            if self.quick_mode:
-                return X_train, y_train, X_val, y_val
-            
-            if available_memory < 2:
-                target_size = min(current_size, 3000000)
-            elif available_memory < 5:
-                target_size = min(current_size, 6000000)
-            else:
-                return X_train, y_train, X_val, y_val
-            
-            if current_size > target_size:
-                logger.info(f"Applying memory efficient sampling: {current_size:,} -> {target_size:,}")
-                
-                sample_indices = np.random.choice(current_size, size=target_size, replace=False)
-                X_train_sampled = X_train.iloc[sample_indices].reset_index(drop=True)
-                y_train_sampled = y_train.iloc[sample_indices].reset_index(drop=True)
-                
-                if X_val is not None and y_val is not None:
-                    val_size = min(len(X_val), target_size // 4)
-                    if len(X_val) > val_size:
-                        val_indices = np.random.choice(len(X_val), size=val_size, replace=False)
-                        X_val_sampled = X_val.iloc[val_indices].reset_index(drop=True)
-                        y_val_sampled = y_val.iloc[val_indices].reset_index(drop=True)
-                    else:
-                        X_val_sampled = X_val
-                        y_val_sampled = y_val
-                else:
-                    X_val_sampled = X_val
-                    y_val_sampled = y_val
-                
-                return X_train_sampled, y_train_sampled, X_val_sampled, y_val_sampled
-            
-            return X_train, y_train, X_val, y_val
-            
-        except Exception as e:
-            logger.warning(f"Memory efficient sampling failed: {e}")
-            return X_train, y_train, X_val, y_val
     
     def _validate_and_apply_params(self, model_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Validate and apply parameters"""

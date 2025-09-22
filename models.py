@@ -115,18 +115,18 @@ class MemoryMonitor:
     """Memory monitoring with quick mode support"""
     
     def __init__(self):
-        # Memory thresholds based on available memory (not total usage)
+        # Memory thresholds based on available memory (much lower for large datasets)
         self.memory_thresholds = {
-            'warning': 15.0,    # Warning if less than 15GB available
-            'critical': 10.0,   # Critical if less than 10GB available
-            'abort': 5.0        # Abort if less than 5GB available
+            'warning': 8.0,     # Warning if less than 8GB available
+            'critical': 4.0,    # Critical if less than 4GB available
+            'abort': 1.0        # Abort if less than 1GB available
         }
         
-        # Quick mode thresholds (much more relaxed)
+        # Quick mode thresholds (even more relaxed)
         self.quick_mode_thresholds = {
-            'warning': 5.0,     # Warning if less than 5GB available
-            'critical': 3.0,    # Critical if less than 3GB available
-            'abort': 1.0        # Abort if less than 1GB available
+            'warning': 2.0,     # Warning if less than 2GB available
+            'critical': 1.0,    # Critical if less than 1GB available
+            'abort': 0.5        # Abort if less than 0.5GB available
         }
         
         self.rtx_4060ti_optimized = False
@@ -480,7 +480,7 @@ class BaseModel(ABC):
             logger.error(f"Memory safe fit failed: {e}")
             raise
     
-    def _memory_safe_predict(self, predict_function, X, batch_size=100000):
+    def _memory_safe_predict(self, predict_function, X, batch_size=50000):  # Reduced batch size
         """Memory safe prediction with batching"""
         try:
             # For quick mode with small datasets, skip batching
@@ -499,6 +499,10 @@ class BaseModel(ABC):
                 
                 batch_pred = predict_function(batch_X)
                 predictions.append(batch_pred)
+                
+                # Cleanup memory after each batch
+                if start_idx % (batch_size * 5) == 0:
+                    gc.collect()
             
             return np.concatenate(predictions)
             
@@ -596,28 +600,28 @@ class LightGBMModel(BaseModel):
             'objective': 'binary',
             'metric': 'binary_logloss',
             'boosting_type': 'gbdt',
-            'num_leaves': 63,
-            'max_depth': 8,
-            'learning_rate': 0.008,
-            'feature_fraction': 0.88,
-            'bagging_fraction': 0.88,
+            'num_leaves': 31,               # Reduced for memory efficiency
+            'max_depth': 6,                 # Reduced for memory efficiency
+            'learning_rate': 0.01,          # Slightly higher
+            'feature_fraction': 0.8,        # Reduced for memory efficiency
+            'bagging_fraction': 0.8,        # Reduced for memory efficiency
             'bagging_freq': 5,
-            'min_data_in_leaf': 50,
+            'min_data_in_leaf': 100,        # Increased for memory efficiency
             'lambda_l1': 0.1,
             'lambda_l2': 0.2,
             'min_gain_to_split': 0.01,
             'random_state': 42,
-            'n_estimators': 10000,
-            'early_stopping_rounds': 250,
-            'num_threads': 12,
-            'max_bin': 255,
+            'n_estimators': 3000,           # Reduced for memory efficiency
+            'early_stopping_rounds': 100,   # Reduced for faster training
+            'num_threads': 8,               # Reduced for memory efficiency
+            'max_bin': 128,                 # Reduced for memory efficiency
             'verbosity': -1,
             'min_child_weight': 0.001,
             'reg_alpha': 0.1,
             'reg_lambda': 0.2,
             'cat_smooth': 8.0,
             'cat_l2': 8.0,
-            'max_cat_threshold': 32
+            'max_cat_threshold': 16         # Reduced for memory efficiency
         }
         
         if params:
@@ -629,15 +633,15 @@ class LightGBMModel(BaseModel):
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         simplified_params = {
-            'num_leaves': 31,
-            'max_depth': 6,
-            'n_estimators': 5000,
-            'min_data_in_leaf': 100,
-            'num_threads': 8,
-            'max_bin': 128,
-            'early_stopping_rounds': 150,
-            'feature_fraction': 0.8,
-            'bagging_fraction': 0.8
+            'num_leaves': 15,              # Further reduced
+            'max_depth': 4,                # Further reduced
+            'n_estimators': 1000,          # Further reduced
+            'min_data_in_leaf': 200,       # Further increased
+            'num_threads': 4,              # Further reduced
+            'max_bin': 64,                 # Further reduced
+            'early_stopping_rounds': 50,   # Further reduced
+            'feature_fraction': 0.7,       # Further reduced
+            'bagging_fraction': 0.7        # Further reduced
         }
         
         self.params.update(simplified_params)
@@ -650,7 +654,7 @@ class LightGBMModel(BaseModel):
             'max_depth': 4,
             'n_estimators': 50,
             'learning_rate': 0.1,
-            'min_data_in_leaf': 5,
+            'min_data_in_leaf': 20,        # Lower for small datasets
             'num_threads': 4,
             'max_bin': 64,
             'early_stopping_rounds': 10,
@@ -673,13 +677,23 @@ class LightGBMModel(BaseModel):
             if self.quick_mode:
                 self._apply_quick_mode_params()
             
+            # Apply memory efficient data preprocessing
             X_train_clean = X_train.fillna(0)
             
+            # More aggressive dtype optimization
             for col in X_train_clean.columns:
                 if X_train_clean[col].dtype in ['float64']:
                     X_train_clean[col] = X_train_clean[col].astype('float32')
+                elif X_train_clean[col].dtype in ['int64']:
+                    X_train_clean[col] = X_train_clean[col].astype('int32')
             
-            train_data = lgb.Dataset(X_train_clean, label=y_train, free_raw_data=False)
+            # Memory efficient dataset creation
+            train_data = lgb.Dataset(
+                X_train_clean, 
+                label=y_train, 
+                free_raw_data=True,  # Free raw data after creating dataset
+                params={'max_bin': self.params.get('max_bin', 128)}
+            )
             
             valid_sets = [train_data]
             valid_names = ['train']
@@ -690,23 +704,37 @@ class LightGBMModel(BaseModel):
                 for col in X_val_clean.columns:
                     if X_val_clean[col].dtype in ['float64']:
                         X_val_clean[col] = X_val_clean[col].astype('float32')
+                    elif X_val_clean[col].dtype in ['int64']:
+                        X_val_clean[col] = X_val_clean[col].astype('int32')
                 
-                valid_data = lgb.Dataset(X_val_clean, label=y_val, reference=train_data, free_raw_data=False)
+                valid_data = lgb.Dataset(
+                    X_val_clean, 
+                    label=y_val, 
+                    reference=train_data, 
+                    free_raw_data=True,
+                    params={'max_bin': self.params.get('max_bin', 128)}
+                )
                 valid_sets.append(valid_data)
                 valid_names.append('valid')
             
-            early_stopping = self.params.get('early_stopping_rounds', 250)
+            early_stopping = self.params.get('early_stopping_rounds', 100)
             
+            # Train with memory efficient callbacks
             self.model = lgb.train(
                 self.params,
                 train_data,
                 valid_sets=valid_sets,
                 valid_names=valid_names,
-                callbacks=[lgb.early_stopping(early_stopping), lgb.log_evaluation(0)]
+                callbacks=[
+                    lgb.early_stopping(early_stopping), 
+                    lgb.log_evaluation(0),
+                    lgb.reset_parameter(max_bin=self.params.get('max_bin', 128))
+                ]
             )
             
             self.is_fitted = True
             
+            # Apply calibration if validation data available and not in quick mode
             if X_val_clean is not None and y_val is not None and not self.quick_mode:
                 logger.info(f"{self.name}: Starting calibration application")
                 self.apply_calibration(X_val_clean, y_val, method='auto')
@@ -715,9 +743,11 @@ class LightGBMModel(BaseModel):
                 else:
                     logger.warning(f"{self.name}: Calibration application failed")
             
+            # Cleanup
             del X_train_clean
             if X_val_clean is not None:
                 del X_val_clean
+            gc.collect()
             
             return self
         
@@ -732,9 +762,12 @@ class LightGBMModel(BaseModel):
             X_processed = self._ensure_feature_consistency(batch_X)
             X_processed = X_processed.fillna(0)
             
+            # Apply same dtype optimization as training
             for col in X_processed.columns:
                 if X_processed[col].dtype in ['float64']:
                     X_processed[col] = X_processed[col].astype('float32')
+                elif X_processed[col].dtype in ['int64']:
+                    X_processed[col] = X_processed[col].astype('int32')
             
             num_iteration = getattr(self.model, 'best_iteration', None)
             proba = self.model.predict(X_processed, num_iteration=num_iteration)
@@ -742,7 +775,7 @@ class LightGBMModel(BaseModel):
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
             return self._enhance_prediction_diversity(proba)
         
-        return self._memory_safe_predict(_predict_internal, X)
+        return self._memory_safe_predict(_predict_internal, X, batch_size=30000)  # Smaller batch
 
 class XGBoostModel(BaseModel):
     """XGBoost model with memory management and tuned parameters"""
@@ -755,25 +788,26 @@ class XGBoostModel(BaseModel):
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
             'tree_method': 'hist',
-            'max_depth': 7,
-            'learning_rate': 0.008,
-            'subsample': 0.88,
-            'colsample_bytree': 0.88,
-            'colsample_bylevel': 0.88,
-            'min_child_weight': 5,
-            'reg_alpha': 0.08,
+            'max_depth': 6,                 # Reduced for memory efficiency
+            'learning_rate': 0.01,          # Slightly higher
+            'subsample': 0.8,               # Reduced for memory efficiency
+            'colsample_bytree': 0.8,        # Reduced for memory efficiency
+            'colsample_bylevel': 0.8,       # Reduced for memory efficiency
+            'min_child_weight': 8,          # Increased for memory efficiency
+            'reg_alpha': 0.1,
             'reg_lambda': 0.2,
             'scale_pos_weight': 52.3,
             'random_state': 42,
-            'n_estimators': 10000,
-            'early_stopping_rounds': 250,
-            'max_bin': 255,
-            'nthread': 12,
+            'n_estimators': 2000,           # Reduced for memory efficiency
+            'early_stopping_rounds': 100,   # Reduced for faster training
+            'max_bin': 128,                 # Reduced for memory efficiency
+            'nthread': 6,                   # Reduced for memory efficiency
             'grow_policy': 'lossguide',
             'gamma': 0.05,
-            'max_leaves': 511
+            'max_leaves': 255               # Reduced for memory efficiency
         }
         
+        # GPU optimization if available and memory allows
         if rtx_4060ti_detected and TORCH_AVAILABLE:
             try:
                 test_tensor = torch.zeros(1000, 1000).cuda()
@@ -787,7 +821,8 @@ class XGBoostModel(BaseModel):
                     default_params.update({
                         'tree_method': 'gpu_hist',
                         'gpu_id': 0,
-                        'predictor': 'gpu_predictor'
+                        'predictor': 'gpu_predictor',
+                        'max_bin': 64  # Further reduced for GPU memory
                     })
                     logger.info("XGBoost GPU mode enabled")
                 else:
@@ -805,19 +840,20 @@ class XGBoostModel(BaseModel):
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         simplified_params = {
-            'max_depth': 5,
-            'n_estimators': 3000,
-            'min_child_weight': 8,
-            'nthread': 8,
+            'max_depth': 4,                # Further reduced
+            'n_estimators': 1000,          # Further reduced
+            'min_child_weight': 16,        # Further increased
+            'nthread': 4,                  # Further reduced
             'tree_method': 'hist',
-            'early_stopping_rounds': 150,
-            'max_leaves': 127,
-            'max_bin': 128,
-            'colsample_bytree': 0.8,
-            'subsample': 0.8
+            'early_stopping_rounds': 50,   # Further reduced
+            'max_leaves': 63,              # Further reduced
+            'max_bin': 64,                 # Further reduced
+            'colsample_bytree': 0.7,       # Further reduced
+            'subsample': 0.7               # Further reduced
         }
         
         self.params.update(simplified_params)
+        # Remove GPU parameters if memory is low
         self.params.pop('gpu_id', None)
         self.params.pop('predictor', None)
         logger.info(f"{self.name}: Parameters simplified for memory conservation")
@@ -836,6 +872,7 @@ class XGBoostModel(BaseModel):
         }
         
         self.params.update(quick_params)
+        # Remove GPU parameters in quick mode
         self.params.pop('gpu_id', None)
         self.params.pop('predictor', None)
         logger.info(f"{self.name}: Quick mode parameters applied")
@@ -856,8 +893,10 @@ class XGBoostModel(BaseModel):
             if TORCH_AVAILABLE and torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
+            # Apply memory efficient data preprocessing
             X_train_clean = X_train.fillna(0)
             
+            # More aggressive dtype optimization
             for col in X_train_clean.columns:
                 if X_train_clean[col].dtype in ['float64']:
                     X_train_clean[col] = X_train_clean[col].astype('float32')
@@ -865,7 +904,12 @@ class XGBoostModel(BaseModel):
                     X_train_clean[col] = X_train_clean[col].astype('int32')
             
             logger.info(f"{self.name}: Creating training DMatrix")
-            dtrain = xgb.DMatrix(X_train_clean, label=y_train, feature_names=list(X_train_clean.columns))
+            dtrain = xgb.DMatrix(
+                X_train_clean, 
+                label=y_train, 
+                feature_names=list(X_train_clean.columns),
+                enable_categorical=False
+            )
             
             eval_set = [(dtrain, 'train')]
             dval = None
@@ -879,16 +923,21 @@ class XGBoostModel(BaseModel):
                     elif X_val_clean[col].dtype in ['int64']:
                         X_val_clean[col] = X_val_clean[col].astype('int32')
                 
-                dval = xgb.DMatrix(X_val_clean, label=y_val, feature_names=list(X_val_clean.columns))
+                dval = xgb.DMatrix(
+                    X_val_clean, 
+                    label=y_val, 
+                    feature_names=list(X_val_clean.columns),
+                    enable_categorical=False
+                )
                 eval_set.append((dval, 'eval'))
             
-            early_stopping = self.params.pop('early_stopping_rounds', 250)
+            early_stopping = self.params.pop('early_stopping_rounds', 100)
             
             logger.info(f"{self.name}: Starting XGBoost training")
             self.model = xgb.train(
                 self.params,
                 dtrain,
-                num_boost_round=self.params.get('n_estimators', 10000),
+                num_boost_round=self.params.get('n_estimators', 2000),
                 evals=eval_set,
                 early_stopping_rounds=early_stopping,
                 verbose_eval=0
@@ -897,6 +946,7 @@ class XGBoostModel(BaseModel):
             logger.info(f"{self.name}: Training completed successfully")
             self.is_fitted = True
             
+            # Apply calibration if validation data available and not in quick mode
             if dval is not None and not self.quick_mode:
                 logger.info(f"{self.name}: Starting calibration application")
                 X_val_clean = X_val.fillna(0)
@@ -912,10 +962,12 @@ class XGBoostModel(BaseModel):
                 else:
                     logger.warning(f"{self.name}: Calibration application failed")
             
+            # Cleanup
             del dtrain
             if dval is not None:
                 del dval
             del X_train_clean
+            gc.collect()
             
             return self
         
@@ -930,13 +982,18 @@ class XGBoostModel(BaseModel):
             X_processed = self._ensure_feature_consistency(batch_X)
             X_processed = X_processed.fillna(0)
             
+            # Apply same dtype optimization as training
             for col in X_processed.columns:
                 if X_processed[col].dtype in ['float64']:
                     X_processed[col] = X_processed[col].astype('float32')
                 elif X_processed[col].dtype in ['int64']:
                     X_processed[col] = X_processed[col].astype('int32')
             
-            dtest = xgb.DMatrix(X_processed, feature_names=list(X_processed.columns))
+            dtest = xgb.DMatrix(
+                X_processed, 
+                feature_names=list(X_processed.columns),
+                enable_categorical=False
+            )
             proba = self.model.predict(dtest)
             
             del dtest
@@ -944,7 +1001,7 @@ class XGBoostModel(BaseModel):
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
             return self._enhance_prediction_diversity(proba)
         
-        return self._memory_safe_predict(_predict_internal, X)
+        return self._memory_safe_predict(_predict_internal, X, batch_size=20000)  # Smaller batch
 
 class LogisticModel(BaseModel):
     """Logistic Regression model with tuned parameters"""
@@ -954,13 +1011,13 @@ class LogisticModel(BaseModel):
             raise ImportError("Scikit-learn is not installed.")
         
         default_params = {
-            'C': 1.2,
+            'C': 1.0,                      # Slightly reduced
             'penalty': 'l2',
             'solver': 'lbfgs',
-            'max_iter': 3000,
+            'max_iter': 2000,              # Reduced for memory efficiency
             'random_state': 42,
             'class_weight': 'balanced',
-            'n_jobs': 12
+            'n_jobs': 6                    # Reduced for memory efficiency
         }
         
         if params:
@@ -975,8 +1032,8 @@ class LogisticModel(BaseModel):
         """Simplify parameters when memory is low"""
         simplified_params = {
             'C': 1.0,
-            'max_iter': 1500,
-            'n_jobs': 8
+            'max_iter': 1000,              # Further reduced
+            'n_jobs': 4                    # Further reduced
         }
         
         self.params.update(simplified_params)
@@ -1007,23 +1064,48 @@ class LogisticModel(BaseModel):
             if self.quick_mode:
                 self._apply_quick_mode_params()
             
+            # Apply memory efficient data preprocessing
             X_train_clean = X_train.fillna(0)
             
+            # More aggressive dtype optimization
             for col in X_train_clean.columns:
                 if X_train_clean[col].dtype in ['float64']:
                     X_train_clean[col] = X_train_clean[col].astype('float32')
+                elif X_train_clean[col].dtype in ['int64']:
+                    X_train_clean[col] = X_train_clean[col].astype('int32')
             
-            # No sampling needed for small datasets in quick mode
-            if self.quick_mode or len(X_train_clean) <= 6000000:
+            # More aggressive sampling for large datasets
+            if self.quick_mode or len(X_train_clean) <= 2000000:  # Reduced from 6M
                 X_train_sample = X_train_clean
                 y_train_sample = y_train
             else:
                 if not self.sampling_logged:
-                    sample_size = 6000000
+                    sample_size = 2000000  # Reduced from 6M
                     logger.info(f"Large data detected, applying sampling ({len(X_train_clean):,} -> {sample_size:,})")
                     self.sampling_logged = True
                     
-                    sample_indices = np.random.choice(len(X_train_clean), size=sample_size, replace=False)
+                    # Stratified sampling
+                    positive_indices = y_train[y_train == 1].index
+                    negative_indices = y_train[y_train == 0].index
+                    
+                    positive_ratio = len(positive_indices) / len(y_train)
+                    target_positive = max(int(sample_size * positive_ratio), 500)  # At least 500 positive
+                    target_negative = sample_size - target_positive
+                    
+                    # Sample positive and negative separately
+                    if len(positive_indices) > target_positive:
+                        sampled_positive = np.random.choice(positive_indices, size=target_positive, replace=False)
+                    else:
+                        sampled_positive = positive_indices
+                    
+                    if len(negative_indices) > target_negative:
+                        sampled_negative = np.random.choice(negative_indices, size=target_negative, replace=False)
+                    else:
+                        sampled_negative = negative_indices[:target_negative]
+                    
+                    sample_indices = np.concatenate([sampled_positive, sampled_negative])
+                    np.random.shuffle(sample_indices)
+                    
                     X_train_sample = X_train_clean.iloc[sample_indices]
                     y_train_sample = y_train.iloc[sample_indices]
                 else:
@@ -1044,12 +1126,15 @@ class LogisticModel(BaseModel):
                 self.model.fit(X_train_sample, y_train_sample)
                 self.is_fitted = True
             
+            # Apply calibration if validation data available and not in quick mode
             if X_val is not None and y_val is not None and not self.quick_mode:
                 logger.info(f"{self.name}: Starting calibration application")
                 X_val_clean = X_val.fillna(0)
                 for col in X_val_clean.columns:
                     if X_val_clean[col].dtype in ['float64']:
                         X_val_clean[col] = X_val_clean[col].astype('float32')
+                    elif X_val_clean[col].dtype in ['int64']:
+                        X_val_clean[col] = X_val_clean[col].astype('int32')
                 
                 self.apply_calibration(X_val_clean, y_val, method='auto')
                 if self.is_calibrated:
@@ -1057,7 +1142,9 @@ class LogisticModel(BaseModel):
                 else:
                     logger.warning(f"{self.name}: Calibration application failed")
             
+            # Cleanup
             del X_train_clean
+            gc.collect()
             
             return self
         
@@ -1072,15 +1159,18 @@ class LogisticModel(BaseModel):
             X_processed = self._ensure_feature_consistency(batch_X)
             X_processed = X_processed.fillna(0)
             
+            # Apply same dtype optimization as training
             for col in X_processed.columns:
                 if X_processed[col].dtype in ['float64']:
                     X_processed[col] = X_processed[col].astype('float32')
+                elif X_processed[col].dtype in ['int64']:
+                    X_processed[col] = X_processed[col].astype('int32')
             
             proba = self.model.predict_proba(X_processed)[:, 1]
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
             return self._enhance_prediction_diversity(proba)
         
-        return self._memory_safe_predict(_predict_internal, X)
+        return self._memory_safe_predict(_predict_internal, X, batch_size=40000)  # Larger batch for simpler model
 
 class ModelFactory:
     """Model factory for creating models"""

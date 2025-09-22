@@ -63,32 +63,32 @@ class Config:
     USE_MIXED_PRECISION = True
     GPU_OPTIMIZATION_LEVEL = 3
     
-    # Memory settings (optimized for 64GB system)
+    # Memory settings (optimized for 64GB system with large dataset)
     MAX_MEMORY_GB = 60
-    CHUNK_SIZE = 100000
-    BATCH_SIZE_GPU = 12288
-    BATCH_SIZE_CPU = 4096
-    PREFETCH_FACTOR = 6
-    NUM_WORKERS = 12
+    CHUNK_SIZE = 50000                    # Reduced from 100000
+    BATCH_SIZE_GPU = 8192                 # Reduced from 12288
+    BATCH_SIZE_CPU = 2048                 # Reduced from 4096
+    PREFETCH_FACTOR = 4                   # Reduced from 6
+    NUM_WORKERS = 8                       # Reduced from 12
     
-    # Memory thresholds (adjusted for performance)
-    MEMORY_WARNING_THRESHOLD = 50
-    MEMORY_CRITICAL_THRESHOLD = 55
-    MEMORY_ABORT_THRESHOLD = 60
+    # Memory thresholds (adjusted for large dataset processing)
+    MEMORY_WARNING_THRESHOLD = 30         # Reduced from 50
+    MEMORY_CRITICAL_THRESHOLD = 35        # Reduced from 55
+    MEMORY_ABORT_THRESHOLD = 40           # Reduced from 60
     
-    # Data size limits
-    MAX_TRAIN_SIZE = 20000000
-    MAX_TEST_SIZE = 3000000
-    MAX_INTERACTION_FEATURES = 250
+    # Data size limits (reduced for memory efficiency)
+    MAX_TRAIN_SIZE = 8000000              # Reduced from 20000000
+    MAX_TEST_SIZE = 2000000               # Reduced from 3000000
+    MAX_INTERACTION_FEATURES = 150        # Reduced from 250
     
     # Model training settings (tuned parameters)
     MODEL_TRAINING_CONFIG = {
         'lightgbm': {
-            'max_depth': 8,
-            'num_leaves': 63,
-            'min_data_in_leaf': 50,
-            'feature_fraction': 0.88,
-            'bagging_fraction': 0.88,
+            'max_depth': 6,               # Reduced from 8
+            'num_leaves': 31,             # Reduced from 63
+            'min_data_in_leaf': 100,      # Increased from 50
+            'feature_fraction': 0.8,      # Reduced from 0.88
+            'bagging_fraction': 0.8,      # Reduced from 0.88
             'bagging_freq': 5,
             'lambda_l1': 0.1,
             'lambda_l2': 0.2,
@@ -98,71 +98,71 @@ class Config:
             'cat_l2': 8.0
         },
         'xgboost': {
-            'max_depth': 7,
-            'learning_rate': 0.06,
-            'n_estimators': 800,
-            'subsample': 0.88,
-            'colsample_bytree': 0.88,
-            'min_child_weight': 5,
+            'max_depth': 6,               # Reduced from 7
+            'learning_rate': 0.08,        # Increased from 0.06
+            'n_estimators': 500,          # Reduced from 800
+            'subsample': 0.8,             # Reduced from 0.88
+            'colsample_bytree': 0.8,      # Reduced from 0.88
+            'min_child_weight': 8,        # Increased from 5
             'gamma': 0.05,
             'alpha': 0.08,
             'lambda': 0.2,
             'scale_pos_weight': 52.3
         },
         'logistic': {
-            'C': 1.2,
+            'C': 1.0,                     # Reduced from 1.2
             'penalty': 'l2',
             'solver': 'lbfgs',
-            'max_iter': 3000,
+            'max_iter': 2000,             # Reduced from 3000
             'class_weight': 'balanced',
             'random_state': 42
         }
     }
     
-    # Feature engineering settings (expanded)
+    # Feature engineering settings (simplified for memory efficiency)
     FEATURE_ENGINEERING_CONFIG = {
         'enable_interaction_features': True,
-        'enable_polynomial_features': True,
+        'enable_polynomial_features': False,    # Disabled for memory
         'enable_binning': True,
         'enable_target_encoding': True,
         'enable_frequency_encoding': True,
-        'enable_statistical_features': True,
-        'max_interaction_degree': 3,
+        'enable_statistical_features': False,   # Disabled for memory
+        'max_interaction_degree': 2,            # Reduced from 3
         'binning_strategy': 'quantile',
-        'n_bins': 20,
-        'min_frequency': 2,
+        'n_bins': 10,                           # Reduced from 20
+        'min_frequency': 5,                     # Increased from 2
         'target_encoding_smoothing': 4.0,
-        'enable_cross_validation_encoding': True
+        'enable_cross_validation_encoding': False # Disabled for memory
     }
     
     # Cross-validation settings
-    CV_FOLDS = 5
+    CV_FOLDS = 3                          # Reduced from 5
     CV_SHUFFLE = True
     RANDOM_STATE = 42
     
-    # Early stopping settings (optimized)
-    EARLY_STOPPING_ROUNDS = 250
+    # Early stopping settings (more aggressive)
+    EARLY_STOPPING_ROUNDS = 100          # Reduced from 250
     EARLY_STOPPING_TOLERANCE = 1e-6
     
-    # Hyperparameter tuning settings  
-    OPTUNA_N_TRIALS = 200
-    OPTUNA_TIMEOUT = 5400
+    # Hyperparameter tuning settings (reduced for memory)
+    OPTUNA_N_TRIALS = 50                  # Reduced from 200
+    OPTUNA_TIMEOUT = 1800                 # Reduced from 5400
     OPTUNA_N_JOBS = 1
     OPTUNA_VERBOSITY = 1
     
-    # Ensemble settings (adjusted weights)
+    # Ensemble settings (simplified)
     ENSEMBLE_CONFIG = {
-        'voting_weights': {'lightgbm': 0.42, 'xgboost': 0.38, 'logistic': 0.20},
-        'stacking_cv_folds': 5,
+        'voting_weights': {'lightgbm': 0.5, 'xgboost': 0.3, 'logistic': 0.2},
+        'stacking_cv_folds': 3,            # Reduced from 5
         'blending_ratio': 0.8,
         'diversity_threshold': 0.06,
         'performance_threshold': 0.28,
-        'enable_meta_features': True
+        'enable_meta_features': False      # Disabled for memory
     }
     
     # Calibration settings
     CALIBRATION_METHOD = 'isotonic'
-    CALIBRATION_CV_FOLDS = 5
+    CALIBRATION_CV_FOLDS = 3              # Reduced from 5
     
     # Evaluation configuration (corrected parameters)
     EVALUATION_CONFIG = {
@@ -190,11 +190,18 @@ class Config:
     LOG_FILE_MAX_SIZE = 10 * 1024 * 1024  # 10MB
     LOG_FILE_BACKUP_COUNT = 5
     
-    # Performance settings
+    # Performance settings (optimized for memory)
     ENABLE_PARALLEL_PROCESSING = True
-    ENABLE_MEMORY_MAPPING = True
-    ENABLE_CACHING = True
-    CACHE_SIZE_MB = 3072
+    ENABLE_MEMORY_MAPPING = False         # Disabled for memory
+    ENABLE_CACHING = False                # Disabled for memory
+    CACHE_SIZE_MB = 1024                  # Reduced from 3072
+    
+    # Large dataset specific settings
+    LARGE_DATASET_MODE = True
+    MEMORY_EFFICIENT_SAMPLING = True
+    AGGRESSIVE_SAMPLING_THRESHOLD = 0.5   # Sample when memory usage > 50%
+    MIN_SAMPLE_SIZE = 1000000             # Minimum sample size
+    MAX_SAMPLE_SIZE = 5000000             # Maximum sample size
     
     # RTX 4060 Ti specific settings
     RTX_4060_TI_OPTIMIZATION = True
@@ -285,3 +292,23 @@ class Config:
             print("Requirements not met. Check data files and system resources.")
         
         return requirements
+    
+    @classmethod
+    def get_memory_efficient_config(cls):
+        """Get memory efficient configuration"""
+        return {
+            'chunk_size': cls.CHUNK_SIZE,
+            'batch_size': cls.BATCH_SIZE_CPU,
+            'max_train_size': cls.MAX_TRAIN_SIZE,
+            'max_test_size': cls.MAX_TEST_SIZE,
+            'memory_thresholds': {
+                'warning': cls.MEMORY_WARNING_THRESHOLD,
+                'critical': cls.MEMORY_CRITICAL_THRESHOLD,
+                'abort': cls.MEMORY_ABORT_THRESHOLD
+            },
+            'sampling_config': {
+                'aggressive_threshold': cls.AGGRESSIVE_SAMPLING_THRESHOLD,
+                'min_sample_size': cls.MIN_SAMPLE_SIZE,
+                'max_sample_size': cls.MAX_SAMPLE_SIZE
+            }
+        }
