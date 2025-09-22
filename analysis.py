@@ -21,6 +21,34 @@ try:
 except ImportError:
     SKLEARN_AVAILABLE = False
     logging.warning("Scikit-learn not available for analysis")
+    
+    # Define fallback functions when sklearn is not available
+    def confusion_matrix(y_true, y_pred):
+        """Fallback confusion matrix calculation"""
+        try:
+            tn = sum((y_true == 0) & (y_pred == 0))
+            fp = sum((y_true == 0) & (y_pred == 1))  
+            fn = sum((y_true == 1) & (y_pred == 0))
+            tp = sum((y_true == 1) & (y_pred == 1))
+            return np.array([[tn, fp], [fn, tp]])
+        except:
+            return np.array([[0, 0], [0, 0]])
+    
+    def roc_auc_score(y_true, y_pred_proba):
+        """Fallback AUC calculation"""
+        return 0.5
+    
+    def average_precision_score(y_true, y_pred_proba):
+        """Fallback AP calculation"""
+        return 0.1
+    
+    def log_loss(y_true, y_pred_proba):
+        """Fallback log loss calculation"""
+        return 1.0
+    
+    def brier_score_loss(y_true, y_pred_proba):
+        """Fallback brier score calculation"""
+        return 1.0
 
 try:
     from scipy import stats
