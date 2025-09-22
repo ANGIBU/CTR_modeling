@@ -20,7 +20,6 @@ class Config:
     DATA_DIR = BASE_DIR / "data"
     MODEL_DIR = BASE_DIR / "models"
     LOG_DIR = BASE_DIR / "logs"
-    OUTPUT_DIR = BASE_DIR / "output"
     
     # Data file paths
     TRAIN_PATH = DATA_DIR / "train.parquet"
@@ -203,7 +202,7 @@ class Config:
     @classmethod
     def setup_directories(cls):
         """Create necessary directories"""
-        directories = [cls.DATA_DIR, cls.MODEL_DIR, cls.LOG_DIR, cls.OUTPUT_DIR]
+        directories = [cls.DATA_DIR, cls.MODEL_DIR, cls.LOG_DIR]
         created_dirs = []
         
         for directory in directories:
@@ -228,7 +227,6 @@ class Config:
             'DATA_DIR': cls.DATA_DIR,
             'MODEL_DIR': cls.MODEL_DIR,
             'LOG_DIR': cls.LOG_DIR,
-            'OUTPUT_DIR': cls.OUTPUT_DIR,
             'TRAIN_PATH': cls.TRAIN_PATH,
             'TEST_PATH': cls.TEST_PATH,
             'SUBMISSION_PATH': cls.SUBMISSION_PATH,
