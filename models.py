@@ -462,8 +462,8 @@ class BaseModel(ABC):
             memory_status = self.memory_monitor.get_memory_status()
             
             # Skip memory check in quick mode for small datasets
-            if self.quick_mode and hasattr(args[0], '__len__') and len(args[0]) < 100:
-                logger.info(f"{self.name}: Quick mode small dataset - skipping memory check")
+            if self.quick_mode:
+                logger.info(f"{self.name}: Quick mode - skipping memory check")
                 return fit_function(*args, **kwargs)
             
             if memory_status['should_abort']:
