@@ -528,6 +528,42 @@ class BaseModel(ABC):
         X_processed = X_processed[self.feature_names]
         return X_processed
     
+    def _safe_data_preprocessing(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Safe data preprocessing to handle categorical data"""
+        try:
+            X_processed = X.copy()
+            
+            # Handle categorical columns safely
+            for col in X_processed.columns:
+                if X_processed[col].dtype.name == 'category':
+                    # Convert categorical to codes
+                    X_processed[col] = X_processed[col].cat.codes.fillna(-1).astype('int32')
+                elif X_processed[col].dtype == 'object':
+                    # Convert object to numeric or encoded
+                    try:
+                        X_processed[col] = pd.to_numeric(X_processed[col], errors='coerce')
+                    except Exception:
+                        # Label encode object columns
+                        unique_vals = sorted(X_processed[col].astype(str).unique())
+                        value_map = {val: idx for idx, val in enumerate(unique_vals)}
+                        X_processed[col] = X_processed[col].astype(str).map(value_map).fillna(0).astype('int32')
+                
+                # Ensure numeric types
+                if X_processed[col].dtype in ['float64']:
+                    X_processed[col] = X_processed[col].astype('float32')
+                elif X_processed[col].dtype in ['int64']:
+                    X_processed[col] = X_processed[col].astype('int32')
+            
+            # Fill any remaining NaN values
+            X_processed = X_processed.fillna(0)
+            
+            return X_processed
+            
+        except Exception as e:
+            logger.error(f"Safe data preprocessing failed: {e}")
+            # Return simplified version
+            return X.fillna(0)
+    
     def _enhance_prediction_diversity(self, predictions: np.ndarray) -> np.ndarray:
         """Enhance prediction diversity"""
         if len(predictions) < self.prediction_diversity_threshold:
@@ -677,15 +713,8 @@ class LightGBMModel(BaseModel):
             if self.quick_mode:
                 self._apply_quick_mode_params()
             
-            # Apply memory efficient data preprocessing
-            X_train_clean = X_train.fillna(0)
-            
-            # More aggressive dtype optimization
-            for col in X_train_clean.columns:
-                if X_train_clean[col].dtype in ['float64']:
-                    X_train_clean[col] = X_train_clean[col].astype('float32')
-                elif X_train_clean[col].dtype in ['int64']:
-                    X_train_clean[col] = X_train_clean[col].astype('int32')
+            # Safe data preprocessing
+            X_train_clean = self._safe_data_preprocessing(X_train)
             
             # Memory efficient dataset creation
             train_data = lgb.Dataset(
@@ -700,12 +729,7 @@ class LightGBMModel(BaseModel):
             
             X_val_clean = None
             if X_val is not None and y_val is not None:
-                X_val_clean = X_val.fillna(0)
-                for col in X_val_clean.columns:
-                    if X_val_clean[col].dtype in ['float64']:
-                        X_val_clean[col] = X_val_clean[col].astype('float32')
-                    elif X_val_clean[col].dtype in ['int64']:
-                        X_val_clean[col] = X_val_clean[col].astype('int32')
+                X_val_clean = self._safe_data_preprocessing(X_val)
                 
                 valid_data = lgb.Dataset(
                     X_val_clean, 
@@ -760,14 +784,7 @@ class LightGBMModel(BaseModel):
         
         def _predict_internal(batch_X):
             X_processed = self._ensure_feature_consistency(batch_X)
-            X_processed = X_processed.fillna(0)
-            
-            # Apply same dtype optimization as training
-            for col in X_processed.columns:
-                if X_processed[col].dtype in ['float64']:
-                    X_processed[col] = X_processed[col].astype('float32')
-                elif X_processed[col].dtype in ['int64']:
-                    X_processed[col] = X_processed[col].astype('int32')
+            X_processed = self._safe_data_preprocessing(X_processed)
             
             num_iteration = getattr(self.model, 'best_iteration', None)
             proba = self.model.predict(X_processed, num_iteration=num_iteration)
@@ -775,7 +792,7 @@ class LightGBMModel(BaseModel):
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
             return self._enhance_prediction_diversity(proba)
         
-        return self._memory_safe_predict(_predict_internal, X, batch_size=30000)  # Smaller batch
+        return self._memory_safe_predict(_predict_internal, X, batch_size=30000)
 
 class XGBoostModel(BaseModel):
     """XGBoost model with memory management and tuned parameters"""
@@ -893,15 +910,8 @@ class XGBoostModel(BaseModel):
             if TORCH_AVAILABLE and torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            # Apply memory efficient data preprocessing
-            X_train_clean = X_train.fillna(0)
-            
-            # More aggressive dtype optimization
-            for col in X_train_clean.columns:
-                if X_train_clean[col].dtype in ['float64']:
-                    X_train_clean[col] = X_train_clean[col].astype('float32')
-                elif X_train_clean[col].dtype in ['int64']:
-                    X_train_clean[col] = X_train_clean[col].astype('int32')
+            # Safe data preprocessing
+            X_train_clean = self._safe_data_preprocessing(X_train)
             
             logger.info(f"{self.name}: Creating training DMatrix")
             dtrain = xgb.DMatrix(
@@ -916,12 +926,7 @@ class XGBoostModel(BaseModel):
             
             if X_val is not None and y_val is not None:
                 logger.info(f"{self.name}: Creating validation DMatrix")
-                X_val_clean = X_val.fillna(0)
-                for col in X_val_clean.columns:
-                    if X_val_clean[col].dtype in ['float64']:
-                        X_val_clean[col] = X_val_clean[col].astype('float32')
-                    elif X_val_clean[col].dtype in ['int64']:
-                        X_val_clean[col] = X_val_clean[col].astype('int32')
+                X_val_clean = self._safe_data_preprocessing(X_val)
                 
                 dval = xgb.DMatrix(
                     X_val_clean, 
@@ -949,12 +954,7 @@ class XGBoostModel(BaseModel):
             # Apply calibration if validation data available and not in quick mode
             if dval is not None and not self.quick_mode:
                 logger.info(f"{self.name}: Starting calibration application")
-                X_val_clean = X_val.fillna(0)
-                for col in X_val_clean.columns:
-                    if X_val_clean[col].dtype in ['float64']:
-                        X_val_clean[col] = X_val_clean[col].astype('float32')
-                    elif X_val_clean[col].dtype in ['int64']:
-                        X_val_clean[col] = X_val_clean[col].astype('int32')
+                X_val_clean = self._safe_data_preprocessing(X_val)
                 
                 self.apply_calibration(X_val_clean, y_val, method='auto')
                 if self.is_calibrated:
@@ -980,14 +980,7 @@ class XGBoostModel(BaseModel):
         
         def _predict_internal(batch_X):
             X_processed = self._ensure_feature_consistency(batch_X)
-            X_processed = X_processed.fillna(0)
-            
-            # Apply same dtype optimization as training
-            for col in X_processed.columns:
-                if X_processed[col].dtype in ['float64']:
-                    X_processed[col] = X_processed[col].astype('float32')
-                elif X_processed[col].dtype in ['int64']:
-                    X_processed[col] = X_processed[col].astype('int32')
+            X_processed = self._safe_data_preprocessing(X_processed)
             
             dtest = xgb.DMatrix(
                 X_processed, 
@@ -1001,7 +994,7 @@ class XGBoostModel(BaseModel):
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
             return self._enhance_prediction_diversity(proba)
         
-        return self._memory_safe_predict(_predict_internal, X, batch_size=20000)  # Smaller batch
+        return self._memory_safe_predict(_predict_internal, X, batch_size=20000)
 
 class LogisticModel(BaseModel):
     """Logistic Regression model with tuned parameters"""
@@ -1064,15 +1057,8 @@ class LogisticModel(BaseModel):
             if self.quick_mode:
                 self._apply_quick_mode_params()
             
-            # Apply memory efficient data preprocessing
-            X_train_clean = X_train.fillna(0)
-            
-            # More aggressive dtype optimization
-            for col in X_train_clean.columns:
-                if X_train_clean[col].dtype in ['float64']:
-                    X_train_clean[col] = X_train_clean[col].astype('float32')
-                elif X_train_clean[col].dtype in ['int64']:
-                    X_train_clean[col] = X_train_clean[col].astype('int32')
+            # Safe data preprocessing
+            X_train_clean = self._safe_data_preprocessing(X_train)
             
             # More aggressive sampling for large datasets
             if self.quick_mode or len(X_train_clean) <= 2000000:  # Reduced from 6M
@@ -1129,12 +1115,7 @@ class LogisticModel(BaseModel):
             # Apply calibration if validation data available and not in quick mode
             if X_val is not None and y_val is not None and not self.quick_mode:
                 logger.info(f"{self.name}: Starting calibration application")
-                X_val_clean = X_val.fillna(0)
-                for col in X_val_clean.columns:
-                    if X_val_clean[col].dtype in ['float64']:
-                        X_val_clean[col] = X_val_clean[col].astype('float32')
-                    elif X_val_clean[col].dtype in ['int64']:
-                        X_val_clean[col] = X_val_clean[col].astype('int32')
+                X_val_clean = self._safe_data_preprocessing(X_val)
                 
                 self.apply_calibration(X_val_clean, y_val, method='auto')
                 if self.is_calibrated:
@@ -1157,20 +1138,13 @@ class LogisticModel(BaseModel):
         
         def _predict_internal(batch_X):
             X_processed = self._ensure_feature_consistency(batch_X)
-            X_processed = X_processed.fillna(0)
-            
-            # Apply same dtype optimization as training
-            for col in X_processed.columns:
-                if X_processed[col].dtype in ['float64']:
-                    X_processed[col] = X_processed[col].astype('float32')
-                elif X_processed[col].dtype in ['int64']:
-                    X_processed[col] = X_processed[col].astype('int32')
+            X_processed = self._safe_data_preprocessing(X_processed)
             
             proba = self.model.predict_proba(X_processed)[:, 1]
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
             return self._enhance_prediction_diversity(proba)
         
-        return self._memory_safe_predict(_predict_internal, X, batch_size=40000)  # Larger batch for simpler model
+        return self._memory_safe_predict(_predict_internal, X, batch_size=40000)
 
 class ModelFactory:
     """Model factory for creating models"""
