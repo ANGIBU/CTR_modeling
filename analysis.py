@@ -1,216 +1,178 @@
 # analysis.py
+"""
+CTR Performance Analysis Module
+Advanced performance analysis for Click-Through Rate prediction models
+"""
 
-import numpy as np
-import pandas as pd
-from typing import Dict, Any, List, Optional, Tuple, Union
-import logging
-import time
-import warnings
-from pathlib import Path
-import json
+import os
 import gc
-import sys
+import json
+import time
+import logging
+import traceback
+from typing import Dict, List, Any, Tuple, Optional, Union
+import warnings
 warnings.filterwarnings('ignore')
 
-# Safe imports for sklearn
+# Essential imports
+import numpy as np
+import pandas as pd
+
+# Try advanced imports with fallbacks
 try:
     from sklearn.metrics import (
-        roc_curve, precision_recall_curve, auc, calibration_curve,
-        confusion_matrix, classification_report, roc_auc_score,
-        average_precision_score, log_loss, brier_score_loss
+        roc_auc_score, average_precision_score, log_loss, 
+        accuracy_score, precision_score, recall_score, f1_score,
+        confusion_matrix, brier_score_loss
     )
-    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.calibration import calibration_curve
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
     logging.warning("Scikit-learn not available for analysis")
-    
-    # Fallback functions when sklearn is not available
-    def confusion_matrix(y_true, y_pred):
-        """Fallback confusion matrix calculation"""
-        try:
-            y_true = np.array(y_true)
-            y_pred = np.array(y_pred)
-            tn = np.sum((y_true == 0) & (y_pred == 0))
-            fp = np.sum((y_true == 0) & (y_pred == 1))
-            fn = np.sum((y_true == 1) & (y_pred == 0))
-            tp = np.sum((y_true == 1) & (y_pred == 1))
-            return np.array([[tn, fp], [fn, tp]])
-        except:
-            return np.array([[0, 0], [0, 0]])
-    
-    def roc_auc_score(y_true, y_pred_proba):
-        """Fallback AUC calculation"""
-        try:
-            if len(np.unique(y_true)) < 2:
-                return 0.5
-            # Simple AUC approximation
-            return 0.5
-        except:
-            return 0.5
-    
-    def average_precision_score(y_true, y_pred_proba):
-        """Fallback AP calculation"""
-        try:
-            pos_rate = np.mean(y_true)
-            return pos_rate if pos_rate > 0 else 0.01
-        except:
-            return 0.01
-    
-    def log_loss(y_true, y_pred_proba):
-        """Fallback log loss calculation"""
-        try:
-            y_pred_proba = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
-            return -np.mean(y_true * np.log(y_pred_proba) + (1 - y_true) * np.log(1 - y_pred_proba))
-        except:
-            return 1.0
-    
-    def brier_score_loss(y_true, y_pred_proba):
-        """Fallback brier score calculation"""
-        try:
-            return np.mean((y_pred_proba - y_true) ** 2)
-        except:
-            return 1.0
-
-try:
-    from scipy import stats
-    from scipy.optimize import minimize_scalar
-    SCIPY_AVAILABLE = True
-except ImportError:
-    SCIPY_AVAILABLE = False
-    logging.warning("SciPy not available for statistical analysis")
-
-try:
-    from evaluation import CTRMetrics
-    EVALUATION_AVAILABLE = True
-except ImportError:
-    EVALUATION_AVAILABLE = False
-    logging.warning("Evaluation module not available")
-
-try:
-    from config import Config
-    CONFIG_AVAILABLE = True
-except ImportError:
-    CONFIG_AVAILABLE = False
-    logging.warning("Config module not available")
-    # Create minimal config
-    class Config:
-        TARGET_CTR = 0.0191
-        TARGET_COMBINED_SCORE = 0.34
 
 logger = logging.getLogger(__name__)
 
 class CTRPerformanceAnalyzer:
-    """CTR model performance analyzer with comprehensive metrics"""
+    """
+    Comprehensive CTR performance analyzer with advanced metrics
+    """
     
-    def __init__(self, config=None):
-        self.config = config if config else Config()
-        self.results_dir = Path("results")
-        self.results_dir.mkdir(exist_ok=True)
+    def __init__(self, config):
+        self.config = config
+        self.target_ctr = getattr(config, 'TARGET_CTR', 0.0191)
+        self.ctr_tolerance = getattr(config, 'CTR_TOLERANCE', 0.0002)
+        self.target_combined_score = getattr(config, 'TARGET_COMBINED_SCORE', 0.34)
         
-        # CTR specific thresholds
-        self.target_ctr = getattr(self.config, 'TARGET_CTR', 0.0191)
-        self.target_combined_score = getattr(self.config, 'TARGET_COMBINED_SCORE', 0.34)
-        self.ctr_tolerance = 0.0002
-        
-        # Performance tier thresholds
+        # Performance thresholds
         self.performance_tiers = {
-            'EXCELLENT': 0.34,
-            'GOOD': 0.30,
-            'FAIR': 0.25,
-            'POOR': 0.20
+            'EXCEPTIONAL': 0.35,
+            'EXCELLENT': 0.30,
+            'GOOD': 0.25,
+            'FAIR': 0.20,
+            'POOR': 0.15
         }
+        
+        # Cache for computations
+        self.cache = {}
         
         logger.info("CTR Performance Analyzer initialized")
     
-    def analyze_model_performance(self, model_name: str, y_true: np.ndarray, 
-                                y_pred_proba: np.ndarray, 
-                                execution_metrics: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Complete performance analysis for a single model"""
-        start_time = time.time()
+    def full_performance_analysis(self, y_true: np.ndarray, y_pred_proba: np.ndarray,
+                                model_name: str = "Unknown", quick_mode: bool = False) -> Dict[str, Any]:
+        """
+        Perform comprehensive performance analysis
         
+        Args:
+            y_true: True binary labels
+            y_pred_proba: Predicted probabilities
+            model_name: Name of the model being analyzed
+            quick_mode: Whether to run in quick mode
+            
+        Returns:
+            Dictionary containing comprehensive analysis results
+        """
         try:
-            logger.info(f"Starting performance analysis for {model_name}")
+            logger.info(f"Starting full performance analysis for {model_name}")
+            start_time = time.time()
             
-            # Initialize results
-            analysis = {
-                'model_name': model_name,
-                'analysis_timestamp': pd.Timestamp.now().isoformat(),
-                'data_size': len(y_true)
-            }
+            # Validate inputs
+            y_true = np.asarray(y_true).flatten()
+            y_pred_proba = np.asarray(y_pred_proba).flatten()
             
-            # Core metrics calculation
-            core_metrics = self._calculate_core_metrics(y_true, y_pred_proba)
-            analysis['core_metrics'] = core_metrics
+            if len(y_true) != len(y_pred_proba):
+                raise ValueError(f"Length mismatch: y_true={len(y_true)}, y_pred_proba={len(y_pred_proba)}")
             
-            # CTR specific analysis
+            if len(y_true) == 0:
+                raise ValueError("Empty input arrays")
+            
+            # Core performance metrics
+            core_metrics = self._calculate_core_metrics(y_true, y_pred_proba, model_name)
+            
+            # CTR-specific analysis
             ctr_analysis = self._analyze_ctr_performance(y_true, y_pred_proba)
-            analysis['ctr_analysis'] = ctr_analysis
             
             # Execution metrics
-            if execution_metrics:
-                analysis['execution_metrics'] = execution_metrics
+            execution_time = time.time() - start_time
+            execution_metrics = {
+                'execution_time': execution_time,
+                'data_size': len(y_true),
+                'memory_usage': self._get_memory_usage(),
+                'gpu_utilization': self._get_gpu_utilization() if not quick_mode else 0.0,
+                'analysis_mode': 'QUICK' if quick_mode else 'FULL'
+            }
             
             # Overall assessment
-            assessment = self._generate_overall_assessment(core_metrics, ctr_analysis)
-            analysis['overall_assessment'] = assessment
+            overall_assessment = self._generate_overall_assessment(core_metrics, ctr_analysis)
             
-            # Performance tier classification
-            analysis['performance_tier'] = self._classify_performance_tier(core_metrics.get('combined_score', 0.0))
+            # Performance recommendations
+            recommendations = self._generate_recommendations(core_metrics, ctr_analysis, overall_assessment)
             
-            # Recommendations
-            analysis['recommendations'] = self._generate_recommendations(core_metrics, ctr_analysis)
+            analysis_result = {
+                'model_name': model_name,
+                'core_metrics': core_metrics,
+                'ctr_analysis': ctr_analysis,
+                'execution_metrics': execution_metrics,
+                'overall_assessment': overall_assessment,
+                'recommendations': recommendations,
+                'analysis_timestamp': time.time(),
+                'quick_mode': quick_mode
+            }
             
-            # Analysis duration
-            analysis['analysis_duration'] = time.time() - start_time
-            
-            logger.info(f"Performance analysis completed for {model_name} in {analysis['analysis_duration']:.2f}s")
-            
-            return analysis
+            logger.info(f"Performance analysis completed for {model_name} in {execution_time:.2f}s")
+            return analysis_result
             
         except Exception as e:
             logger.error(f"Performance analysis failed for {model_name}: {e}")
             return {
                 'model_name': model_name,
                 'error': str(e),
-                'analysis_duration': time.time() - start_time
+                'analysis_timestamp': time.time(),
+                'quick_mode': quick_mode
             }
     
-    def _calculate_core_metrics(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> Dict[str, float]:
+    def _calculate_core_metrics(self, y_true: np.ndarray, y_pred_proba: np.ndarray, 
+                              model_name: str) -> Dict[str, Any]:
         """Calculate core performance metrics"""
         try:
-            metrics = {}
+            metrics = {'model_name': model_name}
             
-            # Ensure proper data types
-            y_true = np.array(y_true).astype(float)
-            y_pred_proba = np.array(y_pred_proba).astype(float)
-            y_pred = (y_pred_proba >= 0.5).astype(int)
+            if not SKLEARN_AVAILABLE:
+                logger.warning("Sklearn not available, using basic metrics")
+                metrics.update({
+                    'auc': 0.5, 'ap': 0.0, 'log_loss': 1.0, 'combined_score': 0.0,
+                    'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0
+                })
+                return metrics
             
-            # Basic metrics
-            if SKLEARN_AVAILABLE and len(np.unique(y_true)) > 1:
-                try:
-                    metrics['auc'] = roc_auc_score(y_true, y_pred_proba)
-                    metrics['ap'] = average_precision_score(y_true, y_pred_proba)
-                    metrics['log_loss'] = log_loss(y_true, y_pred_proba)
-                    metrics['brier_score'] = brier_score_loss(y_true, y_pred_proba)
-                except Exception as e:
-                    logger.warning(f"Sklearn metrics calculation failed: {e}")
-                    metrics.update({'auc': 0.5, 'ap': 0.01, 'log_loss': 1.0, 'brier_score': 1.0})
-            else:
-                metrics.update({'auc': 0.5, 'ap': 0.01, 'log_loss': 1.0, 'brier_score': 1.0})
+            # Primary CTR metrics
+            try:
+                auc_score = roc_auc_score(y_true, y_pred_proba)
+                metrics['auc'] = float(auc_score)
+            except Exception:
+                metrics['auc'] = 0.5
             
-            # CTR specific combined score
-            ap_score = metrics.get('ap', 0.01)
-            auc_score = metrics.get('auc', 0.5)
+            try:
+                ap_score = average_precision_score(y_true, y_pred_proba)
+                metrics['ap'] = float(ap_score)
+            except Exception:
+                metrics['ap'] = 0.0
             
-            # Combined score calculation (CTR optimized)
-            if ap_score > 0 and auc_score > 0.5:
-                metrics['combined_score'] = (ap_score * 0.7) + ((auc_score - 0.5) * 0.6)
+            try:
+                ll_score = log_loss(y_true, y_pred_proba, eps=1e-15)
+                metrics['log_loss'] = float(ll_score)
+            except Exception:
+                metrics['log_loss'] = 1.0
+            
+            # Combined score calculation (optimized for CTR)
+            if metrics['ap'] > 0 and metrics['auc'] > 0.5:
+                metrics['combined_score'] = (metrics['ap'] * 0.7) + ((metrics['auc'] - 0.5) * 0.6)
             else:
                 metrics['combined_score'] = 0.0
             
             # Classification metrics
             try:
+                y_pred = (y_pred_proba > 0.5).astype(int)
                 cm = confusion_matrix(y_true, y_pred)
                 if cm.shape == (2, 2):
                     tn, fp, fn, tp = cm.ravel()
@@ -316,24 +278,20 @@ class CTRPerformanceAnalyzer:
             
             # Deployment readiness
             deployment_ready = (
-                combined_score >= self.target_combined_score * 0.8 and  # 80% of target
+                combined_score >= self.target_combined_score and 
                 ctr_bias <= self.ctr_tolerance and
                 ctr_quality in ['EXCELLENT', 'GOOD']
             )
             assessment['deployment_ready'] = deployment_ready
-            assessment['deployment_recommendation'] = 'READY' if deployment_ready else 'NOT_READY'
             
-            # Risk assessment
-            risk_factors = []
-            if combined_score < 0.25:
-                risk_factors.append('Low performance score')
-            if ctr_bias > 0.001:
-                risk_factors.append('High CTR bias')
-            if ctr_quality == 'POOR':
-                risk_factors.append('Poor CTR quality')
+            # Target achievement
+            target_achievement = combined_score >= self.target_combined_score
+            assessment['target_achievement'] = target_achievement
             
-            assessment['risk_factors'] = risk_factors
-            assessment['risk_level'] = 'HIGH' if len(risk_factors) >= 2 else ('MEDIUM' if len(risk_factors) == 1 else 'LOW')
+            # Overall score
+            ctr_score = 1.0 - min(ctr_bias / 0.001, 1.0)  # Normalize CTR bias
+            overall_score = (combined_score * 0.8) + (ctr_score * 0.2)
+            assessment['overall_score'] = float(overall_score)
             
             return assessment
             
@@ -341,32 +299,32 @@ class CTRPerformanceAnalyzer:
             logger.error(f"Overall assessment failed: {e}")
             return {'error': str(e)}
     
-    def _generate_recommendations(self, core_metrics: Dict, ctr_analysis: Dict) -> List[str]:
-        """Generate actionable recommendations"""
+    def _generate_recommendations(self, core_metrics: Dict, ctr_analysis: Dict, 
+                                assessment: Dict) -> List[str]:
+        """Generate performance-based recommendations"""
         recommendations = []
         
         try:
             combined_score = core_metrics.get('combined_score', 0.0)
-            ctr_bias = abs(ctr_analysis.get('ctr_bias', 0.0))
-            ctr_quality = ctr_analysis.get('ctr_quality', 'POOR')
+            ctr_bias = abs(ctr_analysis.get('ctr_bias', 1.0))
+            performance_tier = assessment.get('performance_tier', 'POOR')
             
-            # Performance recommendations
-            if combined_score < 0.25:
-                recommendations.append("Improve model performance - consider ensemble or hyperparameter tuning")
-            elif combined_score < 0.34:
-                recommendations.append("Good performance but room for improvement - try advanced feature engineering")
+            # Score-based recommendations
+            if combined_score < 0.15:
+                recommendations.append("Model performance is below acceptable threshold - consider complete redesign")
+            elif combined_score < 0.25:
+                recommendations.append("Model needs improvement - try different algorithms or feature engineering")
+            elif combined_score < 0.30:
+                recommendations.append("Model showing progress - fine-tune hyperparameters")
+            else:
+                recommendations.append("Model performance is strong - ready for production consideration")
             
-            # CTR bias recommendations
-            if ctr_bias > 0.001:
-                recommendations.append("Reduce CTR bias - apply calibration or adjust prediction thresholds")
-            elif ctr_bias > 0.0005:
-                recommendations.append("Monitor CTR bias - consider probability calibration")
-            
-            # Quality recommendations
-            if ctr_quality == 'POOR':
-                recommendations.append("Improve calibration - apply probability calibration techniques")
-            elif ctr_quality == 'FAIR':
-                recommendations.append("Enhance model calibration for better CTR prediction")
+            # CTR-specific recommendations
+            if ctr_bias > self.ctr_tolerance:
+                if ctr_analysis.get('ctr_bias', 0) > 0:
+                    recommendations.append("Model over-predicts CTR - apply calibration or adjust threshold")
+                else:
+                    recommendations.append("Model under-predicts CTR - review feature engineering")
             
             # Deployment recommendations
             if combined_score >= self.target_combined_score and ctr_bias <= self.ctr_tolerance:
@@ -380,6 +338,57 @@ class CTRPerformanceAnalyzer:
             recommendations.append("Manual performance review required")
         
         return recommendations
+    
+    def _get_memory_usage(self) -> float:
+        """Get current memory usage in GB"""
+        try:
+            import psutil
+            process = psutil.Process()
+            return process.memory_info().rss / (1024**3)
+        except:
+            return 0.0
+    
+    def _get_gpu_utilization(self) -> float:
+        """Get GPU utilization percentage"""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return torch.cuda.utilization() / 100.0
+        except:
+            return 0.0
+        return 0.0
+    
+    def save_analysis_report(self, analysis_result: Dict[str, Any], 
+                           output_path: str) -> Optional[str]:
+        """Save analysis report to JSON file"""
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            
+            # Convert numpy types to native Python types for JSON serialization
+            def convert_numpy_types(obj):
+                if isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif isinstance(obj, (np.float64, np.float32)):
+                    return float(obj)
+                elif isinstance(obj, (np.int64, np.int32)):
+                    return int(obj)
+                elif isinstance(obj, dict):
+                    return {key: convert_numpy_types(value) for key, value in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_numpy_types(item) for item in obj]
+                return obj
+            
+            serializable_result = convert_numpy_types(analysis_result)
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(serializable_result, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f"Analysis report saved: {output_path}")
+            return output_path
+            
+        except Exception as e:
+            logger.error(f"Failed to save analysis report: {e}")
+            return None
     
     def create_summary_csv(self, analysis_results: Dict[str, Any]) -> bool:
         """Create comprehensive summary CSV file"""
@@ -409,127 +418,189 @@ class CTRPerformanceAnalyzer:
                     'ctr_absolute_error': round(ctr_analysis.get('ctr_absolute_error', 0.0), 6),
                     'ctr_quality': ctr_analysis.get('ctr_quality', 'UNKNOWN'),
                     'execution_time_sec': round(execution_metrics.get('execution_time', 0.0), 2),
-                    'memory_peak_gb': round(execution_metrics.get('memory_peak', 0.0), 2),
+                    'memory_peak_gb': round(execution_metrics.get('memory_usage', 0.0), 2),
                     'gpu_utilization_pct': round(execution_metrics.get('gpu_utilization', 0.0), 1),
                     'performance_tier': assessment.get('performance_tier', 'POOR'),
                     'deployment_ready': assessment.get('deployment_ready', False),
-                    'risk_level': assessment.get('risk_level', 'HIGH'),
-                    'precision': round(core_metrics.get('precision', 0.0), 6),
-                    'recall': round(core_metrics.get('recall', 0.0), 6),
-                    'f1_score': round(core_metrics.get('f1_score', 0.0), 6),
-                    'accuracy': round(core_metrics.get('accuracy', 0.0), 6)
+                    'target_achievement': assessment.get('target_achievement', False),
+                    'overall_score': round(assessment.get('overall_score', 0.0), 6)
                 }
                 
                 summary_data.append(row)
             
             if summary_data:
-                summary_df = pd.DataFrame(summary_data)
-                
-                # Sort by combined_score descending
-                summary_df = summary_df.sort_values('combined_score', ascending=False)
-                
-                # Save to results folder
-                csv_path = self.results_dir / "summary.csv"
-                summary_df.to_csv(csv_path, index=False, encoding='utf-8')
-                
-                logger.info(f"Summary CSV saved: {csv_path}")
-                logger.info(f"Models analyzed: {len(summary_data)}")
-                
+                df = pd.DataFrame(summary_data)
+                summary_path = "output/performance_summary.csv"
+                os.makedirs("output", exist_ok=True)
+                df.to_csv(summary_path, index=False)
+                logger.info(f"Summary CSV created: {summary_path}")
                 return True
             else:
-                logger.warning("No valid analysis results to save")
+                logger.warning("No valid analysis results to create summary")
                 return False
-            
+                
         except Exception as e:
             logger.error(f"Summary CSV creation failed: {e}")
             return False
-    
-    def save_detailed_analysis(self, analysis_results: Dict[str, Any]) -> bool:
-        """Save detailed analysis results as JSON"""
-        try:
-            for model_name, analysis in analysis_results.items():
-                if 'error' not in analysis:
-                    json_path = self.results_dir / f"detailed_analysis_{model_name}.json"
-                    with open(json_path, 'w', encoding='utf-8') as f:
-                        json.dump(analysis, f, indent=2, ensure_ascii=False)
-                    
-                    logger.info(f"Detailed analysis saved: {json_path}")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Detailed analysis saving failed: {e}")
-            return False
 
-def analyze_all_models(training_results: Dict[str, Any], quick_mode: bool = False) -> Dict[str, Any]:
-    """Analyze all trained models and generate comprehensive results"""
+
+def compare_model_performances(analysis_results: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Compare performance across multiple models
+    
+    Args:
+        analysis_results: Dictionary containing analysis results for each model
+        
+    Returns:
+        Dictionary containing comparison results and rankings
+    """
     try:
-        logger.info(f"Starting analysis of all models (quick_mode: {quick_mode})")
+        logger.info("Starting model performance comparison")
         
-        analyzer = CTRPerformanceAnalyzer()
-        analysis_results = {}
-        
-        # Extract models and their results
-        models = training_results.get('models', {})
-        
-        if not models:
-            logger.warning("No models found in training results")
+        if not analysis_results:
+            logger.warning("No analysis results provided for comparison")
             return {}
         
-        logger.info(f"Analyzing {len(models)} models")
+        # Filter out error results
+        valid_results = {
+            name: result for name, result in analysis_results.items() 
+            if 'error' not in result
+        }
         
-        for model_name, model_data in models.items():
-            try:
-                logger.info(f"Analyzing model: {model_name}")
-                
-                # Extract validation data and predictions
-                y_true = model_data.get('y_val', np.array([]))
-                y_pred_proba = model_data.get('val_predictions', np.array([]))
-                
-                if len(y_true) == 0 or len(y_pred_proba) == 0:
-                    logger.warning(f"No validation data found for {model_name}")
-                    continue
-                
-                # Extract execution metrics
-                execution_metrics = {
-                    'execution_time': model_data.get('training_time', 0.0),
-                    'memory_peak': model_data.get('memory_peak', 0.0),
-                    'gpu_utilization': model_data.get('gpu_utilization', 0.0)
-                }
-                
-                # Perform analysis
-                analysis = analyzer.analyze_model_performance(
-                    model_name, y_true, y_pred_proba, execution_metrics
-                )
-                
-                analysis_results[model_name] = analysis
-                
-                logger.info(f"Analysis completed for {model_name}")
-                
-            except Exception as e:
-                logger.error(f"Analysis failed for model {model_name}: {e}")
-                analysis_results[model_name] = {'error': str(e), 'model_name': model_name}
+        if not valid_results:
+            logger.warning("No valid analysis results for comparison")
+            return {}
         
-        if analysis_results:
-            # Create summary CSV
-            csv_success = analyzer.create_summary_csv(analysis_results)
+        if len(valid_results) < 2:
+            logger.info("Only one model available, no comparison needed")
+            return {
+                'comparison_type': 'single_model',
+                'models_count': len(valid_results),
+                'single_model': list(valid_results.keys())[0]
+            }
+        
+        logger.info(f"Comparing {len(valid_results)} models")
+        
+        # Extract key metrics for comparison
+        comparison_data = []
+        
+        for model_name, analysis in valid_results.items():
+            core_metrics = analysis.get('core_metrics', {})
+            ctr_analysis = analysis.get('ctr_analysis', {})
+            assessment = analysis.get('overall_assessment', {})
             
-            # Save detailed analysis
-            detail_success = analyzer.save_detailed_analysis(analysis_results)
+            model_data = {
+                'model_name': model_name,
+                'combined_score': core_metrics.get('combined_score', 0.0),
+                'auc_score': core_metrics.get('auc', 0.5),
+                'ap_score': core_metrics.get('ap', 0.0),
+                'log_loss': core_metrics.get('log_loss', 1.0),
+                'ctr_absolute_error': ctr_analysis.get('ctr_absolute_error', 1.0),
+                'ctr_quality': ctr_analysis.get('ctr_quality', 'POOR'),
+                'performance_tier': assessment.get('performance_tier', 'POOR'),
+                'deployment_ready': assessment.get('deployment_ready', False),
+                'overall_score': assessment.get('overall_score', 0.0)
+            }
             
-            logger.info(f"Analysis completed: CSV={csv_success}, Details={detail_success}")
+            comparison_data.append(model_data)
         
-        return analysis_results
+        # Create comparison dataframe
+        df = pd.DataFrame(comparison_data)
+        
+        # Rankings
+        rankings = {}
+        
+        # Combined score ranking (higher is better)
+        df_combined = df.sort_values('combined_score', ascending=False)
+        rankings['combined_score'] = df_combined[['model_name', 'combined_score']].to_dict('records')
+        
+        # AUC ranking (higher is better)
+        df_auc = df.sort_values('auc_score', ascending=False)
+        rankings['auc_score'] = df_auc[['model_name', 'auc_score']].to_dict('records')
+        
+        # AP ranking (higher is better)
+        df_ap = df.sort_values('ap_score', ascending=False)
+        rankings['ap_score'] = df_ap[['model_name', 'ap_score']].to_dict('records')
+        
+        # CTR error ranking (lower is better)
+        df_ctr = df.sort_values('ctr_absolute_error', ascending=True)
+        rankings['ctr_accuracy'] = df_ctr[['model_name', 'ctr_absolute_error']].to_dict('records')
+        
+        # Overall score ranking (higher is better)
+        df_overall = df.sort_values('overall_score', ascending=False)
+        rankings['overall_score'] = df_overall[['model_name', 'overall_score']].to_dict('records')
+        
+        # Best models by metric
+        best_models = {
+            'combined_score': {
+                'model': df_combined.iloc[0]['model_name'],
+                'score': df_combined.iloc[0]['combined_score']
+            },
+            'auc_score': {
+                'model': df_auc.iloc[0]['model_name'],
+                'score': df_auc.iloc[0]['auc_score']
+            },
+            'ap_score': {
+                'model': df_ap.iloc[0]['model_name'],
+                'score': df_ap.iloc[0]['ap_score']
+            },
+            'ctr_accuracy': {
+                'model': df_ctr.iloc[0]['model_name'],
+                'score': df_ctr.iloc[0]['ctr_absolute_error']
+            },
+            'overall_score': {
+                'model': df_overall.iloc[0]['model_name'],
+                'score': df_overall.iloc[0]['overall_score']
+            }
+        }
+        
+        # Performance statistics
+        performance_stats = {
+            'models_count': len(valid_results),
+            'deployment_ready_count': sum(1 for data in comparison_data if data['deployment_ready']),
+            'avg_combined_score': float(df['combined_score'].mean()),
+            'max_combined_score': float(df['combined_score'].max()),
+            'min_combined_score': float(df['combined_score'].min()),
+            'avg_ctr_error': float(df['ctr_absolute_error'].mean()),
+            'performance_tier_distribution': df['performance_tier'].value_counts().to_dict()
+        }
+        
+        # Model recommendations
+        recommendations = []
+        
+        best_overall = df_overall.iloc[0]
+        if best_overall['deployment_ready']:
+            recommendations.append(f"Recommended for deployment: {best_overall['model_name']} (Overall Score: {best_overall['overall_score']:.4f})")
+        else:
+            recommendations.append(f"Best performing model: {best_overall['model_name']} - requires further optimization before deployment")
+        
+        if performance_stats['deployment_ready_count'] > 1:
+            recommendations.append(f"{performance_stats['deployment_ready_count']} models are deployment-ready - consider ensemble approach")
+        elif performance_stats['deployment_ready_count'] == 0:
+            recommendations.append("No models currently meet deployment criteria - continue optimization")
+        
+        comparison_result = {
+            'comparison_type': 'multi_model',
+            'models_count': len(valid_results),
+            'model_names': list(valid_results.keys()),
+            'rankings': rankings,
+            'best_models': best_models,
+            'performance_stats': performance_stats,
+            'recommendations': recommendations,
+            'comparison_dataframe': df.to_dict('records'),
+            'comparison_timestamp': time.time()
+        }
+        
+        logger.info(f"Model comparison completed for {len(valid_results)} models")
+        logger.info(f"Best overall model: {best_models['overall_score']['model']} (Score: {best_models['overall_score']['score']:.4f})")
+        
+        return comparison_result
         
     except Exception as e:
-        logger.error(f"Model analysis failed: {e}")
-        return {}
-
-# Cleanup and memory management
-def cleanup_analysis_memory():
-    """Clean up analysis memory"""
-    try:
-        gc.collect()
-        logger.info("Analysis memory cleanup completed")
-    except Exception as e:
-        logger.warning(f"Memory cleanup failed: {e}")
+        logger.error(f"Model performance comparison failed: {e}")
+        logger.error(f"Detailed error: {traceback.format_exc()}")
+        return {
+            'comparison_type': 'error',
+            'error': str(e),
+            'comparison_timestamp': time.time()
+        }
