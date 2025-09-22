@@ -423,6 +423,20 @@ class BaseModel(ABC):
         self.prediction_diversity_threshold = 2500
         self.calibration_applied = True
         self.memory_monitor = MemoryMonitor()
+        self.quick_mode = False  # Quick mode flag for simplified training
+    
+    def set_quick_mode(self, enabled: bool):
+        """
+        Enable or disable quick mode for model training
+        
+        Args:
+            enabled: If True, use simplified parameters for rapid training
+        """
+        self.quick_mode = enabled
+        if enabled:
+            logger.info(f"{self.name}: Quick mode enabled - simplified parameters")
+        else:
+            logger.info(f"{self.name}: Full mode enabled - complete parameter set")
     
     def _memory_safe_fit(self, fit_function, *args, **kwargs):
         """Memory safe fitting"""
@@ -590,7 +604,7 @@ class LightGBMModel(BaseModel):
     
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
-        self.params.update({
+        simplified_params = {
             'num_leaves': 31,
             'max_depth': 6,
             'n_estimators': 5000,
@@ -600,16 +614,41 @@ class LightGBMModel(BaseModel):
             'early_stopping_rounds': 150,
             'feature_fraction': 0.8,
             'bagging_fraction': 0.8
-        })
+        }
+        
+        self.params.update(simplified_params)
         logger.info(f"{self.name}: Parameters simplified for memory conservation")
+    
+    def _apply_quick_mode_params(self):
+        """Apply quick mode parameters for rapid testing"""
+        quick_params = {
+            'num_leaves': 15,        # Much smaller tree
+            'max_depth': 4,          # Shallow depth
+            'n_estimators': 50,      # Very few iterations
+            'learning_rate': 0.1,    # Faster learning
+            'min_data_in_leaf': 20,  # Smaller minimum
+            'num_threads': 4,        # Fewer threads
+            'max_bin': 64,           # Fewer bins
+            'early_stopping_rounds': 10,  # Early stopping
+            'feature_fraction': 0.8,
+            'bagging_fraction': 0.8,
+            'verbosity': -1
+        }
+        
+        self.params.update(quick_params)
+        logger.info(f"{self.name}: Quick mode parameters applied")
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """LightGBM model training"""
+        """LightGBM model training with quick mode support"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         
         def _fit_internal():
             self.feature_names = list(X_train.columns)
+            
+            # Apply quick mode parameters if enabled
+            if self.quick_mode:
+                self._apply_quick_mode_params()
             
             X_train_clean = X_train.fillna(0)
             
@@ -742,7 +781,7 @@ class XGBoostModel(BaseModel):
     
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
-        self.params.update({
+        simplified_params = {
             'max_depth': 5,
             'n_estimators': 3000,
             'min_child_weight': 8,
@@ -753,18 +792,43 @@ class XGBoostModel(BaseModel):
             'max_bin': 128,
             'colsample_bytree': 0.8,
             'subsample': 0.8
-        })
+        }
+        
+        self.params.update(simplified_params)
         self.params.pop('gpu_id', None)
         self.params.pop('predictor', None)
         logger.info(f"{self.name}: Parameters simplified for memory conservation")
     
+    def _apply_quick_mode_params(self):
+        """Apply quick mode parameters for rapid testing"""
+        quick_params = {
+            'max_depth': 3,          # Very shallow
+            'n_estimators': 50,      # Very few iterations
+            'learning_rate': 0.1,    # Faster learning
+            'nthread': 4,            # Fewer threads
+            'tree_method': 'hist',   # CPU method for simplicity
+            'max_bin': 64,           # Fewer bins
+            'subsample': 0.8,
+            'colsample_bytree': 0.8
+        }
+        
+        self.params.update(quick_params)
+        # Remove GPU settings for quick mode
+        self.params.pop('gpu_id', None)
+        self.params.pop('predictor', None)
+        logger.info(f"{self.name}: Quick mode parameters applied")
+    
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """XGBoost model training"""
+        """XGBoost model training with quick mode support"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         
         def _fit_internal():
             self.feature_names = list(X_train.columns)
+            
+            # Apply quick mode parameters if enabled
+            if self.quick_mode:
+                self._apply_quick_mode_params()
             
             logger.info(f"{self.name}: Performing memory cleanup before training")
             gc.collect()
@@ -889,21 +953,40 @@ class LogisticModel(BaseModel):
     
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
-        self.params.update({
+        simplified_params = {
             'C': 1.0,
             'max_iter': 1500,
             'n_jobs': 8
-        })
+        }
+        
+        self.params.update(simplified_params)
         self.model = LogisticRegression(**self.params)
         logger.info(f"{self.name}: Parameters simplified for memory conservation")
     
+    def _apply_quick_mode_params(self):
+        """Apply quick mode parameters for rapid testing"""
+        quick_params = {
+            'C': 1.0,               # Default regularization
+            'max_iter': 100,        # Much fewer iterations
+            'n_jobs': 2,            # Fewer jobs
+            'solver': 'lbfgs'       # Simple solver
+        }
+        
+        self.params.update(quick_params)
+        self.model = LogisticRegression(**self.params)
+        logger.info(f"{self.name}: Quick mode parameters applied")
+    
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Logistic Regression model training"""
+        """Logistic Regression model training with quick mode support"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         
         def _fit_internal():
             self.feature_names = list(X_train.columns)
+            
+            # Apply quick mode parameters if enabled
+            if self.quick_mode:
+                self._apply_quick_mode_params()
             
             X_train_clean = X_train.fillna(0)
             
@@ -982,13 +1065,25 @@ class ModelFactory:
     
     @staticmethod
     def create_model(model_type: str, **kwargs) -> BaseModel:
-        """Create model by type"""
+        """
+        Create model by type with optional quick mode support
+        
+        Args:
+            model_type: Type of model to create
+            **kwargs: Additional parameters including 'params' and 'quick_mode'
+        
+        Returns:
+            Created model instance
+        """
         try:
             if not ModelFactory._factory_logged:
                 memory_monitor = MemoryMonitor()
                 logger.info(f"Creating model: {model_type} (calibration application configured)")
                 logger.info(f"Memory thresholds - warning: {memory_monitor.memory_thresholds['warning']:.1f}GB, critical: {memory_monitor.memory_thresholds['critical']:.1f}GB, abort: {memory_monitor.memory_thresholds['abort']:.1f}GB")
                 ModelFactory._factory_logged = True
+            
+            # Extract quick mode setting
+            quick_mode = kwargs.get('quick_mode', False)
             
             if model_type.lower() == 'lightgbm':
                 if not LIGHTGBM_AVAILABLE:
@@ -1005,6 +1100,10 @@ class ModelFactory:
                 
             else:
                 raise ValueError(f"Unsupported model type: {model_type}")
+            
+            # Set quick mode if specified
+            if quick_mode:
+                model.set_quick_mode(True)
             
             logger.info(f"{model_type} model creation complete - calibration application guaranteed")
             return model
