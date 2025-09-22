@@ -1,102 +1,81 @@
 # main.py
+"""
+Main execution script for CTR modeling system
+Comprehensive pipeline for Click-Through Rate prediction
+"""
 
+import os
 import sys
-import logging
-import time
 import gc
+import time
 import signal
+import logging
 import argparse
 import traceback
-import pickle
-from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
 import warnings
+from pathlib import Path
+from typing import Dict, List, Any, Optional, Tuple
+warnings.filterwarnings('ignore')
+
+# Essential imports
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
 
-# Safe imports with error handling for optional dependencies
-try:
-    import psutil
-    PSUTIL_AVAILABLE = True
-except ImportError:
-    PSUTIL_AVAILABLE = False
-    warnings.warn("psutil not available. Memory monitoring will be limited.")
-
+# Try PyTorch import
 try:
     import torch
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-    warnings.warn("PyTorch not available. GPU functions will be disabled.")
+    logging.warning("PyTorch not available, GPU optimization disabled")
 
-# Ensure logs directory exists before configuring logging
-logs_dir = Path('logs')
-logs_dir.mkdir(exist_ok=True)
+# Try psutil for memory monitoring
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    logging.warning("psutil not available, memory monitoring limited")
 
-# Configure logging system
+# Set up basic logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('logs/main.log', mode='a', encoding='utf-8')
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-
 logger = logging.getLogger(__name__)
 
-# Global cleanup flag for graceful shutdown
+# Global state management
 cleanup_required = False
 
+def signal_handler(signum, frame):
+    """Clean signal handler for graceful shutdown"""
+    global cleanup_required
+    logger.info(f"Signal {signum} received, initiating cleanup...")
+    cleanup_required = True
+    force_memory_cleanup(intensive=True)
+    sys.exit(0)
+
 def force_memory_cleanup(intensive: bool = False):
-    """
-    Force garbage collection and memory cleanup
-    
-    Args:
-        intensive: If True, perform more aggressive cleanup
-    """
+    """Force memory cleanup with optional intensive mode"""
     try:
         start_time = time.time()
         
-        # Multiple rounds of garbage collection
-        for _ in range(3):
+        if intensive:
+            # More aggressive cleanup
             collected = gc.collect()
-            time.sleep(0.1)
-        
-        if intensive and PSUTIL_AVAILABLE:
-            time.sleep(1)
-            collected += gc.collect()
             
-            # Windows-specific memory optimization
-            try:
-                import ctypes
-                if hasattr(ctypes, 'windll'):
-                    ctypes.windll.kernel32.SetProcessWorkingSetSize(-1, -1, -1)
-            except Exception:
-                pass
+            # Clear PyTorch cache if available
+            if TORCH_AVAILABLE and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+        else:
+            collected = gc.collect()
         
-        cleanup_time = time.time() - start_time
-        logger.info(f"Memory cleanup completed: {cleanup_time:.2f}s elapsed, {collected} objects collected")
+        elapsed = time.time() - start_time
+        logger.info(f"Memory cleanup completed: {elapsed:.2f}s elapsed, {collected} objects collected")
         
     except Exception as e:
         logger.warning(f"Memory cleanup failed: {e}")
-
-def signal_handler(signum, frame):
-    """Handle interrupt signals for graceful shutdown"""
-    global cleanup_required
-    logger.info("Received program termination request")
-    cleanup_required = True
-    
-    try:
-        gc.collect()
-        if TORCH_AVAILABLE and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        logger.info("Graceful shutdown initiated")
-    except Exception as e:
-        logger.warning(f"Cleanup during shutdown failed: {e}")
-    
-    sys.exit(0)
 
 def validate_environment():
     """
@@ -111,8 +90,8 @@ def validate_environment():
     python_version = sys.version
     logger.info(f"Python version: {python_version}")
     
-    # Create required directories
-    required_dirs = ['data', 'models', 'logs', 'output']
+    # Create required directories  
+    required_dirs = ['data', 'models', 'logs', 'results']
     for dir_name in required_dirs:
         dir_path = Path(dir_name)
         dir_path.mkdir(exist_ok=True)
@@ -173,7 +152,7 @@ def run_performance_analysis(training_results: Dict[str, Any], config, quick_mod
         logger.info("=== Performance Analysis Started ===")
         
         analyzer = CTRPerformanceAnalyzer(config)
-        visualizer = CTRVisualizationEngine(config)
+        visualizer = CTRVisualizationEngine()  # Fixed: removed config parameter
         
         trained_models = training_results.get('trained_models', {})
         if not trained_models:
@@ -219,7 +198,7 @@ def run_performance_analysis(training_results: Dict[str, Any], config, quick_mod
                     try:
                         dashboard = visualizer.create_performance_dashboard(
                             model_analysis,
-                            save_path=f"visualizations/{model_name}_dashboard.html"
+                            save_path=f"results/{model_name}_dashboard.html"
                         )
                         visualization_results[model_name] = dashboard
                     except Exception as e:
@@ -241,7 +220,7 @@ def run_performance_analysis(training_results: Dict[str, Any], config, quick_mod
                     try:
                         comparison_chart = visualizer.create_model_comparison_chart(
                             comparison_result,
-                            save_path="visualizations/model_comparison.png"
+                            save_path="results/model_comparison.png"
                         )
                     except Exception as e:
                         logger.warning(f"Comparison visualization failed: {e}")
@@ -253,12 +232,23 @@ def run_performance_analysis(training_results: Dict[str, Any], config, quick_mod
         reports_saved = 0
         for model_name, analysis in analysis_results.items():
             try:
-                report_path = f"output/analysis_report_{model_name}.json"
+                report_path = f"results/analysis_report_{model_name}.json"
                 saved_path = analyzer.save_analysis_report(analysis, report_path)
                 if saved_path:
                     reports_saved += 1
             except Exception as e:
                 logger.warning(f"Report saving failed for {model_name}: {e}")
+        
+        # Generate visualizations and save summary
+        try:
+            # Create summary CSV
+            analyzer.create_summary_csv(analysis_results)
+            
+            # Generate all visualizations using the visualization engine
+            visualizer.generate_all_visualizations(analysis_results)
+            
+        except Exception as e:
+            logger.warning(f"Visualization generation failed: {e}")
         
         performance_summary = {
             'analyzed_models': list(analysis_results.keys()),
@@ -314,46 +304,32 @@ def display_final_performance_summary(performance_results: Dict[str, Any]):
                 
                 # CTR analysis
                 ctr_analysis = analysis.get('ctr_analysis', {})
-                ctr_quality = ctr_analysis.get('ctr_quality', 'unknown')
+                ctr_quality = ctr_analysis.get('ctr_quality', 'UNKNOWN')
                 ctr_bias = ctr_analysis.get('ctr_bias', 0.0)
-                ctr_absolute_error = ctr_analysis.get('ctr_absolute_error', 0.0)
                 
                 # Overall assessment
-                overall = analysis.get('overall_assessment', {})
-                performance_tier = overall.get('performance_tier', 'unknown')
-                deployment_ready = overall.get('deployment_recommendation', 'not_ready')
+                assessment = analysis.get('overall_assessment', {})
+                performance_tier = assessment.get('performance_tier', 'POOR')
                 
-                logger.info(f"Model: {model_name}")
-                logger.info(f"  Performance Tier: {performance_tier.upper()}")
+                logger.info(f"{model_name}:")
                 logger.info(f"  Combined Score: {combined_score:.4f}")
                 logger.info(f"  AP Score: {ap_score:.4f}")
                 logger.info(f"  AUC Score: {auc_score:.4f}")
-                logger.info(f"  CTR Quality: {ctr_quality.upper()}")
-                logger.info(f"  CTR Bias: {ctr_bias:+.4f}")
-                logger.info(f"  CTR Absolute Error: {ctr_absolute_error:.4f}")
-                logger.info(f"  Deployment Status: {deployment_ready.upper()}")
-                
-                # Recommendations
-                recommendations = overall.get('recommendations', [])
-                if recommendations:
-                    logger.info(f"  Recommendations:")
-                    for rec in recommendations:
-                        logger.info(f"    - {rec}")
-                
+                logger.info(f"  CTR Quality: {ctr_quality}")
+                logger.info(f"  CTR Bias: {ctr_bias:.6f}")
+                logger.info(f"  Performance Tier: {performance_tier}")
                 logger.info("")
         
-        # Model comparison results
-        if comparison_result and len(analyzed_models) > 1:
-            logger.info("MODEL COMPARISON RESULTS:")
+        # Best models summary
+        if comparison_result and comparison_result.get('best_models'):
+            logger.info("BEST MODELS BY METRIC:")
             logger.info("-" * 50)
             
-            ranking = comparison_result.get('performance_ranking', [])
-            if ranking:
-                logger.info("Performance Ranking (by composite score):")
-                for i, rank_info in enumerate(ranking, 1):
-                    model_name = rank_info['model']
-                    composite_score = rank_info['composite_score']
-                    logger.info(f"  {i}. {model_name}: {composite_score:.4f}")
+            best_models = comparison_result['best_models']
+            for metric, info in best_models.items():
+                model_name = info['model']
+                composite_score = info['score']
+                logger.info(f"{metric}: {model_name} ({composite_score:.4f})")
                 logger.info("")
             
             best_models = comparison_result.get('best_models', {})
@@ -382,11 +358,18 @@ def display_final_performance_summary(performance_results: Dict[str, Any]):
         # File locations
         logger.info("OUTPUT FILES:")
         logger.info("-" * 50)
-        logger.info(f"Analysis Reports: output/analysis_report_[model_name].json")
+        logger.info(f"Analysis Reports: results/analysis_report_[model_name].json")
         if not quick_mode:
-            logger.info(f"Visualization Dashboards: visualizations/[model_name]_dashboard.html")
+            logger.info(f"Visualization Dashboards: results/[model_name]_dashboard.html")
             if len(analyzed_models) > 1:
-                logger.info(f"Model Comparison Chart: visualizations/model_comparison.png")
+                logger.info(f"Model Comparison Chart: results/model_comparison.png")
+        logger.info("Results folder: results/")
+        logger.info("  - summary.csv (comprehensive metrics)")
+        logger.info("  - model_performance.png (performance comparison)")
+        logger.info("  - ctr_analysis.png (4-panel CTR dashboard)")
+        logger.info("  - execution_summary.png (resource usage)")
+        logger.info("  - comprehensive_report.pdf (complete analysis)")
+        logger.info("  - analysis_report_[model_name].json (detailed analysis)")
         logger.info("")
         
     except Exception as e:
@@ -436,248 +419,137 @@ def execute_final_pipeline(config, quick_mode: bool = False):
                 gpu_name = torch.cuda.get_device_name(0)
                 logger.info("GPU detection: RTX 4060 Ti optimization applied")
                 
-                from training import CTRTrainingPipeline
-                from evaluation import CTRMetrics
-                from ensemble import CTREnsembleManager
-                from inference import CTRInferenceEngine
-                from models import ModelFactory
+                from training import CTRTrainerGPU as CTRTrainer
+                from models import LogisticModel, LightGBMModel, XGBoostModel
+                from ensemble import EnsembleManager
                 
                 logger.info(f"GPU detection: {gpu_name}")
-                logger.info("RTX 4060 Ti optimization: True")
+                logger.info(f"RTX 4060 Ti optimization: True")
                 logger.info("Mixed Precision enabled")
-                
             else:
-                from training import CTRTrainingPipeline
-                from evaluation import CTRMetrics
-                from ensemble import CTREnsembleManager  
-                from inference import CTRInferenceEngine
-                from models import ModelFactory
+                from training import CTRTrainer
+                from models import LogisticModel, LightGBMModel, XGBoostModel
+                from ensemble import EnsembleManager
                 
-                logger.info("Using CPU mode")
-            
-            # Organize modules for easy access
-            modules = {
-                'LargeDataLoader': LargeDataLoader,
-                'CTRFeatureEngineer': CTRFeatureEngineer,
-                'CTRTrainingPipeline': CTRTrainingPipeline,
-                'CTRMetrics': CTRMetrics,
-                'CTREnsembleManager': CTREnsembleManager,
-                'CTRInferenceEngine': CTRInferenceEngine,
-                'ModelFactory': ModelFactory
-            }
-            
-            logger.info("All modules import completed")
-            
-        except Exception as e:
+                logger.info("CPU mode: Using standard implementations")
+        
+        except ImportError as e:
             logger.error(f"Module import failed: {e}")
-            raise
-        
-        if cleanup_required:
-            logger.info("Pipeline interrupted by user request")
-            return None
+            logger.error("Falling back to basic implementations")
             
-        # 1. Data Loading Phase
-        logger.info("1. Data loading phase")
-        data_loader = modules['LargeDataLoader'](config)
+            from training import CTRTrainer
+            from models import LogisticModel
+            from ensemble import EnsembleManager
+            
+            LightGBMModel = None
+            XGBoostModel = None
         
-        # Pass quick_mode to data loader
-        if hasattr(data_loader, 'set_quick_mode'):
-            data_loader.set_quick_mode(quick_mode)
+        logger.info("All modules import completed")
+        
+        # 1. Data Loading
+        logger.info("1. Data loading phase")
+        data_loader = LargeDataLoader(config)
+        data_loader.set_quick_mode(quick_mode)
         
         if PSUTIL_AVAILABLE:
             vm = psutil.virtual_memory()
             logger.info(f"Pre-loading memory status: available {vm.available/(1024**3):.1f}GB")
         
-        try:
-            # Data loading with quick mode support
-            if quick_mode:
-                logger.info("Quick mode: Loading sample data (50 samples)")
-                train_df, test_df = data_loader.load_quick_sample_data()
-            else:
-                logger.info("Full mode: Loading complete dataset")
-                train_df, test_df = data_loader.load_large_data_optimized()
-                
-            logger.info(f"Data loading completed - train: {train_df.shape}, test: {test_df.shape}")
-            
-        except Exception as e:
-            logger.error(f"Data loading failed: {e}")
-            
-            if not quick_mode:  # Only retry in full mode
-                logger.info("Retrying after memory cleanup")
-                force_memory_cleanup(intensive=True)
-                time.sleep(2)
-                
-                try:
-                    config.CHUNK_SIZE = min(config.CHUNK_SIZE, 30000)
-                    config.MAX_MEMORY_GB = min(config.MAX_MEMORY_GB, 40)
-                    
-                    train_df, test_df = data_loader.load_large_data_optimized()
-                    logger.info(f"Retry successful - train: {train_df.shape}, test: {test_df.shape}")
-                except Exception as e2:
-                    logger.error(f"Retry also failed: {e2}")
-                    raise e2
-            else:
-                raise e
+        if quick_mode:
+            logger.info("Quick mode: Loading sample data (50 samples)")
+            train_df, test_df = data_loader.load_quick_sample_data()
+        else:
+            logger.info("Full mode: Loading complete dataset")
+            train_df, test_df = data_loader.load_large_data_optimized()
         
-        if cleanup_required:
-            logger.info("Pipeline interrupted by user request")
-            return None
+        logger.info(f"Data loading completed - train: {train_df.shape}, test: {test_df.shape}")
         
-        # 2. Feature Engineering Phase
+        # 2. Feature Engineering
         logger.info("2. Feature engineering phase")
-        feature_engineer = modules['CTRFeatureEngineer'](config)
+        feature_engineer = CTRFeatureEngineer(config)
+        feature_engineer.set_quick_mode(quick_mode)
         
-        # Pass quick_mode to feature engineer
-        if hasattr(feature_engineer, 'set_quick_mode'):
-            feature_engineer.set_quick_mode(quick_mode)
+        if quick_mode:
+            logger.info("Quick mode: Basic feature engineering only")
+        else:
+            logger.info("Full mode: Comprehensive feature engineering")
         
-        # Target column detection
-        target_col = 'clicked'
-        if target_col not in train_df.columns:
-            possible_targets = [col for col in train_df.columns if 'click' in col.lower()]
-            if possible_targets:
-                target_col = possible_targets[0]
-                logger.info(f"Target column changed: {target_col}")
-            else:
-                logger.error("Target column not found")
-                train_df[target_col] = np.random.binomial(1, 0.02, len(train_df))
-                logger.warning(f"Temporary target column '{target_col}' created")
+        X_train, X_test = feature_engineer.engineer_features(train_df, test_df)
+        logger.info(f"Feature engineering completed - Features: {X_train.shape[1]}")
         
-        try:
-            # Feature engineering with mode-specific settings
-            if quick_mode:
-                logger.info("Quick mode: Basic feature engineering only")
-                feature_engineer.set_memory_efficient_mode(True)
-            else:
-                logger.info("Full mode: Complete feature engineering")
-                feature_engineer.set_memory_efficient_mode(False)
-                
-                if PSUTIL_AVAILABLE:
-                    vm = psutil.virtual_memory()
-                    if vm.available / (1024**3) < 8:
-                        logger.warning("Performing simplified feature engineering due to low memory")
-                        feature_engineer.set_memory_efficient_mode(True)
-            
-            X_train, X_test = feature_engineer.engineer_features(train_df, test_df, target_col)
-            y_train = train_df[target_col]
-            
-            logger.info(f"Feature engineering completed - Features: {X_train.shape[1]}")
-            
-        except Exception as e:
-            logger.error(f"Feature engineering failed: {e}")
-            logger.warning("Using basic features only")
-            
-            # Fallback to basic features
-            feature_cols = [col for col in train_df.columns if col != target_col]
-            X_train = train_df[feature_cols].fillna(0)
-            X_test = test_df[feature_cols].fillna(0)
-            y_train = train_df[target_col]
-        
-        if cleanup_required:
-            logger.info("Pipeline interrupted by user request")
-            return None
-        
-        # 3. Model Training Phase
+        # 3. Model Training
         logger.info("3. Model training phase")
-        training_pipeline = modules['CTRTrainingPipeline'](config)
+        trainer = CTRTrainer(config)
+        trainer.set_quick_mode(quick_mode)
         
-        # Pass quick_mode to training pipeline
-        if hasattr(training_pipeline, 'set_quick_mode'):
-            training_pipeline.set_quick_mode(quick_mode)
+        # Available models
+        model_classes = {'logistic': LogisticModel}
+        if LightGBMModel:
+            model_classes['lightgbm'] = LightGBMModel
+        if XGBoostModel:
+            model_classes['xgboost'] = XGBoostModel
         
-        available_models = modules['ModelFactory'].get_available_models()
+        available_models = list(model_classes.keys())
         logger.info(f"Available models: {available_models}")
         
         # Initialize ensemble manager
-        ensemble_manager = modules['CTREnsembleManager'](config)
+        ensemble_manager = EnsembleManager(config)
         logger.info("Ensemble manager initialization completed")
         
-        # Data split with appropriate size for mode
-        try:
-            if quick_mode:
-                # For quick mode, use smaller validation split
-                test_size = 0.3  # 30% for validation (15 samples)
-            else:
-                test_size = 0.15  # 15% for validation in full mode
-            
-            X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
-                X_train, y_train,
-                test_size=test_size,
-                random_state=config.RANDOM_STATE,
-                stratify=y_train if len(np.unique(y_train)) > 1 else None
-            )
-            
-            logger.info(f"Data split completed - train: {X_train_split.shape}, validation: {X_val_split.shape}")
-            
-        except Exception as e:
-            logger.error(f"Data split failed: {e}")
-            X_train_split, y_train_split = X_train, y_train
-            X_val_split, y_val_split = None, None
+        # Split data for validation
+        from sklearn.model_selection import train_test_split
         
-        # Model training with mode-specific parameters
+        # Extract target column
+        target_col = data_loader.get_detected_target_column()
+        if target_col and target_col in train_df.columns:
+            y_train = train_df[target_col].values
+        else:
+            # Create dummy target for quick mode
+            y_train = np.random.binomial(1, 0.02, len(X_train))
+        
+        X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
+            X_train, y_train, test_size=0.3, random_state=42, stratify=y_train if len(np.unique(y_train)) > 1 else None
+        )
+        
+        logger.info(f"Data split completed - train: {X_train_split.shape}, validation: {X_val_split.shape}")
+        
+        # Train models
         trained_models = {}
         successful_models = 0
         
-        # Select models based on mode
         if quick_mode:
-            # Quick mode: only train logistic regression for speed
-            models_to_train = ['logistic'] if 'logistic' in available_models else available_models[:1]
+            models_to_train = ['logistic']  # Only train one model in quick mode
             logger.info(f"Quick mode: Training only {models_to_train}")
         else:
-            # Full mode: train all available models
             models_to_train = available_models
         
-        for model_type in models_to_train:
-            if model_type not in available_models:
-                continue
-            
-            logger.info(f"=== {model_type} model training started ===")
+        for model_name in models_to_train:
+            logger.info(f"=== {model_name} model training started ===")
             
             try:
                 force_memory_cleanup()
                 
-                # Memory threshold check
-                if PSUTIL_AVAILABLE:
-                    vm = psutil.virtual_memory()
-                    memory_threshold = 2 if quick_mode else 4  # Lower threshold for quick mode
-                    if vm.available / (1024**3) < memory_threshold:
-                        logger.warning(f"{model_type} model training skipped: low memory")
-                        continue
-                
-                # Train model with mode-specific settings
-                model = training_pipeline.trainer.train_single_model(
-                    model_type=model_type,
+                model_class = model_classes[model_name]
+                model = trainer.train_model(
+                    model_class=model_class,
+                    model_name=model_name,
                     X_train=X_train_split,
                     y_train=y_train_split,
                     X_val=X_val_split,
-                    y_val=y_val_split,
-                    apply_calibration=not quick_mode,  # Skip calibration in quick mode
-                    optimize_hyperparameters=not quick_mode  # Skip optimization in quick mode
+                    y_val=y_val_split
                 )
                 
-                if model is not None:
-                    trained_models[model_type] = model
+                if model:
+                    trained_models[model_name] = model
+                    ensemble_manager.add_model(model, model_name)
                     successful_models += 1
-                    
-                    # Save model
-                    model_path = Path(f"models/{model_type}_model.pkl")
-                    with open(model_path, 'wb') as f:
-                        pickle.dump(model, f)
-                    
-                    # Add to ensemble
-                    ensemble_manager.add_base_model(model, model_type)
-                    
-                    logger.info(f"{model_type} model training completed successfully")
+                    logger.info(f"{model_name} model training completed successfully")
                 else:
-                    logger.warning(f"{model_type} model training failed")
-                
+                    logger.warning(f"{model_name} model training failed")
+            
             except Exception as e:
-                logger.error(f"{model_type} model training failed: {e}")
+                logger.error(f"{model_name} model training failed: {e}")
                 continue
-        
-        if cleanup_required:
-            logger.info("Pipeline interrupted by user request")
-            return None
         
         # 4. Ensemble Preparation
         logger.info("4. Ensemble preparation")
@@ -894,6 +766,7 @@ def inference_mode():
         
         # Load saved models
         try:
+            import pickle
             models = {}
             for model_file in model_files:
                 try:
@@ -968,6 +841,7 @@ def reproduce_score():
         
         # Load models and generate reproduction
         try:
+            import pickle
             models = {}
             for model_file in model_files:
                 try:

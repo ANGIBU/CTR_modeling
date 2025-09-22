@@ -362,6 +362,11 @@ class CTRPerformanceAnalyzer:
                            output_path: str) -> Optional[str]:
         """Save analysis report to JSON file"""
         try:
+            # Ensure the file is saved to results directory
+            if not output_path.startswith('results/'):
+                filename = os.path.basename(output_path)
+                output_path = f"results/{filename}"
+            
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             
             # Convert numpy types to native Python types for JSON serialization
@@ -430,8 +435,8 @@ class CTRPerformanceAnalyzer:
             
             if summary_data:
                 df = pd.DataFrame(summary_data)
-                summary_path = "output/performance_summary.csv"
-                os.makedirs("output", exist_ok=True)
+                summary_path = "results/performance_summary.csv"
+                os.makedirs("results", exist_ok=True)
                 df.to_csv(summary_path, index=False)
                 logger.info(f"Summary CSV created: {summary_path}")
                 return True
