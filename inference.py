@@ -1133,10 +1133,29 @@ class CTRPredictionAPI:
             use_postprocessing
         )
         
-        submission = pd.DataFrame({
-            'id': range(len(predictions)),
-            'clicked': predictions
-        })
+        # Load sample submission to get proper ID format
+        try:
+            sample_submission = pd.read_csv('data/sample_submission.csv')
+            if len(sample_submission) != len(predictions):
+                logger.warning(f"Sample submission length ({len(sample_submission)}) != predictions length ({len(predictions)})")
+                # Generate IDs in same format as sample
+                submission = pd.DataFrame({
+                    'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
+                    'clicked': predictions
+                })
+            else:
+                # Use IDs from sample submission
+                submission = pd.DataFrame({
+                    'ID': sample_submission['ID'].values,
+                    'clicked': predictions
+                })
+        except Exception as e:
+            logger.warning(f"Could not load sample submission: {e}")
+            # Fallback: generate IDs in expected format
+            submission = pd.DataFrame({
+                'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
+                'clicked': predictions
+            })
         
         logger.info(f"Submission prediction generation completed: {len(submission):,} rows")
         

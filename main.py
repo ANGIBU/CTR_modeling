@@ -409,11 +409,29 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 logger.error(f"Single model prediction failed: {e}")
                 predictions = np.full(len(X_test), 0.0191)
         
-        # Create submission file
-        submission_df = pd.DataFrame({
-            'ID': range(len(predictions)),
-            'clicked': predictions
-        })
+        # Load sample submission to get proper ID format
+        try:
+            sample_submission = pd.read_csv('data/sample_submission.csv')
+            if len(sample_submission) != len(predictions):
+                logger.warning(f"Sample submission length ({len(sample_submission)}) != predictions length ({len(predictions)})")
+                # Generate IDs in same format as sample
+                submission_df = pd.DataFrame({
+                    'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
+                    'clicked': predictions
+                })
+            else:
+                # Use IDs from sample submission
+                submission_df = pd.DataFrame({
+                    'ID': sample_submission['ID'].values,
+                    'clicked': predictions
+                })
+        except Exception as e:
+            logger.warning(f"Could not load sample submission: {e}")
+            # Fallback: generate IDs in expected format
+            submission_df = pd.DataFrame({
+                'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
+                'clicked': predictions
+            })
         
         submission_path = 'submission.csv'
         submission_df.to_csv(submission_path, index=False)
