@@ -347,7 +347,7 @@ class CTRVisualizationEngine:
                 fig_cover.text(0.5, 0.34, f'Deployment Ready Models: {deployment_ready_count}', ha='center', fontsize=12)
                 fig_cover.text(0.5, 0.31, f'Average CTR Bias: {avg_ctr_bias:.6f}', ha='center', fontsize=12)
                 
-                fig_cover.axis('off')
+                plt.axis('off')
                 pdf.savefig(fig_cover, bbox_inches='tight')
                 plt.close(fig_cover)
                 
