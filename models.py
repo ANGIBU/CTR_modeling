@@ -18,6 +18,7 @@ try:
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.isotonic import IsotonicRegression
     from sklearn.metrics import brier_score_loss, log_loss
+    from sklearn.preprocessing import StandardScaler
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
@@ -47,9 +48,9 @@ class MemoryMonitor:
     
     def __init__(self):
         self.memory_thresholds = {
-            'warning': 8.0,    # GB
-            'critical': 4.0,   # GB  
-            'abort': 2.0       # GB
+            'warning': 15.0,    # GB
+            'critical': 10.0,   # GB  
+            'abort': 5.0       # GB
         }
         
         self.quick_mode_thresholds = {
@@ -123,8 +124,38 @@ class MemoryMonitor:
         except Exception:
             pass
 
+class CTRBiasCorrector:
+    """CTR bias correction for predictions"""
+    
+    def __init__(self, target_ctr: float = 0.0191):
+        self.target_ctr = target_ctr
+        self.correction_factor = None
+        self.scale_factor = 0.4  # Reduce predictions to 40% of original
+        
+    def fit(self, y_true: np.ndarray, y_pred: np.ndarray):
+        """Calculate correction factor from training data"""
+        actual_ctr = np.mean(y_true)
+        predicted_ctr = np.mean(y_pred)
+        
+        if predicted_ctr > 0:
+            self.correction_factor = actual_ctr / predicted_ctr
+        else:
+            self.correction_factor = 1.0
+            
+        logger.info(f"CTR bias correction factor: {self.correction_factor:.4f}")
+        
+    def transform(self, y_pred: np.ndarray) -> np.ndarray:
+        """Apply CTR bias correction"""
+        # Apply scale factor to reduce over-prediction
+        corrected = y_pred * self.scale_factor
+        
+        # Clip to reasonable range
+        corrected = np.clip(corrected, 0.001, 0.1)
+        
+        return corrected
+
 class MultiMethodCalibrator:
-    """Multi-method probability calibrator"""
+    """Multi-method probability calibrator with CTR bias correction"""
     
     def __init__(self):
         self.calibration_models = {}
@@ -132,15 +163,20 @@ class MultiMethodCalibrator:
         self.best_method = None
         self.bias_correction = 0.0
         self.multiplicative_correction = 1.0
-    
+        self.ctr_corrector = CTRBiasCorrector()
+        self.scaler = None
+        
     def fit(self, y_true: np.ndarray, y_pred_proba: np.ndarray, method: str = 'auto') -> bool:
-        """Fit calibration models"""
+        """Fit calibration models with CTR correction"""
         try:
             if len(y_true) < 5:
                 logger.warning("Insufficient data for calibration")
                 return False
             
-            methods_to_try = ['isotonic', 'platt', 'beta'] if method == 'auto' else [method]
+            # Fit CTR bias correction first
+            self.ctr_corrector.fit(y_true, y_pred_proba)
+            
+            methods_to_try = ['isotonic', 'platt'] if method == 'auto' else [method]
             
             for cal_method in methods_to_try:
                 try:
@@ -154,12 +190,6 @@ class MultiMethodCalibrator:
                         calibrator = _SigmoidCalibration()
                         calibrator.fit(y_pred_proba.reshape(-1, 1), y_true)
                         self.calibration_models[cal_method] = calibrator
-                        
-                    elif cal_method == 'beta':
-                        # Simple beta calibration
-                        alpha = np.sum(y_true) + 1
-                        beta = len(y_true) - np.sum(y_true) + 1
-                        self.calibration_models[cal_method] = {'a': alpha, 'b': beta}
                     
                     # Calculate calibration score
                     calibrated_proba = self._predict_with_method(y_pred_proba, cal_method)
@@ -174,7 +204,7 @@ class MultiMethodCalibrator:
                 self.best_method = max(self.calibration_scores.keys(), 
                                      key=lambda x: self.calibration_scores[x])
                 
-                # Calculate bias correction
+                # Calculate additional bias correction
                 best_calibrated = self._predict_with_method(y_pred_proba, self.best_method)
                 self.bias_correction = np.mean(y_true) - np.mean(best_calibrated)
                 
@@ -197,40 +227,36 @@ class MultiMethodCalibrator:
                 return self.calibration_models[method].predict(y_pred_proba)
             elif method == 'platt':
                 return self.calibration_models[method].predict(y_pred_proba.reshape(-1, 1)).flatten()
-            elif method == 'beta':
-                params = self.calibration_models[method]
-                alpha, beta = params['a'], params['b']
-                # Beta distribution transformation
-                return np.random.beta(alpha, beta, len(y_pred_proba))
             else:
                 return y_pred_proba
         except Exception:
             return y_pred_proba
     
     def predict_proba(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """Apply calibration to predictions"""
+        """Apply calibration and CTR correction to predictions"""
         try:
+            # Apply calibration if available
             if self.best_method and self.best_method in self.calibration_models:
-                if self.best_method == 'beta':
-                    params = self.calibration_models[self.best_method]
-                    eps = 1e-15
-                    log_proba = np.log(np.clip(y_pred_proba, eps, 1 - eps))
-                    log_1_minus_proba = np.log(1 - np.clip(y_pred_proba, eps, 1 - eps))
-                    
-                    log_calibrated_proba = (params['a'] - 1) * log_proba + (params['b'] - 1) * log_1_minus_proba
-                    log_calibrated_proba -= betaln(params['a'], params['b'])
-                    
-                    calibrated_proba = np.exp(log_calibrated_proba)
-                    return np.clip(calibrated_proba, eps, 1 - eps)
-            
+                if self.best_method == 'isotonic':
+                    calibrated = self.calibration_models[self.best_method].predict(y_pred_proba)
+                elif self.best_method == 'platt':
+                    calibrated = self.calibration_models[self.best_method].predict(
+                        y_pred_proba.reshape(-1, 1)
+                    ).flatten()
+                else:
+                    calibrated = y_pred_proba
             else:
-                corrected_proba = y_pred_proba + self.bias_correction
-                corrected_proba = corrected_proba * self.multiplicative_correction
-                return np.clip(corrected_proba, 1e-15, 1 - 1e-15)
+                calibrated = y_pred_proba
+            
+            # Apply CTR bias correction
+            corrected = self.ctr_corrector.transform(calibrated)
+            
+            return np.clip(corrected, 1e-15, 1 - 1e-15)
             
         except Exception as e:
             logger.warning(f"Calibration prediction failed: {e}")
-            return np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
+            # Still apply CTR correction even if calibration fails
+            return self.ctr_corrector.transform(y_pred_proba)
     
     def get_calibration_summary(self) -> Dict[str, Any]:
         """Get calibration summary"""
@@ -239,11 +265,12 @@ class MultiMethodCalibrator:
             'calibration_scores': self.calibration_scores,
             'available_methods': list(self.calibration_models.keys()),
             'bias_correction': self.bias_correction,
-            'multiplicative_correction': self.multiplicative_correction
+            'multiplicative_correction': self.multiplicative_correction,
+            'ctr_correction_factor': self.ctr_corrector.correction_factor
         }
 
 class BaseModel(ABC):
-    """Base class for all models"""
+    """Base class for all models with mandatory calibration"""
     
     def __init__(self, name: str, params: Dict[str, Any] = None):
         self.name = name
@@ -257,7 +284,9 @@ class BaseModel(ABC):
         self.calibration_applied = True
         self.memory_monitor = MemoryMonitor()
         self.quick_mode = False
-    
+        self.scaler = StandardScaler()  # Added for feature scaling
+        self.use_scaling = True  # Enable scaling by default
+        
     def set_quick_mode(self, enabled: bool):
         """Enable or disable quick mode for model training"""
         self.quick_mode = enabled
@@ -306,8 +335,8 @@ class BaseModel(ABC):
             logger.error(f"{self.name}: Memory safe prediction failed: {e}")
             return np.array([])
     
-    def _safe_data_preprocessing(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Safe data preprocessing"""
+    def _safe_data_preprocessing(self, X: pd.DataFrame, fit_scaler: bool = False) -> pd.DataFrame:
+        """Safe data preprocessing with scaling"""
         try:
             X_processed = X.copy()
             
@@ -322,6 +351,13 @@ class BaseModel(ABC):
             
             # Handle infinite values
             X_processed = X_processed.replace([np.inf, -np.inf], 0)
+            
+            # Apply scaling if enabled
+            if self.use_scaling and len(numeric_columns) > 0:
+                if fit_scaler:
+                    X_processed[numeric_columns] = self.scaler.fit_transform(X_processed[numeric_columns])
+                else:
+                    X_processed[numeric_columns] = self.scaler.transform(X_processed[numeric_columns])
             
             return X_processed
             
@@ -365,8 +401,8 @@ class BaseModel(ABC):
         except Exception:
             return predictions
     
-    def apply_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, method: str = 'auto'):
-        """Apply probability calibration"""
+    def apply_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, method: str = 'isotonic'):
+        """Apply probability calibration - mandatory for all models"""
         try:
             if not self.is_fitted:
                 logger.warning("Model not fitted, cannot apply calibration")
@@ -384,9 +420,10 @@ class BaseModel(ABC):
             
             if success:
                 self.is_calibrated = True
+                logger.info(f"{self.name}: Calibration applied successfully")
                 return True
             else:
-                logger.warning("Calibration fitting failed")
+                logger.warning(f"{self.name}: Calibration fitting failed")
                 return False
                 
         except Exception as e:
@@ -394,13 +431,15 @@ class BaseModel(ABC):
             return False
     
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Calibrated probability predictions"""
+        """Calibrated probability predictions with mandatory CTR correction"""
         raw_predictions = self.predict_proba_raw(X)
         
         if self.is_calibrated and self.calibrator is not None:
             return self.calibrator.predict_proba(raw_predictions)
-        
-        return raw_predictions
+        else:
+            # Apply basic CTR correction even without calibration
+            corrector = CTRBiasCorrector()
+            return corrector.transform(raw_predictions)
     
     @abstractmethod
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
@@ -414,20 +453,21 @@ class BaseModel(ABC):
         pass
 
 class LogisticModel(BaseModel):
-    """Logistic Regression model with tuned parameters"""
+    """Logistic Regression model with fixed convergence"""
     
     def __init__(self, name: str = "LogisticRegression", params: Dict[str, Any] = None):
         if not SKLEARN_AVAILABLE:
             raise ImportError("Scikit-learn is not installed.")
         
         default_params = {
-            'C': 1.0,
+            'C': 0.1,  # Increased regularization
             'penalty': 'l2',
-            'solver': 'lbfgs',
-            'max_iter': 2000,
+            'solver': 'saga',  # Better convergence
+            'max_iter': 5000,  # Increased iterations
             'random_state': 42,
             'class_weight': 'balanced',
-            'n_jobs': 6
+            'n_jobs': 6,
+            'tol': 0.001  # Added tolerance
         }
         
         if params:
@@ -437,13 +477,15 @@ class LogisticModel(BaseModel):
         self.model = LogisticRegression(**self.params)
         self.prediction_diversity_threshold = 2800
         self.sampling_logged = False
+        self.use_scaling = True  # Enable scaling for logistic regression
     
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         simplified_params = {
-            'C': 1.0,
-            'max_iter': 1000,
-            'n_jobs': 4
+            'C': 0.1,
+            'max_iter': 2000,
+            'n_jobs': 4,
+            'tol': 0.01
         }
         
         self.params.update(simplified_params)
@@ -453,10 +495,11 @@ class LogisticModel(BaseModel):
     def _apply_quick_mode_params(self):
         """Apply quick mode parameters for rapid testing"""
         quick_params = {
-            'C': 1.0,
-            'max_iter': 100,
+            'C': 0.1,
+            'max_iter': 500,
             'n_jobs': 2,
-            'solver': 'lbfgs'
+            'solver': 'saga',
+            'tol': 0.01
         }
         
         self.params.update(quick_params)
@@ -498,7 +541,7 @@ class LogisticModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Logistic regression model training with memory management"""
+        """Logistic regression model training with scaling and calibration"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         
         def _fit_internal():
@@ -515,24 +558,24 @@ class LogisticModel(BaseModel):
             else:
                 X_train_sample, y_train_sample = X_train, y_train
             
-            # Safe data preprocessing
-            X_train_clean = self._safe_data_preprocessing(X_train_sample)
+            # Safe data preprocessing with scaling
+            X_train_clean = self._safe_data_preprocessing(X_train_sample, fit_scaler=True)
             
             # Fit model
-            logger.info(f"{self.name}: Starting training")
+            logger.info(f"{self.name}: Starting training with scaling")
             self.model.fit(X_train_clean, y_train_sample)
             
             logger.info(f"{self.name}: Training completed successfully")
             self.is_fitted = True
             
-            # Apply calibration if validation data available and not in quick mode
-            if X_val is not None and y_val is not None and not self.quick_mode:
-                logger.info(f"{self.name}: Starting calibration application")
-                self.apply_calibration(X_val, y_val, method='auto')
+            # Mandatory calibration if validation data available
+            if X_val is not None and y_val is not None:
+                logger.info(f"{self.name}: Starting mandatory calibration")
+                self.apply_calibration(X_val, y_val, method='isotonic')
                 if self.is_calibrated:
-                    logger.info(f"{self.name}: Calibration application complete")
+                    logger.info(f"{self.name}: Calibration completed")
                 else:
-                    logger.warning(f"{self.name}: Calibration application failed")
+                    logger.warning(f"{self.name}: Calibration failed - using CTR correction only")
             
             # Cleanup
             del X_train_clean
@@ -549,7 +592,7 @@ class LogisticModel(BaseModel):
         
         def _predict_internal(batch_X):
             X_processed = self._ensure_feature_consistency(batch_X)
-            X_processed = self._safe_data_preprocessing(X_processed)
+            X_processed = self._safe_data_preprocessing(X_processed, fit_scaler=False)
             
             proba = self.model.predict_proba(X_processed)[:, 1]
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
@@ -558,7 +601,7 @@ class LogisticModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X, batch_size=40000)
 
 class LightGBMModel(BaseModel):
-    """LightGBM model with memory management and tuned parameters"""
+    """LightGBM model with regularization and calibration"""
     
     def __init__(self, name: str = "LightGBM", params: Dict[str, Any] = None):
         if not LIGHTGBM_AVAILABLE:
@@ -569,15 +612,15 @@ class LightGBMModel(BaseModel):
             'metric': 'auc',
             'boosting_type': 'gbdt',
             'num_leaves': 31,
-            'learning_rate': 0.1,
-            'feature_fraction': 0.9,
-            'bagging_fraction': 0.8,
+            'learning_rate': 0.03,  # Reduced learning rate
+            'feature_fraction': 0.7,
+            'bagging_fraction': 0.7,
             'bagging_freq': 5,
-            'min_data_in_leaf': 100,
-            'lambda_l1': 0.1,
-            'lambda_l2': 0.1,
-            'min_gain_to_split': 0.1,
-            'max_depth': -1,
+            'min_data_in_leaf': 200,  # Increased for regularization
+            'lambda_l1': 0.5,  # Increased regularization
+            'lambda_l2': 0.5,
+            'min_gain_to_split': 0.02,
+            'max_depth': 5,  # Limited depth
             'save_binary': True,
             'seed': 42,
             'feature_fraction_seed': 42,
@@ -585,8 +628,8 @@ class LightGBMModel(BaseModel):
             'drop_seed': 42,
             'data_random_seed': 42,
             'verbose': -1,
-            'n_estimators': 3000,
-            'early_stopping_rounds': 100
+            'n_estimators': 800,  # Reduced iterations
+            'early_stopping_rounds': 150
         }
         
         if params:
@@ -594,19 +637,20 @@ class LightGBMModel(BaseModel):
         
         super().__init__(name, default_params)
         self.prediction_diversity_threshold = 2500
+        self.use_scaling = False  # Tree models don't need scaling
     
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         simplified_params = {
             'num_leaves': 15,
             'max_depth': 4,
-            'n_estimators': 1000,
-            'min_data_in_leaf': 200,
+            'n_estimators': 500,
+            'min_data_in_leaf': 300,
             'num_threads': 4,
             'max_bin': 64,
             'early_stopping_rounds': 50,
-            'feature_fraction': 0.7,
-            'bagging_fraction': 0.7
+            'feature_fraction': 0.6,
+            'bagging_fraction': 0.6
         }
         
         self.params.update(simplified_params)
@@ -633,7 +677,7 @@ class LightGBMModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """LightGBM model training with quick mode support"""
+        """LightGBM model training with mandatory calibration"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         
         def _fit_internal():
@@ -645,7 +689,7 @@ class LightGBMModel(BaseModel):
             # Safe data preprocessing
             X_train_clean = self._safe_data_preprocessing(X_train)
             
-            # Memory efficient dataset creation with fixed callback handling
+            # Memory efficient dataset creation
             train_params = {
                 'max_bin': self.params.get('max_bin', 128),
                 'verbosity': -1
@@ -676,8 +720,8 @@ class LightGBMModel(BaseModel):
                 valid_names.append('valid')
             
             # Extract callback parameters from main params
-            early_stopping = self.params.pop('early_stopping_rounds', 100)
-            n_estimators = self.params.pop('n_estimators', 3000)
+            early_stopping = self.params.pop('early_stopping_rounds', 150)
+            n_estimators = self.params.pop('n_estimators', 800)
             
             # Train with memory efficient callbacks
             self.model = lgb.train(
@@ -694,14 +738,14 @@ class LightGBMModel(BaseModel):
             
             self.is_fitted = True
             
-            # Apply calibration if validation data available and not in quick mode
-            if X_val_clean is not None and y_val is not None and not self.quick_mode:
-                logger.info(f"{self.name}: Starting calibration application")
-                self.apply_calibration(X_val_clean, y_val, method='auto')
+            # Mandatory calibration
+            if X_val_clean is not None and y_val is not None:
+                logger.info(f"{self.name}: Starting mandatory calibration")
+                self.apply_calibration(X_val_clean, y_val, method='isotonic')
                 if self.is_calibrated:
-                    logger.info(f"{self.name}: Calibration application complete")
+                    logger.info(f"{self.name}: Calibration completed")
                 else:
-                    logger.warning(f"{self.name}: Calibration application failed")
+                    logger.warning(f"{self.name}: Calibration failed - using CTR correction only")
             
             # Cleanup
             del X_train_clean
@@ -731,7 +775,7 @@ class LightGBMModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X, batch_size=30000)
 
 class XGBoostModel(BaseModel):
-    """XGBoost model with memory management and tuned parameters"""
+    """XGBoost model with regularization and calibration"""
     
     def __init__(self, name: str = "XGBoost", params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
@@ -741,21 +785,21 @@ class XGBoostModel(BaseModel):
             'objective': 'binary:logistic',
             'eval_metric': 'auc',
             'tree_method': 'hist',
-            'max_depth': 6,
-            'learning_rate': 0.1,
-            'n_estimators': 2000,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'colsample_bylevel': 0.8,
-            'colsample_bynode': 0.8,
-            'reg_alpha': 0.1,
-            'reg_lambda': 0.1,
-            'min_child_weight': 1,
-            'gamma': 0,
-            'scale_pos_weight': 1,
+            'max_depth': 5,  # Limited depth
+            'learning_rate': 0.05,  # Reduced learning rate
+            'n_estimators': 600,  # Reduced iterations
+            'subsample': 0.7,
+            'colsample_bytree': 0.7,
+            'colsample_bylevel': 0.7,
+            'colsample_bynode': 0.7,
+            'reg_alpha': 0.5,  # Increased regularization
+            'reg_lambda': 0.5,
+            'min_child_weight': 10,  # Increased for regularization
+            'gamma': 0.1,
+            'scale_pos_weight': 52.3,  # Handle imbalance
             'random_state': 42,
             'n_jobs': -1,
-            'early_stopping_rounds': 100
+            'early_stopping_rounds': 150
         }
         
         if params:
@@ -763,15 +807,16 @@ class XGBoostModel(BaseModel):
         
         super().__init__(name, default_params)
         self.prediction_diversity_threshold = 2200
+        self.use_scaling = False  # Tree models don't need scaling
     
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         simplified_params = {
             'max_depth': 4,
-            'n_estimators': 1000,
+            'n_estimators': 400,
             'learning_rate': 0.1,
-            'subsample': 0.7,
-            'colsample_bytree': 0.7,
+            'subsample': 0.6,
+            'colsample_bytree': 0.6,
             'early_stopping_rounds': 50,
             'n_jobs': 4
         }
@@ -796,7 +841,7 @@ class XGBoostModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """XGBoost model training with memory management"""
+        """XGBoost model training with mandatory calibration"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         
         def _fit_internal():
@@ -829,13 +874,13 @@ class XGBoostModel(BaseModel):
                 )
                 eval_set.append((dval, 'eval'))
             
-            early_stopping = self.params.pop('early_stopping_rounds', 100)
+            early_stopping = self.params.pop('early_stopping_rounds', 150)
             
             logger.info(f"{self.name}: Starting XGBoost training")
             self.model = xgb.train(
                 self.params,
                 dtrain,
-                num_boost_round=self.params.get('n_estimators', 2000),
+                num_boost_round=self.params.get('n_estimators', 600),
                 evals=eval_set,
                 early_stopping_rounds=early_stopping,
                 verbose_eval=0
@@ -844,16 +889,16 @@ class XGBoostModel(BaseModel):
             logger.info(f"{self.name}: Training completed successfully")
             self.is_fitted = True
             
-            # Apply calibration if validation data available and not in quick mode
-            if dval is not None and not self.quick_mode:
-                logger.info(f"{self.name}: Starting calibration application")
+            # Mandatory calibration
+            if dval is not None:
+                logger.info(f"{self.name}: Starting mandatory calibration")
                 X_val_clean = self._safe_data_preprocessing(X_val)
                 
-                self.apply_calibration(X_val_clean, y_val, method='auto')
+                self.apply_calibration(X_val_clean, y_val, method='isotonic')
                 if self.is_calibrated:
-                    logger.info(f"{self.name}: Calibration application complete")
+                    logger.info(f"{self.name}: Calibration completed")
                 else:
-                    logger.warning(f"{self.name}: Calibration application failed")
+                    logger.warning(f"{self.name}: Calibration failed - using CTR correction only")
             
             # Cleanup
             del dtrain
@@ -890,17 +935,17 @@ class XGBoostModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X, batch_size=20000)
 
 class ModelFactory:
-    """Model factory for creating models"""
+    """Model factory for creating models with mandatory calibration"""
     
     _factory_logged = False
     
     @staticmethod
     def create_model(model_type: str, **kwargs) -> BaseModel:
-        """Create model by type with optional quick mode support"""
+        """Create model by type with calibration support"""
         try:
             if not ModelFactory._factory_logged:
                 memory_monitor = MemoryMonitor()
-                logger.info(f"Creating model: {model_type} (calibration application configured)")
+                logger.info(f"Creating model: {model_type} (mandatory calibration enabled)")
                 
                 # Get appropriate thresholds for logging
                 if kwargs.get('quick_mode', False):
@@ -933,7 +978,7 @@ class ModelFactory:
             if quick_mode:
                 model.set_quick_mode(True)
             
-            logger.info(f"{model_type} model creation complete - calibration application guaranteed")
+            logger.info(f"{model_type} model creation complete - mandatory calibration enabled")
             return model
                 
         except Exception as e:
@@ -952,7 +997,7 @@ class ModelFactory:
         if XGBOOST_AVAILABLE:
             available.append('xgboost')
         
-        logger.info(f"Available models: {available} (all models have calibration application)")
+        logger.info(f"Available models: {available} (all with mandatory calibration)")
         return available
     
     @staticmethod

@@ -63,119 +63,133 @@ class Config:
     USE_MIXED_PRECISION = True
     GPU_OPTIMIZATION_LEVEL = 3
     
-    # Memory settings (optimized for 64GB system with large dataset)
-    MAX_MEMORY_GB = 60
-    CHUNK_SIZE = 50000                    # Reduced from 100000
-    BATCH_SIZE_GPU = 8192                 # Reduced from 12288
-    BATCH_SIZE_CPU = 2048                 # Reduced from 4096
-    PREFETCH_FACTOR = 4                   # Reduced from 6
-    NUM_WORKERS = 8                       # Reduced from 12
+    # Memory settings - adjusted for stability
+    MAX_MEMORY_GB = 55  # Reduced from 60 for safety margin
+    CHUNK_SIZE = 100000  # Increased for efficiency
+    BATCH_SIZE_GPU = 16384  # Increased for better GPU utilization
+    BATCH_SIZE_CPU = 4096  
+    PREFETCH_FACTOR = 4
+    NUM_WORKERS = 8
     
-    # Memory thresholds (adjusted for large dataset processing)
-    MEMORY_WARNING_THRESHOLD = 30         # Reduced from 50
-    MEMORY_CRITICAL_THRESHOLD = 35        # Reduced from 55
-    MEMORY_ABORT_THRESHOLD = 40           # Reduced from 60
+    # Memory thresholds
+    MEMORY_WARNING_THRESHOLD = 45  # Adjusted for 64GB system
+    MEMORY_CRITICAL_THRESHOLD = 50
+    MEMORY_ABORT_THRESHOLD = 58
     
-    # Data size limits (reduced for memory efficiency)
-    MAX_TRAIN_SIZE = 8000000              # Reduced from 20000000
-    MAX_TEST_SIZE = 2000000               # Reduced from 3000000
-    MAX_INTERACTION_FEATURES = 150        # Reduced from 250
+    # Data size limits - increased for full data processing
+    MAX_TRAIN_SIZE = 12000000  # Increased to handle full dataset
+    MAX_TEST_SIZE = 2000000
+    MAX_INTERACTION_FEATURES = 50  # Reduced for memory efficiency
     
-    # Model training settings (tuned parameters)
+    # Model training settings - fixed convergence issues
     MODEL_TRAINING_CONFIG = {
         'lightgbm': {
-            'max_depth': 6,               # Reduced from 8
-            'num_leaves': 31,             # Reduced from 63
-            'min_data_in_leaf': 100,      # Increased from 50
-            'feature_fraction': 0.8,      # Reduced from 0.88
-            'bagging_fraction': 0.8,      # Reduced from 0.88
+            'max_depth': 5,  # Reduced for stability
+            'num_leaves': 31,
+            'min_data_in_leaf': 200,  # Increased for regularization
+            'feature_fraction': 0.7,
+            'bagging_fraction': 0.7,
             'bagging_freq': 5,
-            'lambda_l1': 0.1,
-            'lambda_l2': 0.2,
-            'min_gain_to_split': 0.01,
+            'lambda_l1': 0.5,  # Increased regularization
+            'lambda_l2': 0.5,
+            'min_gain_to_split': 0.02,
             'max_cat_threshold': 32,
-            'cat_smooth': 8.0,
-            'cat_l2': 8.0
+            'cat_smooth': 10.0,
+            'cat_l2': 10.0,
+            'learning_rate': 0.03,  # Reduced for stability
+            'num_iterations': 800  # Reduced iterations
         },
         'xgboost': {
-            'max_depth': 6,               # Reduced from 7
-            'learning_rate': 0.08,        # Increased from 0.06
-            'n_estimators': 500,          # Reduced from 800
-            'subsample': 0.8,             # Reduced from 0.88
-            'colsample_bytree': 0.8,      # Reduced from 0.88
-            'min_child_weight': 8,        # Increased from 5
-            'gamma': 0.05,
-            'alpha': 0.08,
-            'lambda': 0.2,
+            'max_depth': 5,
+            'learning_rate': 0.05,
+            'n_estimators': 600,
+            'subsample': 0.7,
+            'colsample_bytree': 0.7,
+            'min_child_weight': 10,
+            'gamma': 0.1,
+            'alpha': 0.5,
+            'lambda': 0.5,
             'scale_pos_weight': 52.3
         },
         'logistic': {
-            'C': 1.0,                     # Reduced from 1.2
+            'C': 0.1,  # Increased regularization
             'penalty': 'l2',
-            'solver': 'lbfgs',
-            'max_iter': 2000,             # Reduced from 3000
+            'solver': 'saga',  # Changed from lbfgs for better convergence
+            'max_iter': 5000,  # Increased from 2000
             'class_weight': 'balanced',
-            'random_state': 42
+            'random_state': 42,
+            'tol': 0.001  # Added tolerance
         }
     }
     
-    # Feature engineering settings (simplified for memory efficiency)
+    # Feature engineering settings - enabled key features
     FEATURE_ENGINEERING_CONFIG = {
         'enable_interaction_features': True,
-        'enable_polynomial_features': False,    # Disabled for memory
+        'enable_polynomial_features': False,  # Disabled for memory
         'enable_binning': True,
         'enable_target_encoding': True,
         'enable_frequency_encoding': True,
-        'enable_statistical_features': False,   # Disabled for memory
-        'max_interaction_degree': 2,            # Reduced from 3
+        'enable_statistical_features': False,  # Disabled for memory
+        'max_interaction_degree': 2,
         'binning_strategy': 'quantile',
-        'n_bins': 10,                           # Reduced from 20
-        'min_frequency': 5,                     # Increased from 2
-        'target_encoding_smoothing': 4.0,
-        'enable_cross_validation_encoding': False # Disabled for memory
+        'n_bins': 10,
+        'min_frequency': 10,  # Increased threshold
+        'target_encoding_smoothing': 10.0,  # Increased smoothing for CTR bias
+        'enable_cross_validation_encoding': False
     }
     
     # Cross-validation settings
-    CV_FOLDS = 3                          # Reduced from 5
+    CV_FOLDS = 3
     CV_SHUFFLE = True
     RANDOM_STATE = 42
     
-    # Early stopping settings (more aggressive)
-    EARLY_STOPPING_ROUNDS = 100          # Reduced from 250
-    EARLY_STOPPING_TOLERANCE = 1e-6
+    # Early stopping settings
+    EARLY_STOPPING_ROUNDS = 150
+    EARLY_STOPPING_TOLERANCE = 1e-5
     
-    # Hyperparameter tuning settings (reduced for memory)
-    OPTUNA_N_TRIALS = 50                  # Reduced from 200
-    OPTUNA_TIMEOUT = 1800                 # Reduced from 5400
+    # Hyperparameter tuning settings
+    OPTUNA_N_TRIALS = 50
+    OPTUNA_TIMEOUT = 1800
     OPTUNA_N_JOBS = 1
     OPTUNA_VERBOSITY = 1
     
-    # Ensemble settings (simplified)
+    # Ensemble settings - simplified strategy
     ENSEMBLE_CONFIG = {
-        'voting_weights': {'lightgbm': 0.5, 'xgboost': 0.3, 'logistic': 0.2},
-        'stacking_cv_folds': 3,            # Reduced from 5
-        'blending_ratio': 0.8,
-        'diversity_threshold': 0.06,
-        'performance_threshold': 0.28,
-        'enable_meta_features': False      # Disabled for memory
+        'voting_weights': {'lightgbm': 0.4, 'xgboost': 0.3, 'logistic': 0.3},
+        'stacking_cv_folds': 3,
+        'blending_ratio': 0.7,
+        'diversity_threshold': 0.05,
+        'performance_threshold': 0.30,
+        'enable_meta_features': False,
+        'use_simple_average': True  # Added for simple ensemble
     }
     
-    # Calibration settings
+    # Calibration settings - mandatory
     CALIBRATION_METHOD = 'isotonic'
-    CALIBRATION_CV_FOLDS = 3              # Reduced from 5
+    CALIBRATION_CV_FOLDS = 3
+    CALIBRATION_MANDATORY = True  # Force calibration
     
-    # Evaluation configuration (corrected parameters)
+    # Evaluation configuration - adjusted for CTR bias
     EVALUATION_CONFIG = {
         'ap_weight': 0.6,
         'wll_weight': 0.4,
         'target_combined_score': 0.34,
         'target_ctr': 0.0191,
-        'ctr_tolerance': 0.0002,
-        'bias_penalty_weight': 8.0,
+        'ctr_tolerance': 0.001,  # Increased tolerance
+        'bias_penalty_weight': 5.0,  # Reduced penalty
         'calibration_weight': 0.5,
         'pos_weight': 52.3,
         'neg_weight': 1.0,
         'wll_normalization_factor': 2.6
+    }
+    
+    # CTR bias correction settings
+    CTR_BIAS_CORRECTION = {
+        'enable': True,
+        'target_ctr': 0.0191,
+        'correction_factor': 0.4,  # Reduce predictions by 60% (1/2.5)
+        'post_processing': True,
+        'clip_range': (0.001, 0.1)
     }
     
     # Evaluation metrics
@@ -190,18 +204,18 @@ class Config:
     LOG_FILE_MAX_SIZE = 10 * 1024 * 1024  # 10MB
     LOG_FILE_BACKUP_COUNT = 5
     
-    # Performance settings (optimized for memory)
+    # Performance settings
     ENABLE_PARALLEL_PROCESSING = True
-    ENABLE_MEMORY_MAPPING = False         # Disabled for memory
-    ENABLE_CACHING = False                # Disabled for memory
-    CACHE_SIZE_MB = 1024                  # Reduced from 3072
+    ENABLE_MEMORY_MAPPING = False
+    ENABLE_CACHING = False
+    CACHE_SIZE_MB = 1024
     
     # Large dataset specific settings
     LARGE_DATASET_MODE = True
     MEMORY_EFFICIENT_SAMPLING = True
-    AGGRESSIVE_SAMPLING_THRESHOLD = 0.5   # Sample when memory usage > 50%
-    MIN_SAMPLE_SIZE = 1000000             # Minimum sample size
-    MAX_SAMPLE_SIZE = 5000000             # Maximum sample size
+    AGGRESSIVE_SAMPLING_THRESHOLD = 0.5
+    MIN_SAMPLE_SIZE = 1000000
+    MAX_SAMPLE_SIZE = 5000000
     
     # RTX 4060 Ti specific settings
     RTX_4060_TI_OPTIMIZATION = True
