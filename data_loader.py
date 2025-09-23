@@ -58,6 +58,34 @@ class MemoryMonitor:
             return psutil.virtual_memory().available / (1024**3)
         return 64.0  # Assume 64GB if can't detect
     
+    def get_memory_status(self) -> Dict[str, Any]:
+        """Get detailed memory status information"""
+        if not PSUTIL_AVAILABLE:
+            return {
+                'available_gb': 64.0,
+                'used_gb': 16.0,
+                'total_gb': 80.0,
+                'percent': 20.0,
+                'should_cleanup': False,
+                'should_abort': False,
+                'level': 'unknown'
+            }
+        
+        vm = psutil.virtual_memory()
+        available_gb = vm.available / (1024**3)
+        used_gb = vm.used / (1024**3)
+        total_gb = vm.total / (1024**3)
+        
+        return {
+            'available_gb': available_gb,
+            'used_gb': used_gb,
+            'total_gb': total_gb,
+            'percent': vm.percent,
+            'should_cleanup': available_gb < self.memory_thresholds['warning'],
+            'should_abort': available_gb < self.memory_thresholds['abort'],
+            'level': self._get_memory_level(available_gb)
+        }
+    
     def check_memory_pressure(self) -> Dict[str, Any]:
         """
         Check current memory pressure and recommend actions

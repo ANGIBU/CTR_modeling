@@ -139,9 +139,9 @@ class CTRFeatureEngineer:
             # 3. Safe data type fixes with categorical handling
             X_train, X_test = self._fix_basic_data_types_safe(X_train, X_test)
             
-            # 4. Fill missing values with simple strategy
-            X_train = X_train.fillna(0)
-            X_test = X_test.fillna(0)
+            # 4. Fill missing values with safe categorical handling
+            X_train = self._safe_fillna(X_train)
+            X_test = self._safe_fillna(X_test)
             
             # 5. Safe categorical encoding
             X_train, X_test = self._encode_categorical_safe(X_train, X_test)
@@ -198,7 +198,7 @@ class CTRFeatureEngineer:
             
             # Memory check for full processing
             memory_status = self.memory_monitor.get_memory_status()
-            if not memory_status['should_simplify'] and memory_status['available_gb'] > 8:
+            if not memory_status['should_cleanup'] and memory_status['available_gb'] > 8:
                 logger.info("Full feature engineering enabled - sufficient memory available")
                 
                 # 5. Target encoding features
@@ -382,6 +382,38 @@ class CTRFeatureEngineer:
             self.numerical_features = []
             self.categorical_features = []
     
+    def _safe_fillna(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Safe fillna that handles categorical columns properly"""
+        try:
+            df_filled = df.copy()
+            
+            for col in df_filled.columns:
+                if df_filled[col].dtype.name == 'category':
+                    # For categorical columns, fill with the most frequent category or add 'missing' category
+                    if df_filled[col].isnull().any():
+                        # Add 'missing' to categories if not already present
+                        if 'missing' not in df_filled[col].cat.categories:
+                            df_filled[col] = df_filled[col].cat.add_categories(['missing'])
+                        df_filled[col] = df_filled[col].fillna('missing')
+                elif df_filled[col].dtype in ['int64', 'float64', 'int32', 'float32']:
+                    # For numeric columns, fill with 0
+                    df_filled[col] = df_filled[col].fillna(0)
+                else:
+                    # For object columns, fill with 'missing'
+                    df_filled[col] = df_filled[col].fillna('missing')
+            
+            return df_filled
+            
+        except Exception as e:
+            logger.warning(f"Safe fillna failed: {e}")
+            # Fallback: convert all categorical to object first
+            df_converted = df.copy()
+            for col in df_converted.columns:
+                if df_converted[col].dtype.name == 'category':
+                    df_converted[col] = df_converted[col].astype('object')
+            
+            return df_converted.fillna(0)
+    
     def _unify_data_types_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Safe data type unification"""
         try:
@@ -437,21 +469,21 @@ class CTRFeatureEngineer:
     def _clean_basic_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Clean basic features"""
         try:
-            # Fill missing values
-            for col in X_train.columns:
-                if col in X_test.columns:
-                    if X_train[col].dtype in ['int64', 'float64', 'int32', 'float32']:
-                        X_train[col] = X_train[col].fillna(X_train[col].median())
-                        X_test[col] = X_test[col].fillna(X_train[col].median())
-                    else:
-                        mode_value = X_train[col].mode()[0] if len(X_train[col].mode()) > 0 else 'unknown'
-                        X_train[col] = X_train[col].fillna(mode_value)
-                        X_test[col] = X_test[col].fillna(mode_value)
+            # Fill missing values with safe handling
+            X_train = self._safe_fillna(X_train)
+            X_test = self._safe_fillna(X_test)
             
             return X_train, X_test
             
         except Exception as e:
             logger.error(f"Basic feature cleaning failed: {e}")
+            # Convert categorical to object and then fill
+            for col in X_train.columns:
+                if X_train[col].dtype.name == 'category':
+                    X_train[col] = X_train[col].astype('object')
+                if col in X_test.columns and X_test[col].dtype.name == 'category':
+                    X_test[col] = X_test[col].astype('object')
+            
             X_train = X_train.fillna(0)
             X_test = X_test.fillna(0)
             
@@ -923,8 +955,8 @@ class CTRFeatureEngineer:
             X_test = X_test.replace([np.inf, -np.inf], 0)
             
             # Fill any remaining missing values
-            X_train = X_train.fillna(0)
-            X_test = X_test.fillna(0)
+            X_train = self._safe_fillna(X_train)
+            X_test = self._safe_fillna(X_test)
             
             # Remove constant features
             constant_features = []
@@ -956,8 +988,11 @@ class CTRFeatureEngineer:
         """Clean final features for quick mode"""
         try:
             # Basic cleanup
-            X_train = X_train.replace([np.inf, -np.inf], 0).fillna(0)
-            X_test = X_test.replace([np.inf, -np.inf], 0).fillna(0)
+            X_train = X_train.replace([np.inf, -np.inf], 0)
+            X_test = X_test.replace([np.inf, -np.inf], 0)
+            
+            X_train = self._safe_fillna(X_train)
+            X_test = self._safe_fillna(X_test)
             
             return X_train, X_test
             
@@ -1023,9 +1058,9 @@ class CTRFeatureEngineer:
             X_train = X_train[common_cols]
             X_test = X_test[common_cols]
             
-            # Basic preprocessing
-            X_train = X_train.fillna(0)
-            X_test = X_test.fillna(0)
+            # Basic preprocessing with safe categorical handling
+            X_train = self._safe_fillna(X_train)
+            X_test = self._safe_fillna(X_test)
             
             # Convert to numeric
             for col in X_train.columns:
