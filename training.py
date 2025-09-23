@@ -91,87 +91,52 @@ class LargeDataMemoryTracker:
                 'percent_used': 50.0
             }
     
-    def get_memory_usage(self) -> Dict[str, Any]:
-        """Get current memory usage with GPU info"""
-        memory_info = self._get_memory_usage()
-        
-        if self.gpu_available:
-            try:
-                gpu_memory = torch.cuda.memory_allocated() / (1024**3)
-                gpu_cached = torch.cuda.memory_reserved() / (1024**3)
-                gpu_free = self.gpu_memory_gb - gpu_cached
-                
-                memory_info.update({
-                    'gpu_used_gb': gpu_memory,
-                    'gpu_cached_gb': gpu_cached,
-                    'gpu_free_gb': gpu_free,
-                    'gpu_total_gb': self.gpu_memory_gb,
-                    'rtx_4060_ti_optimized': "RTX 4060 Ti" in torch.cuda.get_device_name(0)
-                })
-            except Exception:
-                memory_info.update({
-                    'gpu_used_gb': 0,
-                    'gpu_cached_gb': 0,
-                    'gpu_free_gb': self.gpu_memory_gb,
-                    'gpu_total_gb': self.gpu_memory_gb,
-                    'rtx_4060_ti_optimized': False
-                })
-        
-        return memory_info
-    
-    def get_available_memory(self) -> float:
-        """Get available memory in GB"""
-        memory_info = self._get_memory_usage()
-        return memory_info['available_gb']
-    
-    def get_gpu_memory_usage(self) -> Dict[str, Any]:
-        """Get GPU memory usage"""
-        if not self.gpu_available:
-            return {'gpu_available': False}
-        
-        try:
-            return {
-                'gpu_available': True,
-                'gpu_name': torch.cuda.get_device_name(0),
-                'gpu_memory_gb': self.gpu_memory_gb,
-                'gpu_used_gb': torch.cuda.memory_allocated() / (1024**3),
-                'gpu_free_gb': (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()) / (1024**3),
-                'rtx_4060_ti_optimized': "RTX 4060 Ti" in torch.cuda.get_device_name(0)
-            }
-        except Exception:
-            return {'gpu_available': False}
+    def get_memory_usage(self) -> Dict[str, float]:
+        """Get current memory usage"""
+        return self._get_memory_usage()
     
     def optimize_gpu_memory(self):
-        """GPU memory optimization for RTX 4060 Ti"""
-        if not self.gpu_available:
-            return
-        
+        """GPU memory optimization"""
         try:
-            torch.cuda.empty_cache()
-            
-            # RTX 4060 Ti specific optimization
-            if "RTX 4060 Ti" in torch.cuda.get_device_name(0):
-                # Set memory fraction for RTX 4060 Ti 16GB
-                torch.cuda.set_per_process_memory_fraction(0.9)
-        except Exception as e:
-            logger.warning(f"GPU memory optimization failed: {e}")
-
-class HyperparameterOptimizer:
-    """Hyperparameter optimization with RTX 4060 Ti GPU support"""
+            if TORCH_AVAILABLE and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                logger.info("GPU memory cache cleared")
+        except Exception:
+            pass
     
-    def __init__(self, config: Config = Config):
+    def get_gpu_memory_usage(self) -> Dict[str, Any]:
+        """Get GPU memory usage information"""
+        try:
+            if TORCH_AVAILABLE and torch.cuda.is_available():
+                return {
+                    'gpu_available': True,
+                    'gpu_memory_gb': self.gpu_memory_gb,
+                    'rtx_4060_ti_optimized': 'RTX 4060 Ti' in torch.cuda.get_device_name(0)
+                }
+            else:
+                return {
+                    'gpu_available': False,
+                    'gpu_memory_gb': 0,
+                    'rtx_4060_ti_optimized': False
+                }
+        except Exception:
+            return {
+                'gpu_available': False,
+                'gpu_memory_gb': 0,
+                'rtx_4060_ti_optimized': False
+            }
+
+class CTRHyperparameterOptimizer:
+    """Hyperparameter optimization for CTR models"""
+    
+    def __init__(self, config: Config):
         self.config = config
-        self.memory_tracker = LargeDataMemoryTracker()
-        self.optimization_history = {}
-        self.gpu_available = False
         self.quick_mode = False
+        self.memory_tracker = LargeDataMemoryTracker()
+        self.gpu_available = self.memory_tracker.gpu_available
         
-        if TORCH_AVAILABLE and torch.cuda.is_available():
-            gpu_info = self.memory_tracker.get_gpu_memory_usage()
-            self.gpu_available = gpu_info['gpu_available']
-            
     def set_quick_mode(self, enabled: bool):
-        """Enable or disable quick mode"""
+        """Set quick mode for parameter optimization"""
         self.quick_mode = enabled
         
     def optimize_hyperparameters(self, 
@@ -182,92 +147,75 @@ class HyperparameterOptimizer:
                                 X_val: pd.DataFrame,
                                 y_val: pd.Series,
                                 n_trials: int = None) -> Dict[str, Any]:
-        """Optimize hyperparameters using Optuna"""
+        """Optimize hyperparameters for a model"""
         
         if not OPTUNA_AVAILABLE:
             logger.warning("Optuna not available, using default parameters")
             return self._get_default_params(model_name)
         
-        if n_trials is None:
-            n_trials = 10 if self.quick_mode else 50
-            
-        logger.info(f"Starting hyperparameter optimization for {model_name} with {n_trials} trials")
+        if self.quick_mode:
+            return self._get_default_params(model_name)
         
         try:
-            study = optuna.create_study(direction='maximize')
+            n_trials = n_trials or (5 if self.quick_mode else 20)
             
             def objective(trial):
-                return self._optimize_objective(
-                    trial, model_class, model_name, X_train, y_train, X_val, y_val
-                )
+                params = self._suggest_hyperparameters(trial, model_name)
+                
+                try:
+                    model = model_class(name=model_name, params=params)
+                    model.set_quick_mode(self.quick_mode)
+                    
+                    model.fit(X_train, y_train, X_val, y_val)
+                    
+                    y_pred = model.predict_proba(X_val)
+                    auc_score = roc_auc_score(y_val, y_pred)
+                    
+                    return auc_score
+                    
+                except Exception as e:
+                    logger.warning(f"Hyperparameter trial failed: {e}")
+                    return 0.5
             
-            study.optimize(objective, n_trials=n_trials, timeout=300 if self.quick_mode else 1800)
+            study = optuna.create_study(direction='maximize')
+            study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
             
             best_params = study.best_params
-            best_score = study.best_value
-            
-            self.optimization_history[model_name] = {
-                'best_params': best_params,
-                'best_value': best_score,
-                'n_trials': len(study.trials)
-            }
-            
-            logger.info(f"Hyperparameter optimization completed for {model_name}")
-            logger.info(f"Best score: {best_score:.4f}")
+            logger.info(f"Best hyperparameters for {model_name}: AUC = {study.best_value:.4f}")
             
             return best_params
             
         except Exception as e:
-            logger.error(f"Hyperparameter optimization failed for {model_name}: {e}")
+            logger.warning(f"Hyperparameter optimization failed: {e}")
             return self._get_default_params(model_name)
     
-    def _optimize_objective(self, trial, model_class, model_name, X_train, y_train, X_val, y_val):
-        """Optimization objective function"""
-        try:
-            # Suggest hyperparameters based on model type
-            params = self._suggest_params(trial, model_name)
-            
-            # Create and train model
-            model = model_class(model_name, **params)
-            model.fit(X_train, y_train)
-            
-            # Predict and evaluate
-            y_pred = model.predict_proba(X_val)[:, 1] if hasattr(model, 'predict_proba') else model.predict(X_val)
-            
-            # Use AUC as optimization metric
-            score = roc_auc_score(y_val, y_pred)
-            
-            return score
-            
-        except Exception as e:
-            logger.warning(f"Optimization trial failed: {e}")
-            return 0.5
-    
-    def _suggest_params(self, trial, model_name: str) -> Dict[str, Any]:
+    def _suggest_hyperparameters(self, trial, model_type: str) -> Dict[str, Any]:
         """Suggest hyperparameters for optimization"""
-        if model_name.lower() == 'lightgbm':
+        
+        if model_type.lower() == 'lightgbm':
             return {
                 'num_leaves': trial.suggest_int('num_leaves', 10, 100),
                 'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
-                'feature_fraction': trial.suggest_float('feature_fraction', 0.4, 1.0),
-                'bagging_fraction': trial.suggest_float('bagging_fraction', 0.4, 1.0),
-                'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
-                'reg_alpha': trial.suggest_float('reg_alpha', 0, 10),
-                'reg_lambda': trial.suggest_float('reg_lambda', 0, 10),
+                'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 1.0),
+                'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 1.0),
+                'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 10, 200),
+                'lambda_l1': trial.suggest_float('lambda_l1', 0, 1.0),
+                'lambda_l2': trial.suggest_float('lambda_l2', 0, 1.0)
             }
-        elif model_name.lower() == 'xgboost':
+        
+        elif model_type.lower() == 'xgboost':
             return {
                 'max_depth': trial.suggest_int('max_depth', 3, 10),
                 'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
-                'n_estimators': trial.suggest_int('n_estimators', 50, 500),
                 'subsample': trial.suggest_float('subsample', 0.6, 1.0),
                 'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-                'reg_alpha': trial.suggest_float('reg_alpha', 0, 10),
-                'reg_lambda': trial.suggest_float('reg_lambda', 1, 10),
+                'reg_alpha': trial.suggest_float('reg_alpha', 0, 1.0),
+                'reg_lambda': trial.suggest_float('reg_lambda', 0, 1.0)
             }
-        elif model_name.lower() == 'logistic':
+        
+        elif model_type.lower() == 'logistic':
             return {
-                'C': trial.suggest_float('C', 0.001, 100, log=True),
+                'C': trial.suggest_float('C', 0.01, 10.0),
                 'penalty': trial.suggest_categorical('penalty', ['l1', 'l2', 'elasticnet']),
                 'solver': trial.suggest_categorical('solver', ['liblinear', 'saga']),
             }
@@ -342,66 +290,29 @@ class HyperparameterOptimizer:
                 'C': 1.0,
                 'solver': 'liblinear',
                 'max_iter': 1000,
-                'random_state': 42
+                'random_state': 42,
+                'class_weight': 'balanced',
+                'n_jobs': -1
             }
         
         return {}
-    
-    def get_optimization_summary(self) -> Dict[str, Any]:
-        """Get optimization summary"""
-        return {
-            'optimized_models': list(self.optimization_history.keys()),
-            'optimization_results': {
-                model: {
-                    'best_score': info['best_value'],
-                    'n_trials': info['n_trials'],
-                    'best_params': info['best_params']
-                }
-                for model, info in self.optimization_history.items()
-            },
-            'gpu_available': self.gpu_available,
-            'gpu_info': self.memory_tracker.get_gpu_memory_usage(),
-            'quick_mode': self.quick_mode
-        }
 
 class CTRModelTrainer:
-    """CTR model trainer with GPU optimization and parallel processing"""
+    """Main trainer class for CTR models"""
     
-    def __init__(self, config: Config = Config):
+    def __init__(self, config: Config):
         self.config = config
         self.memory_tracker = LargeDataMemoryTracker()
-        self.hyperparameter_optimizer = HyperparameterOptimizer(config)
+        self.hyperparameter_optimizer = CTRHyperparameterOptimizer(config)
+        self.gpu_available = self.memory_tracker.gpu_available
+        self.quick_mode = False
+        self.trainer_initialized = False
         self.trained_models = {}
         self.best_params = {}
-        self.cv_results = {}
         self.model_performance = {}
-        self.gpu_available = False
-        self.parallel_training = False
-        self.trainer_initialized = False
-        self.quick_mode = False
         
-        try:
-            if TORCH_AVAILABLE and torch.cuda.is_available():
-                device_name = torch.cuda.get_device_name(0)
-                gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                
-                logger.info(f"GPU training environment: {device_name}")
-                logger.info(f"GPU memory: {gpu_memory:.1f}GB")
-                
-                if "RTX 4060 Ti" in device_name and gpu_memory >= 15.0:
-                    self.gpu_available = True
-                    self.parallel_training = True
-                    logger.info("RTX 4060 Ti GPU training enabled")
-                else:
-                    logger.info("GPU detected but not RTX 4060 Ti, using CPU training")
-            else:
-                logger.info("No GPU available, using CPU training")
-                
-        except Exception as e:
-            logger.warning(f"GPU detection failed: {e}")
-    
     def set_quick_mode(self, enabled: bool):
-        """Enable or disable quick mode"""
+        """Set quick mode for training"""
         self.quick_mode = enabled
         self.hyperparameter_optimizer.set_quick_mode(enabled)
         
@@ -443,15 +354,19 @@ class CTRModelTrainer:
             
             self.best_params[model_name] = best_params
             
-            # Train final model
+            # Train final model - FIXED: Use name and params parameters
             logger.info(f"Training final {model_name} model")
-            model = model_class(model_name, **best_params)
+            model = model_class(name=model_name, params=best_params)
+            
+            # Set quick mode for the model
+            if self.quick_mode:
+                model.set_quick_mode(True)
             
             # Fit model
-            model.fit(X_train, y_train)
+            model.fit(X_train, y_train, X_val, y_val)
             
-            # Validate model
-            y_pred = model.predict_proba(X_val)[:, 1] if hasattr(model, 'predict_proba') else model.predict(X_val)
+            # Validate model - FIXED: predict_proba returns ndarray directly
+            y_pred = model.predict_proba(X_val)
             
             # Calculate performance metrics
             try:
@@ -531,63 +446,52 @@ class CTRModelTrainer:
     def get_training_summary(self) -> Dict[str, Any]:
         """Get comprehensive training summary"""
         calibrated_base_models = sum(
-            1 for info in self.trained_models.values()
-            if info.get('calibrated', False)
+            1 for model_data in self.trained_models.values() 
+            if model_data['model'].is_calibrated
         )
         
-        optimization_summary = self.hyperparameter_optimizer.get_optimization_summary()
+        avg_performance = {}
+        if self.model_performance:
+            metrics = ['auc', 'average_precision', 'logloss']
+            for metric in metrics:
+                values = [
+                    perf.get(metric, 0) for perf in self.model_performance.values() 
+                    if isinstance(perf, dict) and metric in perf
+                ]
+                avg_performance[f'avg_{metric}'] = np.mean(values) if values else 0.0
         
         return {
-            'trained_models': list(self.trained_models.keys()),
-            'total_models': len(self.trained_models),
-            'best_params': self.best_params,
-            'cv_results': self.cv_results,
-            'model_performance': self.model_performance,
+            'total_models_trained': len(self.trained_models),
             'calibrated_models': calibrated_base_models,
-            'hyperparameter_optimization': optimization_summary,
-            'memory_tracker': {
-                'current_usage': self.memory_tracker.get_memory_usage(),
-                'available_memory': self.memory_tracker.get_available_memory(),
-                'gpu_memory': self.memory_tracker.get_gpu_memory_usage()
-            },
-            'training_environment': {
-                'gpu_available': self.gpu_available,
-                'parallel_training': self.parallel_training,
-                'rtx_4060_ti_optimized': self.memory_tracker.get_gpu_memory_usage().get('rtx_4060_ti_optimized', False),
-                'quick_mode': self.quick_mode
-            }
+            'calibration_rate': calibrated_base_models / max(len(self.trained_models), 1),
+            'model_performance': self.model_performance,
+            'average_performance': avg_performance,
+            'quick_mode': self.quick_mode,
+            'gpu_used': self.gpu_available,
+            'training_completed': True
         }
 
 class CTRTrainingPipeline:
-    """CTR training pipeline with comprehensive optimization"""
+    """Complete CTR training pipeline"""
     
-    def __init__(self, config: Config = Config):
+    def __init__(self, config: Config):
         self.config = config
-        self.trainer = CTRModelTrainer(config)
         self.memory_tracker = LargeDataMemoryTracker()
-        self.pipeline_initialized = False
+        self.trainer = CTRModelTrainer(config)
         self.quick_mode = False
         
-        if not self.pipeline_initialized:
-            self.memory_tracker.optimize_gpu_memory()
-            
-            logger.info("GPU memory optimization completed: RTX 4060 Ti 16GB 90% utilization")
-            logger.info("Large data memory optimization completed")
-            logger.info("Hyperparameter tuning optimization: Optuna + GPU acceleration")
-            self.pipeline_initialized = True
-    
     def set_quick_mode(self, enabled: bool):
-        """Enable or disable quick mode for the entire training pipeline"""
+        """Set quick mode for the entire pipeline"""
         self.quick_mode = enabled
         self.trainer.set_quick_mode(enabled)
-    
-    def execute_pipeline(self,
-                        model_configs: List[Dict[str, Any]],
-                        X_train: pd.DataFrame,
-                        y_train: pd.Series,
-                        X_val: pd.DataFrame,
-                        y_val: pd.Series) -> Dict[str, Any]:
-        """Execute the complete training pipeline"""
+        
+    def run_training_pipeline(self,
+                            model_configs: List[Dict[str, Any]],
+                            X_train: pd.DataFrame,
+                            y_train: pd.Series,
+                            X_val: pd.DataFrame,
+                            y_val: pd.Series) -> Dict[str, Any]:
+        """Run complete training pipeline"""
         
         logger.info("=== CTR Training Pipeline Started ===")
         
