@@ -1,4 +1,5 @@
 # main.py
+# score : 0.3193693153
 
 import os
 import sys
