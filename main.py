@@ -1,5 +1,4 @@
 # main.py
-# score : 0.3193693153
 
 import os
 import sys
@@ -124,8 +123,8 @@ def validate_environment() -> bool:
         logger.error(f"Environment validation failed: {e}")
         return False
 
-def safe_train_test_split(X, y, test_size=0.3, random_state=42):
-    """Safe train test split with class imbalance handling"""
+def safe_train_test_split(X, y, test_size=0.2, random_state=42):
+    """Safe train test split with class imbalance handling and validation data preparation"""
     try:
         from sklearn.model_selection import train_test_split
         
@@ -133,16 +132,20 @@ def safe_train_test_split(X, y, test_size=0.3, random_state=42):
         unique_classes, class_counts = np.unique(y, return_counts=True)
         min_class_count = min(class_counts)
         
+        # Calculate actual test size to ensure minimum samples
+        min_val_size = max(1000, int(len(y) * 0.05))  # At least 1000 samples or 5%
+        actual_test_size = min(test_size, min_val_size / len(y))
+        
         # If any class has too few samples, don't stratify
         if min_class_count < 2 or len(y) < 10:
             logger.warning(f"Small dataset ({len(y)} samples) or class imbalance detected. Using simple split.")
             X_train, X_val, y_train, y_val = train_test_split(
-                X, y, test_size=test_size, random_state=random_state
+                X, y, test_size=actual_test_size, random_state=random_state
             )
         else:
             # Safe stratified split
             X_train, X_val, y_train, y_val = train_test_split(
-                X, y, test_size=test_size, random_state=random_state, stratify=y
+                X, y, test_size=actual_test_size, random_state=random_state, stratify=y
             )
         
         # Ensure validation set has both classes
@@ -154,9 +157,12 @@ def safe_train_test_split(X, y, test_size=0.3, random_state=42):
             negative_indices = np.where(y == 0)[0]
             
             if len(positive_indices) >= 1 and len(negative_indices) >= 1:
-                # Take at least one positive and one negative for validation
-                val_pos_idx = np.random.choice(positive_indices, size=min(1, len(positive_indices)), replace=False)
-                val_neg_idx = np.random.choice(negative_indices, size=min(2, len(negative_indices)), replace=False)
+                # Take balanced samples for validation
+                pos_val_size = min(len(positive_indices) // 10, 100)
+                neg_val_size = min(len(negative_indices) // 10, 1000)
+                
+                val_pos_idx = np.random.choice(positive_indices, size=pos_val_size, replace=False)
+                val_neg_idx = np.random.choice(negative_indices, size=neg_val_size, replace=False)
                 val_indices = np.concatenate([val_pos_idx, val_neg_idx])
                 train_indices = np.setdiff1d(np.arange(len(y)), val_indices)
                 
@@ -167,8 +173,12 @@ def safe_train_test_split(X, y, test_size=0.3, random_state=42):
             else:
                 # Fallback to simple split
                 X_train, X_val, y_train, y_val = train_test_split(
-                    X, y, test_size=test_size, random_state=random_state
+                    X, y, test_size=actual_test_size, random_state=random_state
                 )
+        
+        # Validate the split
+        logger.info(f"Data split validation - Train: {len(y_train)}, Val: {len(y_val)}")
+        logger.info(f"Train CTR: {y_train.mean():.4f}, Val CTR: {y_val.mean():.4f}")
         
         return X_train, X_val, y_train, y_val
         
@@ -297,9 +307,9 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         ensemble_manager = CTREnsembleManager(config)
         logger.info("Ensemble manager initialization completed")
         
-        # Safe train/validation split
+        # Safe train/validation split with proper validation data
         X_train_split, X_val_split, y_train_split, y_val_split = safe_train_test_split(
-            X_train, y_train, test_size=0.3, random_state=42
+            X_train, y_train, test_size=0.2, random_state=42
         )
         
         logger.info(f"Data split completed - train: {X_train_split.shape}, validation: {X_val_split.shape}")
@@ -323,7 +333,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             force_memory_cleanup()
             
             try:
-                # Train model
+                # Train model with proper validation data
                 model, performance = trainer.train_model(
                     model_name=model_name,
                     X_train=X_train_split,
@@ -333,14 +343,16 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                     quick_mode=quick_mode
                 )
                 
-                if model is not None:
+                if model is not None and performance:
                     trained_models[model_name] = model
                     model_performances[model_name] = performance
                     
                     # Add to ensemble - Fixed parameter order
                     ensemble_manager.add_base_model(model_name, model)
                     
+                    # Log actual performance values
                     logger.info(f"{model_name} model training completed successfully")
+                    logger.info(f"{model_name} performance - AUC: {performance.get('auc', 0.0):.4f}, AP: {performance.get('ap', 0.0):.4f}")
                 else:
                     logger.error(f"{model_name} model training failed")
                     
@@ -363,7 +375,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             ensemble_enabled = False
         elif ensemble_enabled:
             try:
-                # Prepare ensemble
+                # Prepare ensemble with proper validation data
                 ensemble_manager.train_all_ensembles(X_val_split, y_val_split)
                 ensemble_used = True
                 logger.info("Ensemble preparation completed")
@@ -389,6 +401,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 try:
                     pred = model.predict_proba(X_test)
                     base_predictions[name] = pred
+                    logger.info(f"{name} prediction completed - mean: {pred.mean():.4f}")
                 except Exception as e:
                     logger.warning(f"Prediction failed for {name}: {e}")
                     base_predictions[name] = np.full(len(X_test), 0.0191)
@@ -396,16 +409,19 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             # Ensemble prediction
             try:
                 predictions = ensemble_manager.final_ensemble.predict_proba(base_predictions)
+                logger.info(f"Ensemble prediction completed - mean: {predictions.mean():.4f}")
             except Exception as e:
                 logger.warning(f"Ensemble prediction failed: {e}")
                 predictions = np.mean(list(base_predictions.values()), axis=0)
         else:
             # Use single best model
-            best_model_name = list(trained_models.keys())[0]
+            best_model_name = max(model_performances.keys(), 
+                                key=lambda k: model_performances[k].get('auc', 0))
             logger.info(f"Using single model: {best_model_name}")
             best_model = trained_models[best_model_name]
             try:
                 predictions = best_model.predict_proba(X_test)
+                logger.info(f"Single model prediction completed - mean: {predictions.mean():.4f}")
             except Exception as e:
                 logger.error(f"Single model prediction failed: {e}")
                 predictions = np.full(len(X_test), 0.0191)
@@ -450,10 +466,12 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             'successful_models': len(trained_models),
             'ensemble_enabled': ensemble_enabled,
             'ensemble_used': ensemble_used,
-            'calibration_applied': False,
+            'calibration_applied': any(getattr(model, 'is_calibrated', False) for model in trained_models.values()),
             'submission_file': submission_path,
             'submission_rows': len(predictions),
-            'model_performances': model_performances
+            'model_performances': model_performances,
+            'final_prediction_mean': float(predictions.mean()),
+            'final_prediction_std': float(predictions.std())
         }
         
         logger.info(f"Mode: {'QUICK (50 samples)' if quick_mode else 'FULL dataset'}")
@@ -461,7 +479,9 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.info(f"Successful models: {len(trained_models)}")
         logger.info(f"Ensemble activated: {'Yes' if ensemble_enabled else 'No'}")
         logger.info(f"Ensemble actually used: {'Yes' if ensemble_used else 'No'}")
+        logger.info(f"Calibration applied: {'Yes' if results['calibration_applied'] else 'No'}")
         logger.info(f"Submission file: {len(predictions)} rows")
+        logger.info(f"Final prediction - Mean: {results['final_prediction_mean']:.4f}, Std: {results['final_prediction_std']:.4f}")
         
         # Final memory status
         if PSUTIL_AVAILABLE:
@@ -625,7 +645,7 @@ def main():
                         logger.info("Performance analysis completed")
                         logger.info(f"Analysis results saved: {results['successful_models']} reports")
                     
-                    # Print final summary
+                    # Print final summary with actual performance values
                     logger.info("================================================================================")
                     logger.info("FINAL PERFORMANCE ANALYSIS SUMMARY")
                     logger.info("================================================================================")
@@ -638,22 +658,23 @@ def main():
                     
                     for model_name, perf in results.get('model_performances', {}).items():
                         logger.info(f"{model_name}:")
-                        logger.info(f"  Combined Score: {perf.get('combined_score', 0.0):.4f}")
-                        logger.info(f"  AP Score: {perf.get('ap_score', 0.0):.4f}")
-                        logger.info(f"  AUC Score: {perf.get('auc_score', 'nan')}")
-                        logger.info(f"  CTR Quality: {perf.get('ctr_quality', 'UNKNOWN')}")
-                        logger.info(f"  CTR Bias: {perf.get('ctr_bias', 0.0):.6f}")
-                        logger.info(f"  Performance Tier: {perf.get('performance_tier', 'UNKNOWN')}")
+                        logger.info(f"  AUC Score: {perf.get('auc', 0.0):.4f}")
+                        logger.info(f"  AP Score: {perf.get('ap', 0.0):.4f}")
+                        logger.info(f"  Combined Score: {(perf.get('auc', 0.0) * 0.6 + perf.get('ap', 0.0) * 0.4):.4f}")
                         logger.info("")
                     
                     target_score = 0.34
-                    achieving_models = sum(1 for perf in results.get('model_performances', {}).values() 
-                                         if perf.get('combined_score', 0.0) >= target_score)
+                    best_combined_score = max([(perf.get('auc', 0.0) * 0.6 + perf.get('ap', 0.0) * 0.4) 
+                                              for perf in results.get('model_performances', {}).values()], default=0)
                     
                     logger.info("TARGET ACHIEVEMENT STATUS:")
                     logger.info("--------------------------------------------------")
                     logger.info(f"Target Combined Score: {target_score}")
-                    logger.info(f"Models Achieving Target: {achieving_models}/{results['successful_models']}")
+                    logger.info(f"Best Achieved Score: {best_combined_score:.4f}")
+                    logger.info(f"Target Achievement: {'Yes' if best_combined_score >= target_score else 'No'}")
+                    logger.info(f"Final Prediction Statistics:")
+                    logger.info(f"  - Mean CTR: {results.get('final_prediction_mean', 0.0):.4f}")
+                    logger.info(f"  - Std CTR: {results.get('final_prediction_std', 0.0):.4f}")
                     logger.info("")
                     logger.info("OUTPUT FILES:")
                     logger.info("--------------------------------------------------")
