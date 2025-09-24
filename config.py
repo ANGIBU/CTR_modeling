@@ -31,10 +31,10 @@ class Config:
     TARGET_COLUMN_CANDIDATES = [
         'clicked',      # Most common CTR target column name
         'click',        # Abbreviated form
+        'is_click',     # Boolean form
         'target',       # General target name
         'label',        # Label
         'y',            # Mathematical expression
-        'is_click',     # Boolean form
         'ctr',          # Direct CTR expression
         'response',     # Response
         'conversion',   # Conversion
@@ -81,60 +81,64 @@ class Config:
     MAX_TEST_SIZE = 2000000
     MAX_INTERACTION_FEATURES = 50  # Reduced for memory efficiency
     
-    # Model training settings - fixed convergence issues
+    # Model training settings - tuned for CTR prediction accuracy
     MODEL_TRAINING_CONFIG = {
         'lightgbm': {
-            'max_depth': 5,  # Reduced for stability
-            'num_leaves': 31,
-            'min_data_in_leaf': 200,  # Increased for regularization
-            'feature_fraction': 0.7,
-            'bagging_fraction': 0.7,
+            'max_depth': 4,  # Reduced for better generalization
+            'num_leaves': 15,  # Significantly reduced
+            'min_data_in_leaf': 300,  # Increased for regularization
+            'feature_fraction': 0.6,  # Reduced for regularization
+            'bagging_fraction': 0.6,
             'bagging_freq': 5,
-            'lambda_l1': 0.5,  # Increased regularization
-            'lambda_l2': 0.5,
-            'min_gain_to_split': 0.02,
-            'max_cat_threshold': 32,
-            'cat_smooth': 10.0,
-            'cat_l2': 10.0,
-            'learning_rate': 0.03,  # Reduced for stability
-            'num_iterations': 800  # Reduced iterations
+            'lambda_l1': 1.0,  # Increased regularization
+            'lambda_l2': 1.0,
+            'min_gain_to_split': 0.05,  # Increased threshold
+            'max_cat_threshold': 16,  # Reduced
+            'cat_smooth': 20.0,  # Increased smoothing
+            'cat_l2': 20.0,
+            'learning_rate': 0.02,  # Reduced learning rate
+            'num_iterations': 500,  # Reduced iterations
+            'scale_pos_weight': 52.3,  # Adjust for class imbalance
+            'is_unbalance': True
         },
         'xgboost': {
-            'max_depth': 5,
-            'learning_rate': 0.05,
-            'n_estimators': 600,
-            'subsample': 0.7,
-            'colsample_bytree': 0.7,
-            'min_child_weight': 10,
-            'gamma': 0.1,
-            'alpha': 0.5,
-            'lambda': 0.5,
-            'scale_pos_weight': 52.3
+            'max_depth': 4,  # Reduced depth
+            'learning_rate': 0.03,  # Reduced learning rate
+            'n_estimators': 400,  # Reduced estimators
+            'subsample': 0.6,  # Reduced subsample
+            'colsample_bytree': 0.6,
+            'min_child_weight': 15,  # Increased
+            'gamma': 0.2,  # Increased regularization
+            'alpha': 1.0,  # Increased L1 regularization
+            'lambda': 1.0,  # Increased L2 regularization
+            'scale_pos_weight': 52.3,  # Adjust for class imbalance
+            'reg_alpha': 1.0,
+            'reg_lambda': 1.0
         },
         'logistic': {
-            'C': 0.1,  # Increased regularization
+            'C': 0.01,  # Much stronger regularization
             'penalty': 'l2',
-            'solver': 'saga',  # Changed from lbfgs for better convergence
-            'max_iter': 5000,  # Increased from 2000
+            'solver': 'saga',
+            'max_iter': 3000,  # Reduced iterations
             'class_weight': 'balanced',
             'random_state': 42,
-            'tol': 0.001  # Added tolerance
+            'tol': 0.0001
         }
     }
     
-    # Feature engineering settings - enabled key features
+    # Feature engineering settings - focused on CTR prediction
     FEATURE_ENGINEERING_CONFIG = {
         'enable_interaction_features': True,
-        'enable_polynomial_features': False,  # Disabled for memory
+        'enable_polynomial_features': False,  # Disabled for memory and simplicity
         'enable_binning': True,
         'enable_target_encoding': True,
         'enable_frequency_encoding': True,
-        'enable_statistical_features': False,  # Disabled for memory
+        'enable_statistical_features': True,  # Re-enabled with memory limits
         'max_interaction_degree': 2,
-        'binning_strategy': 'quantile',
-        'n_bins': 10,
-        'min_frequency': 10,  # Increased threshold
-        'target_encoding_smoothing': 10.0,  # Increased smoothing for CTR bias
+        'binning_strategy': 'uniform',  # Changed from quantile to uniform
+        'n_bins': 5,  # Reduced bins
+        'min_frequency': 20,  # Increased threshold
+        'target_encoding_smoothing': 50.0,  # Much higher smoothing for CTR bias
         'enable_cross_validation_encoding': False
     }
     
@@ -144,12 +148,12 @@ class Config:
     RANDOM_STATE = 42
     
     # Early stopping settings
-    EARLY_STOPPING_ROUNDS = 150
-    EARLY_STOPPING_TOLERANCE = 1e-5
+    EARLY_STOPPING_ROUNDS = 100  # Reduced
+    EARLY_STOPPING_TOLERANCE = 1e-4
     
     # Hyperparameter tuning settings
-    OPTUNA_N_TRIALS = 50
-    OPTUNA_TIMEOUT = 1800
+    OPTUNA_N_TRIALS = 30  # Reduced
+    OPTUNA_TIMEOUT = 1200  # Reduced
     OPTUNA_N_JOBS = 1
     OPTUNA_VERBOSITY = 1
     
@@ -159,42 +163,46 @@ class Config:
         'stacking_cv_folds': 3,
         'blending_ratio': 0.7,
         'diversity_threshold': 0.05,
-        'performance_threshold': 0.30,
+        'performance_threshold': 0.25,  # Lowered threshold
         'enable_meta_features': False,
-        'use_simple_average': True  # Added for simple ensemble
+        'use_simple_average': True
     }
     
-    # Calibration settings - mandatory
+    # Calibration settings - mandatory and aggressive
     CALIBRATION_METHOD = 'isotonic'
     CALIBRATION_CV_FOLDS = 3
-    CALIBRATION_MANDATORY = True  # Force calibration
+    CALIBRATION_MANDATORY = True
     
-    # Evaluation configuration - adjusted for CTR bias
+    # Evaluation configuration - CTR-focused tuning
     EVALUATION_CONFIG = {
-        'ap_weight': 0.6,
-        'wll_weight': 0.4,
+        'ap_weight': 0.5,  # Reduced AP weight
+        'wll_weight': 0.5,  # Increased WLL weight
         'target_combined_score': 0.34,
         'target_ctr': 0.0191,
-        'ctr_tolerance': 0.001,  # Increased tolerance
-        'bias_penalty_weight': 5.0,  # Reduced penalty
-        'calibration_weight': 0.5,
+        'ctr_tolerance': 0.0005,  # Tighter tolerance
+        'bias_penalty_weight': 15.0,  # Much higher penalty for CTR bias
+        'calibration_weight': 0.7,  # Increased calibration importance
         'pos_weight': 52.3,
         'neg_weight': 1.0,
-        'wll_normalization_factor': 2.6
+        'wll_normalization_factor': 1.8,  # Adjusted normalization
+        'ctr_bias_multiplier': 20.0  # Strong CTR bias penalty
     }
     
-    # CTR bias correction settings
+    # CTR bias correction settings - much more aggressive
     CTR_BIAS_CORRECTION = {
         'enable': True,
         'target_ctr': 0.0191,
-        'correction_factor': 0.4,  # Reduce predictions by 60% (1/2.5)
+        'correction_factor': 0.15,  # Much more aggressive correction (85% reduction)
         'post_processing': True,
-        'clip_range': (0.001, 0.1)
+        'clip_range': (0.001, 0.08),  # Tighter range
+        'bias_threshold': 0.0002,  # Strict threshold
+        'calibration_strength': 2.0,  # Strong calibration
+        'prediction_scaling': 0.38  # Additional scaling factor
     }
     
     # Evaluation metrics
     PRIMARY_METRIC = 'combined_score'
-    SECONDARY_METRICS = ['ap', 'auc', 'log_loss', 'ctr_bias']
+    SECONDARY_METRICS = ['ap', 'auc', 'log_loss', 'ctr_bias', 'ctr_quality']
     TARGET_COMBINED_SCORE = 0.34
     TARGET_CTR = 0.0191
     
