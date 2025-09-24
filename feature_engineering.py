@@ -62,12 +62,7 @@ class CTRFeatureEngineer:
         }
     
     def set_memory_efficient_mode(self, enabled: bool):
-        """
-        Enable or disable memory efficient mode
-        
-        Args:
-            enabled: If True, use simplified feature engineering to save memory
-        """
+        """Enable or disable memory efficient mode"""
         self.memory_efficient_mode = enabled
         if enabled:
             logger.info("Memory efficient mode enabled - simplified features only")
@@ -75,12 +70,7 @@ class CTRFeatureEngineer:
             logger.info("Memory efficient mode disabled - full feature engineering")
     
     def set_quick_mode(self, enabled: bool):
-        """
-        Enable or disable quick mode for rapid testing
-        
-        Args:
-            enabled: If True, create only basic features for speed
-        """
+        """Enable or disable quick mode for rapid testing"""
         self.quick_mode = enabled
         if enabled:
             logger.info("Quick mode enabled - basic features only for rapid testing")
@@ -92,17 +82,7 @@ class CTRFeatureEngineer:
                          train_df: pd.DataFrame, 
                          test_df: pd.DataFrame, 
                          target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Main feature engineering pipeline entry point
-        
-        Args:
-            train_df: Training dataset
-            test_df: Test dataset  
-            target_col: Name of target column
-            
-        Returns:
-            Tuple of (X_train, X_test) with engineered features
-        """
+        """Main feature engineering pipeline entry point"""
         if self.quick_mode:
             logger.info("=== Quick Mode Feature Engineering Started ===")
             return self.create_quick_features(train_df, test_df, target_col)
@@ -114,17 +94,7 @@ class CTRFeatureEngineer:
                             train_df: pd.DataFrame,
                             test_df: pd.DataFrame,
                             target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Create basic features for quick testing (50 samples)
-        
-        Args:
-            train_df: Training dataset
-            test_df: Test dataset
-            target_col: Name of target column
-            
-        Returns:
-            Tuple of (X_train, X_test) with basic features
-        """
+        """Create basic features for quick testing (50 samples)"""
         logger.info("Creating basic features for quick mode testing")
         
         try:
@@ -168,17 +138,7 @@ class CTRFeatureEngineer:
                           train_df: pd.DataFrame, 
                           test_df: pd.DataFrame, 
                           target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Complete feature engineering pipeline for full dataset processing
-        
-        Args:
-            train_df: Training dataset
-            test_df: Test dataset
-            target_col: Name of target column
-            
-        Returns:
-            Tuple of (X_train, X_test) with comprehensive features
-        """
+        """Complete feature engineering pipeline for full dataset processing"""
         logger.info("Creating comprehensive features for full dataset")
         
         try:
@@ -219,9 +179,9 @@ class CTRFeatureEngineer:
                 # 10. Time-based features
                 X_train, X_test = self._create_temporal_features(X_train, X_test)
                 
-                # 11. Binning features
+                # 11. Binning features - FIXED VERSION
                 if self.config.FEATURE_ENGINEERING_CONFIG.get('enable_binning', True):
-                    X_train, X_test = self._create_binning_features(X_train, X_test)
+                    X_train, X_test = self._create_binning_features_fixed(X_train, X_test)
                 
                 # 12. Rank features
                 X_train, X_test = self._create_rank_features(X_train, X_test)
@@ -282,16 +242,7 @@ class CTRFeatureEngineer:
             self.target_column = target_col
     
     def _detect_target_column(self, train_df: pd.DataFrame, provided_target_col: str = None) -> str:
-        """
-        Detect CTR target column with validation
-        
-        Args:
-            train_df: Training dataframe
-            provided_target_col: User-provided target column name
-            
-        Returns:
-            Validated target column name
-        """
+        """Detect CTR target column with validation"""
         try:
             # First, try provided target column
             if provided_target_col and provided_target_col in train_df.columns:
@@ -382,41 +333,47 @@ class CTRFeatureEngineer:
             self.numerical_features = []
             self.categorical_features = []
     
-    def _safe_fillna(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Safe fillna that handles categorical columns properly"""
+    def _convert_categorical_to_object(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Convert categorical columns to object type for safe processing"""
         try:
-            df_filled = df.copy()
+            df_converted = df.copy()
+            for col in df_converted.columns:
+                if df_converted[col].dtype.name == 'category':
+                    df_converted[col] = df_converted[col].astype('object')
+                    logger.debug(f"Converted {col} from category to object")
+            return df_converted
+        except Exception as e:
+            logger.warning(f"Categorical conversion failed: {e}")
+            return df
+    
+    def _safe_fillna(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Safe fillna that handles categorical columns properly - FIXED VERSION"""
+        try:
+            df_filled = self._convert_categorical_to_object(df)
             
             for col in df_filled.columns:
-                if df_filled[col].dtype.name == 'category':
-                    # For categorical columns, fill with the most frequent category or add 'missing' category
-                    if df_filled[col].isnull().any():
-                        # Add 'missing' to categories if not already present
-                        if 'missing' not in df_filled[col].cat.categories:
-                            df_filled[col] = df_filled[col].cat.add_categories(['missing'])
-                        df_filled[col] = df_filled[col].fillna('missing')
-                elif df_filled[col].dtype in ['int64', 'float64', 'int32', 'float32']:
+                if df_filled[col].dtype in ['int64', 'float64', 'int32', 'float32']:
                     # For numeric columns, fill with 0
                     df_filled[col] = df_filled[col].fillna(0)
                 else:
-                    # For object columns, fill with 'missing'
-                    df_filled[col] = df_filled[col].fillna('missing')
+                    # For object/string columns, fill with 'missing'
+                    df_filled[col] = df_filled[col].fillna('missing').astype('object')
             
             return df_filled
             
         except Exception as e:
             logger.warning(f"Safe fillna failed: {e}")
             # Fallback: convert all categorical to object first
-            df_converted = df.copy()
-            for col in df_converted.columns:
-                if df_converted[col].dtype.name == 'category':
-                    df_converted[col] = df_converted[col].astype('object')
-            
+            df_converted = self._convert_categorical_to_object(df)
             return df_converted.fillna(0)
     
     def _unify_data_types_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Safe data type unification"""
+        """Safe data type unification - FIXED VERSION"""
         try:
+            # Convert categorical columns to object first
+            X_train = self._convert_categorical_to_object(X_train)
+            X_test = self._convert_categorical_to_object(X_test)
+            
             for col in X_train.columns:
                 if col in X_test.columns:
                     # Try to unify data types safely
@@ -431,9 +388,9 @@ class CTRFeatureEngineer:
                                 X_train[col] = pd.to_numeric(train_str, errors='coerce').fillna(0)
                                 X_test[col] = pd.to_numeric(test_str, errors='coerce').fillna(0)
                             except:
-                                # Keep as categorical
-                                X_train[col] = train_str
-                                X_test[col] = test_str
+                                # Keep as object/string
+                                X_train[col] = train_str.astype('object')
+                                X_test[col] = test_str.astype('object')
                     
                     except Exception as e:
                         logger.warning(f"Type unification failed for {col}: {e}")
@@ -449,6 +406,10 @@ class CTRFeatureEngineer:
     def _fix_basic_data_types_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Safe basic data type fixes"""
         try:
+            # Convert categorical columns first
+            X_train = self._convert_categorical_to_object(X_train)
+            X_test = self._convert_categorical_to_object(X_test)
+            
             for col in X_train.columns:
                 if col in X_test.columns:
                     # Simple type conversion
@@ -457,8 +418,8 @@ class CTRFeatureEngineer:
                             X_train[col] = X_train[col].astype(str)
                             X_test[col] = X_test[col].astype(str)
                     except:
-                        X_train[col] = X_train[col].fillna('unknown')
-                        X_test[col] = X_test[col].fillna('unknown')
+                        X_train[col] = X_train[col].fillna('unknown').astype('object')
+                        X_test[col] = X_test[col].fillna('unknown').astype('object')
             
             return X_train, X_test
             
@@ -467,7 +428,7 @@ class CTRFeatureEngineer:
             return X_train, X_test
     
     def _clean_basic_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Clean basic features"""
+        """Clean basic features - FIXED VERSION"""
         try:
             # Fill missing values with safe handling
             X_train = self._safe_fillna(X_train)
@@ -478,11 +439,8 @@ class CTRFeatureEngineer:
         except Exception as e:
             logger.error(f"Basic feature cleaning failed: {e}")
             # Convert categorical to object and then fill
-            for col in X_train.columns:
-                if X_train[col].dtype.name == 'category':
-                    X_train[col] = X_train[col].astype('object')
-                if col in X_test.columns and X_test[col].dtype.name == 'category':
-                    X_test[col] = X_test[col].astype('object')
+            X_train = self._convert_categorical_to_object(X_train)
+            X_test = self._convert_categorical_to_object(X_test)
             
             X_train = X_train.fillna(0)
             X_test = X_test.fillna(0)
@@ -513,6 +471,10 @@ class CTRFeatureEngineer:
                 try:
                     # Create target encoder with smoothing
                     encoder = TargetEncoder(target_type='binary', smooth='auto')
+                    
+                    # Ensure columns are object type
+                    X_train[col] = X_train[col].astype('object')
+                    X_test[col] = X_test[col].astype('object')
                     
                     # Fit and transform
                     X_train_encoded = encoder.fit_transform(X_train[[col]], y_train).flatten()
@@ -632,7 +594,7 @@ class CTRFeatureEngineer:
             return X_train, X_test
     
     def _create_frequency_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create frequency features with memory efficiency"""
+        """Create frequency features with memory efficiency - FIXED VERSION"""
         try:
             if len(self.categorical_features) == 0:
                 return X_train, X_test
@@ -644,6 +606,10 @@ class CTRFeatureEngineer:
             
             for col in cat_features_selected:
                 try:
+                    # Ensure column is object type
+                    X_train[col] = X_train[col].astype('object')
+                    X_test[col] = X_test[col].astype('object')
+                    
                     # Calculate value frequencies
                     freq_map = X_train[col].value_counts().to_dict()
                     
@@ -688,6 +654,12 @@ class CTRFeatureEngineer:
                     col1, col2 = cat_features_selected[i], cat_features_selected[j]
                     
                     try:
+                        # Ensure columns are object type
+                        X_train[col1] = X_train[col1].astype('object')
+                        X_train[col2] = X_train[col2].astype('object')
+                        X_test[col1] = X_test[col1].astype('object')
+                        X_test[col2] = X_test[col2].astype('object')
+                        
                         # Create cross feature
                         feature_name = f"{col1}_cross_{col2}"
                         X_train[feature_name] = X_train[col1].astype(str) + "_" + X_train[col2].astype(str)
@@ -712,8 +684,8 @@ class CTRFeatureEngineer:
         """Create temporal features if time-related columns exist"""
         return X_train, X_test
     
-    def _create_binning_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create binning features with memory efficiency"""
+    def _create_binning_features_fixed(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Create binning features with memory efficiency - FIXED VERSION"""
         try:
             if len(self.numerical_features) == 0:
                 return X_train, X_test
@@ -725,14 +697,44 @@ class CTRFeatureEngineer:
             
             for col in numeric_features_selected:
                 try:
-                    # Create quantile-based bins
-                    feature_name = f"{col}_binned"
-                    X_train[feature_name] = pd.qcut(X_train[col], q=5, labels=False, duplicates='drop').fillna(0)
-                    X_test[feature_name] = pd.cut(X_test[col], 
-                                                bins=pd.qcut(X_train[col], q=5, duplicates='drop').cat.categories,
-                                                labels=False, include_lowest=True).fillna(0)
+                    # Ensure column is numeric
+                    X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0)
+                    X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0)
                     
-                    self.binning_features.append(feature_name)
+                    # Create quantile-based bins with duplicate handling
+                    try:
+                        # First try qcut
+                        train_binned, bin_edges = pd.qcut(X_train[col], q=5, labels=False, duplicates='drop', retbins=True)
+                        train_binned = train_binned.fillna(0)
+                        
+                        # Apply same bins to test set
+                        test_binned = pd.cut(X_test[col], bins=bin_edges, labels=False, include_lowest=True)
+                        test_binned = test_binned.fillna(0)
+                        
+                        feature_name = f"{col}_binned"
+                        X_train[feature_name] = train_binned.astype('int32')
+                        X_test[feature_name] = test_binned.astype('int32')
+                        
+                        self.binning_features.append(feature_name)
+                        
+                    except Exception as inner_e:
+                        # Fallback to cut with uniform bins
+                        logger.warning(f"qcut failed for {col}, using uniform bins: {inner_e}")
+                        
+                        min_val = X_train[col].min()
+                        max_val = X_train[col].max()
+                        
+                        if max_val > min_val:
+                            bins = np.linspace(min_val, max_val, 6)  # 5 bins
+                            
+                            train_binned = pd.cut(X_train[col], bins=bins, labels=False, include_lowest=True)
+                            test_binned = pd.cut(X_test[col], bins=bins, labels=False, include_lowest=True)
+                            
+                            feature_name = f"{col}_binned"
+                            X_train[feature_name] = train_binned.fillna(0).astype('int32')
+                            X_test[feature_name] = test_binned.fillna(0).astype('int32')
+                            
+                            self.binning_features.append(feature_name)
                     
                 except Exception as e:
                     logger.warning(f"Binning failed for {col}: {e}")
@@ -863,14 +865,17 @@ class CTRFeatureEngineer:
             return X_train, X_test
     
     def _encode_categorical_features_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Safe categorical feature encoding"""
+        """Safe categorical feature encoding - FIXED VERSION"""
         try:
-            for col in self.categorical_features + self.cross_features:
+            # Get all categorical features including cross features
+            all_categorical_features = self.categorical_features + self.cross_features
+            
+            for col in all_categorical_features:
                 if col in X_train.columns and col in X_test.columns:
                     try:
-                        # Safe label encoding
-                        train_str = X_train[col].astype(str).fillna('missing')
-                        test_str = X_test[col].astype(str).fillna('missing')
+                        # Safe label encoding with object conversion
+                        train_str = X_train[col].astype('object').fillna('missing')
+                        test_str = X_test[col].astype('object').fillna('missing')
                         
                         # Get all unique values
                         all_values = sorted(set(train_str.unique()) | set(test_str.unique()))
@@ -895,9 +900,9 @@ class CTRFeatureEngineer:
         try:
             for col in self.categorical_features:
                 if col in X_train.columns and col in X_test.columns:
-                    # Simple label encoding
-                    train_str = X_train[col].astype(str)
-                    test_str = X_test[col].astype(str)
+                    # Simple label encoding with object conversion
+                    train_str = X_train[col].astype('object')
+                    test_str = X_test[col].astype('object')
                     
                     all_values = sorted(set(train_str.unique()) | set(test_str.unique()))
                     value_map = {val: idx for idx, val in enumerate(all_values)}
@@ -948,15 +953,15 @@ class CTRFeatureEngineer:
             return X_train, X_test
     
     def _final_data_cleanup(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Final data cleanup"""
+        """Final data cleanup - FIXED VERSION"""
         try:
             # Replace infinite values
             X_train = X_train.replace([np.inf, -np.inf], 0)
             X_test = X_test.replace([np.inf, -np.inf], 0)
             
             # Fill any remaining missing values
-            X_train = self._safe_fillna(X_train)
-            X_test = self._safe_fillna(X_test)
+            X_train = X_train.fillna(0)
+            X_test = X_test.fillna(0)
             
             # Remove constant features
             constant_features = []
@@ -991,8 +996,8 @@ class CTRFeatureEngineer:
             X_train = X_train.replace([np.inf, -np.inf], 0)
             X_test = X_test.replace([np.inf, -np.inf], 0)
             
-            X_train = self._safe_fillna(X_train)
-            X_test = self._safe_fillna(X_test)
+            X_train = X_train.fillna(0)
+            X_test = X_test.fillna(0)
             
             return X_train, X_test
             
@@ -1059,8 +1064,11 @@ class CTRFeatureEngineer:
             X_test = X_test[common_cols]
             
             # Basic preprocessing with safe categorical handling
-            X_train = self._safe_fillna(X_train)
-            X_test = self._safe_fillna(X_test)
+            X_train = self._convert_categorical_to_object(X_train)
+            X_test = self._convert_categorical_to_object(X_test)
+            
+            X_train = X_train.fillna(0)
+            X_test = X_test.fillna(0)
             
             # Convert to numeric
             for col in X_train.columns:

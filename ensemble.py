@@ -59,19 +59,19 @@ class BaseEnsemble(ABC):
         logger.info(f"Base model added to {self.name}: {name}")
 
 class CTRStackingEnsemble(BaseEnsemble):
-    """CTR stacking ensemble with simplified approach"""
+    """CTR stacking ensemble"""
     
     def __init__(self, cv_folds: int = 3, meta_learner_types: Optional[List[str]] = None):
         super().__init__("CTRStacking")
         self.cv_folds = cv_folds
-        self.meta_learner_types = meta_learner_types or ['logistic']  # Simplified to logistic only
+        self.meta_learner_types = meta_learner_types or ['logistic']
         self.meta_learners = {}
         self.oof_predictions = {}
         self.meta_features = None
-        self.weight_calculation_methods = ['performance']  # Simplified weight calculation
+        self.weight_calculation_methods = ['performance']
         
     def fit(self, X: pd.DataFrame, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
-        """Fit stacking ensemble with simplified weight calculation"""
+        """Fit stacking ensemble with CTR correction"""
         logger.info(f"{self.name} ensemble training started")
         
         try:
@@ -82,17 +82,16 @@ class CTRStackingEnsemble(BaseEnsemble):
                 self.ensemble_execution_guaranteed = True
                 return
             
-            # Generate out-of-fold predictions with simplified approach
+            # Generate out-of-fold predictions
             logger.info("Generating out-of-fold predictions")
             self.oof_predictions = {}
             
-            # Simplified CV strategy - use only 3 folds to reduce complexity
             skf = StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=42)
             
             for name in self.base_models.keys():
                 self.oof_predictions[name] = np.zeros(len(X))
             
-            # Create simple meta-features from base predictions
+            # Create meta-features from base predictions
             for name, pred in base_predictions.items():
                 if len(pred) == len(y):
                     self.oof_predictions[name] = pred
@@ -100,27 +99,29 @@ class CTRStackingEnsemble(BaseEnsemble):
                     logger.warning(f"Prediction length mismatch for {name}, using zeros")
                     self.oof_predictions[name] = np.zeros(len(y))
             
-            # Simplified weight calculation based on performance only
+            # Calculate performance weights
             logger.info("Calculating performance-based weights")
             performance_weights = self._calculate_performance_weights(y)
             
-            # Use performance weights directly
             self.weights = performance_weights
             
-            # Simple meta-learner training (logistic only)
+            # Train meta-learner
             logger.info("Training meta learners")
             meta_features = np.column_stack([self.oof_predictions[name] for name in self.base_models.keys()])
             
-            # Train simple logistic meta-learner
+            # Train logistic meta-learner with proper regularization
             try:
-                meta_learner = LogisticRegression(max_iter=1000, random_state=42)
+                meta_learner = LogisticRegression(
+                    max_iter=1000, 
+                    random_state=42,
+                    C=1.0,
+                    class_weight='balanced'
+                )
                 meta_learner.fit(meta_features, y)
                 self.meta_learners['logistic'] = meta_learner
                 logger.info("Meta learner trained: logistic")
             except Exception as e:
                 logger.warning(f"Meta learner training failed: {e}")
-                # Fallback to weighted average
-                pass
             
             self.is_fitted = True
             self.ensemble_execution_guaranteed = True
@@ -128,13 +129,12 @@ class CTRStackingEnsemble(BaseEnsemble):
             
         except Exception as e:
             logger.error(f"{self.name} ensemble training failed: {e}")
-            # Fallback to equal weights
             self.weights = {name: 1.0 / len(base_predictions) for name in base_predictions.keys()}
             self.is_fitted = True
             self.ensemble_execution_guaranteed = False
     
     def _calculate_performance_weights(self, y: pd.Series) -> Dict[str, float]:
-        """Calculate performance-based weights"""
+        """Calculate performance-based weights with CTR awareness"""
         weights = {}
         total_score = 0.0
         
@@ -142,12 +142,19 @@ class CTRStackingEnsemble(BaseEnsemble):
         
         for name, pred in self.oof_predictions.items():
             try:
-                # Calculate combined score
+                # Calculate combined score with CTR bias consideration
                 auc = roc_auc_score(y, pred)
                 ap = average_precision_score(y, pred)
-                combined_score = 0.5 * auc + 0.5 * ap
                 
-                weights[name] = max(combined_score, 0.1)  # Minimum weight of 0.1
+                # CTR bias penalty
+                actual_ctr = np.mean(y)
+                predicted_ctr = np.mean(pred)
+                ctr_bias = abs(predicted_ctr - actual_ctr)
+                ctr_penalty = min(ctr_bias * 10, 0.5)  # Penalty for CTR bias
+                
+                combined_score = (0.5 * auc + 0.5 * ap) * (1 - ctr_penalty)
+                
+                weights[name] = max(combined_score, 0.1)
                 total_score += weights[name]
                 
             except Exception as e:
@@ -207,21 +214,20 @@ class CTRStackingEnsemble(BaseEnsemble):
         return np.mean(list(base_predictions.values()), axis=0)
 
 class CTRDynamicEnsemble(BaseEnsemble):
-    """CTR dynamic ensemble with simplified strategy selection"""
+    """CTR dynamic ensemble with strategy selection"""
     
     def __init__(self):
         super().__init__("CTRDynamic")
-        self.strategies = ['simple_average', 'performance_weighted']  # Simplified strategies
+        self.strategies = ['simple_average', 'performance_weighted', 'ctr_corrected']
         self.strategy_weights = {}
         self.best_strategy = 'simple_average'
         self.performance_history = {}
         
     def fit(self, X: pd.DataFrame, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
-        """Fit dynamic ensemble with simplified strategy selection"""
+        """Fit dynamic ensemble with strategy selection"""
         logger.info(f"{self.name} ensemble training started")
         
         try:
-            # Initialize performance tracking
             logger.info("Initializing performance tracking")
             self.performance_history = {}
             
@@ -229,8 +235,8 @@ class CTRDynamicEnsemble(BaseEnsemble):
             logger.info("Calculating multi-strategy weights")
             self._calculate_strategy_weights(y, base_predictions)
             
-            # Select best strategy based on simple evaluation
-            logger.info("Optimizing strategy combination")
+            # Select best strategy
+            logger.info("Selecting optimal strategy")
             best_score = -1
             metrics_calculator = CTRMetrics()
             
@@ -264,7 +270,8 @@ class CTRDynamicEnsemble(BaseEnsemble):
         """Calculate weights for different strategies"""
         self.strategy_weights = {
             'simple_average': {name: 1.0 / len(base_predictions) for name in base_predictions.keys()},
-            'performance_weighted': self._calculate_performance_weights(y, base_predictions)
+            'performance_weighted': self._calculate_performance_weights(y, base_predictions),
+            'ctr_corrected': self._calculate_ctr_corrected_weights(y, base_predictions)
         }
     
     def _calculate_performance_weights(self, y: pd.Series, base_predictions: Dict[str, np.ndarray]) -> Dict[str, float]:
@@ -294,12 +301,45 @@ class CTRDynamicEnsemble(BaseEnsemble):
         
         return weights
     
+    def _calculate_ctr_corrected_weights(self, y: pd.Series, base_predictions: Dict[str, np.ndarray]) -> Dict[str, float]:
+        """Calculate CTR-corrected weights"""
+        weights = {}
+        total_score = 0.0
+        actual_ctr = np.mean(y)
+        
+        for name, pred in base_predictions.items():
+            try:
+                auc = roc_auc_score(y, pred)
+                ap = average_precision_score(y, pred)
+                
+                # CTR bias penalty
+                predicted_ctr = np.mean(pred)
+                ctr_bias = abs(predicted_ctr - actual_ctr)
+                ctr_penalty = min(ctr_bias * 15, 0.6)
+                
+                score = (0.5 * auc + 0.5 * ap) * (1 - ctr_penalty)
+                weights[name] = max(score, 0.05)
+                total_score += weights[name]
+                
+            except Exception as e:
+                logger.warning(f"CTR corrected weight calculation failed for {name}: {e}")
+                weights[name] = 0.05
+                total_score += 0.05
+        
+        # Normalize
+        if total_score > 0:
+            weights = {name: weight / total_score for name, weight in weights.items()}
+        else:
+            weights = {name: 1.0 / len(base_predictions) for name in base_predictions.keys()}
+        
+        return weights
+    
     def _apply_strategy(self, strategy: str, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
         """Apply specified strategy"""
         if strategy == 'simple_average':
             return np.mean(list(base_predictions.values()), axis=0)
-        elif strategy == 'performance_weighted':
-            weights = self.strategy_weights.get('performance_weighted', {})
+        elif strategy in ['performance_weighted', 'ctr_corrected']:
+            weights = self.strategy_weights.get(strategy, {})
             weighted_pred = np.zeros(len(next(iter(base_predictions.values()))))
             total_weight = 0.0
             
@@ -329,7 +369,7 @@ class CTRDynamicEnsemble(BaseEnsemble):
             return np.mean(list(base_predictions.values()), axis=0)
 
 class CTRMainEnsemble(BaseEnsemble):
-    """CTR main ensemble with simple weighted combination"""
+    """CTR main ensemble with weighted combination"""
     
     def __init__(self, target_combined_score: float = 0.34):
         super().__init__("CTRMain")
@@ -339,11 +379,11 @@ class CTRMainEnsemble(BaseEnsemble):
         self.final_prediction = None
         
     def fit(self, X: pd.DataFrame, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
-        """Fit main ensemble with simplified approach"""
+        """Fit main ensemble"""
         logger.info(f"{self.name} ensemble training started - execution guaranteed")
         
         try:
-            # Create simplified sub-ensembles
+            # Create sub-ensembles
             logger.info("Stage 1: Creating sub-ensembles")
             
             # Create stacking ensemble
@@ -368,7 +408,7 @@ class CTRMainEnsemble(BaseEnsemble):
             except Exception as e:
                 logger.warning(f"Dynamic ensemble creation failed: {e}")
             
-            # Evaluate sub-ensembles with simplified scoring
+            # Evaluate sub-ensembles
             logger.info("Stage 2: Evaluating sub-ensembles")
             ensemble_scores = {}
             metrics_calculator = CTRMetrics()
@@ -389,7 +429,7 @@ class CTRMainEnsemble(BaseEnsemble):
                 except Exception as e:
                     logger.warning(f"{ensemble_name} ensemble evaluation failed: {e}")
             
-            # Calculate ensemble weights based on performance
+            # Calculate ensemble weights
             logger.info("Stage 3: Calculating ensemble weights")
             total_score = sum(scores['combined_score'] for scores in ensemble_scores.values())
             
@@ -402,7 +442,6 @@ class CTRMainEnsemble(BaseEnsemble):
                 if n_ensembles > 0:
                     self.ensemble_weights = {name: 1.0 / n_ensembles for name in self.sub_ensembles.keys()}
                 else:
-                    # No sub-ensembles available, use base model average
                     self.final_prediction = np.mean(list(base_predictions.values()), axis=0)
             
             # Calculate final ensemble prediction
@@ -433,7 +472,7 @@ class CTRMainEnsemble(BaseEnsemble):
             self.ensemble_execution_guaranteed = False
     
     def _calculate_final_ensemble_prediction(self, ensemble_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """Calculate final ensemble prediction using simplified weighted combination"""
+        """Calculate final ensemble prediction using weighted combination"""
         weighted_pred = np.zeros(len(next(iter(ensemble_predictions.values()))))
         total_weight = 0.0
         
@@ -455,7 +494,6 @@ class CTRMainEnsemble(BaseEnsemble):
                 raise ValueError("Ensemble not fitted")
             
             if len(self.sub_ensembles) == 0:
-                # Fallback to simple weighted average of base predictions
                 return self._simple_weighted_average(base_predictions)
             
             # Get predictions from sub-ensembles
@@ -485,27 +523,28 @@ class CTRMainEnsemble(BaseEnsemble):
         return np.mean(list(base_predictions.values()), axis=0)
 
 class CTREnsembleManager:
-    """CTR ensemble manager with simplified weight calculation"""
+    """CTR ensemble manager"""
     
     def __init__(self, config: Config = Config):
         self.config = config
         self.base_models = {}
         self.ensembles = {}
         self.best_ensemble = None
+        self.final_ensemble = None
         self.ensemble_results = {}
         self.metrics_calculator = CTRMetrics()
         self.target_combined_score = getattr(config, 'TARGET_COMBINED_SCORE', 0.34)
         
         # Initialize ensemble types
-        self.ensemble_types = ['main_ensemble']  # Simplified to main ensemble only
+        self.ensemble_types = ['main_ensemble']
         
     def add_base_model(self, name: str, model: BaseModel):
         """Add base model to ensemble manager"""
         self.base_models[name] = model
         logger.info(f"Base model added to ensemble manager: {name}")
     
-    def train_ensembles(self, X: pd.DataFrame, y: pd.Series):
-        """Train all ensembles"""
+    def train_all_ensembles(self, X: pd.DataFrame, y: pd.Series):
+        """Train all ensembles - FIXED METHOD"""
         logger.info("All ensemble training started - execution guaranteed")
         
         try:
@@ -517,13 +556,13 @@ class CTREnsembleManager:
                 try:
                     pred = model.predict_proba(X)
                     base_predictions[name] = pred
-                    logger.info(f"{name} model prediction completed ({len(pred)} predictions) - Calibration: No")
+                    logger.info(f"{name} model prediction completed ({len(pred)} predictions)")
                 except Exception as e:
                     logger.error(f"{name} model prediction failed: {e}")
                     base_predictions[name] = np.full(len(X), 0.0191)  # Default CTR
             
             # Create and train main ensemble
-            logger.info("Creating default ensembles")
+            logger.info("Creating main ensemble")
             main_ensemble = CTRMainEnsemble(target_combined_score=self.target_combined_score)
             
             for name, model in self.base_models.items():
@@ -539,6 +578,7 @@ class CTREnsembleManager:
             
             training_time = time.time() - start_time
             self.ensembles['main_ensemble'] = main_ensemble
+            self.final_ensemble = main_ensemble
             
             logger.info(f"main_ensemble ensemble training completed ({training_time:.2f}s)")
             logger.info("All ensemble training completed - execution guaranteed")
@@ -550,9 +590,10 @@ class CTREnsembleManager:
             main_ensemble.final_prediction = np.mean(list(base_predictions.values()), axis=0) if base_predictions else np.array([0.0191])
             main_ensemble.is_fitted = True
             self.ensembles['main_ensemble'] = main_ensemble
+            self.final_ensemble = main_ensemble
     
     def evaluate_ensembles(self, X: pd.DataFrame, y: pd.Series):
-        """Evaluate ensembles with simplified approach"""
+        """Evaluate ensembles"""
         logger.info("Ensemble evaluation started")
         
         # Get base model predictions
@@ -586,7 +627,6 @@ class CTREnsembleManager:
                 
                 logger.info(f"{ensemble_type} ensemble Combined Score: {combined_score:.4f}")
                 logger.info(f"{ensemble_type} ensemble CTR Score: {ctr_score:.4f}")
-                logger.info(f"{ensemble_type} ensemble Calibration: {'Yes' if hasattr(ensemble, 'is_calibrated') and ensemble.is_calibrated else 'No'}")
                 logger.info(f"{ensemble_type} ensemble Execution Guaranteed: {'Yes' if execution_guaranteed else 'No'}")
                 
                 predicted_ctr = ensemble_pred.mean()
