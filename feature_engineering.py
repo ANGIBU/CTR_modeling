@@ -330,52 +330,78 @@ class CTRFeatureEngineer:
                         logger.warning(f"Skipping {col}: too many unique values ({train_col_str.nunique()})")
                         continue
                     
-                    # Create temporary DataFrames for encoding
-                    train_temp_df = pd.DataFrame({col: train_col_str})
-                    test_temp_df = pd.DataFrame({col: test_col_str})
+                    # Simple manual target encoding (avoid sklearn TargetEncoder issues)
+                    # Calculate mean target for each category
+                    category_means = {}
+                    category_counts = {}
                     
-                    # Target encoding with smoothing
-                    encoder = TargetEncoder(smooth='auto', target_type='binary')
+                    # Group by category and calculate mean target and counts
+                    for category in train_col_str.unique():
+                        mask = train_col_str == category
+                        if mask.sum() > 0:  # Ensure we have samples for this category
+                            category_target_values = y_train[mask]
+                            category_means[category] = category_target_values.mean()
+                            category_counts[category] = len(category_target_values)
                     
-                    # Fit and transform
-                    train_encoded = encoder.fit_transform(train_temp_df, y_train)
-                    test_encoded = encoder.transform(test_temp_df)
+                    # Apply smoothing for categories with few samples
+                    global_mean = y_train.mean()
+                    min_samples = 10  # Minimum samples for reliable estimate
+                    
+                    smoothed_means = {}
+                    for category, mean_val in category_means.items():
+                        count = category_counts[category]
+                        if count < min_samples:
+                            # Apply smoothing: blend with global mean
+                            alpha = count / (count + min_samples)
+                            smoothed_means[category] = alpha * mean_val + (1 - alpha) * global_mean
+                        else:
+                            smoothed_means[category] = mean_val
                     
                     # Create new feature names and add as new columns
                     feature_name = f"{col}_target_enc"
-                    X_train[feature_name] = train_encoded[col].values
-                    X_test[feature_name] = test_encoded[col].values
+                    
+                    # Map values to encoded features
+                    X_train[feature_name] = train_col_str.map(smoothed_means).fillna(global_mean)
+                    X_test[feature_name] = test_col_str.map(smoothed_means).fillna(global_mean)
                     
                     # Additional frequency-based features
-                    value_counts = train_col_str.value_counts()
                     freq_feature = f"{col}_freq"
-                    X_train[freq_feature] = train_col_str.map(value_counts).fillna(0)
-                    X_test[freq_feature] = test_col_str.map(value_counts).fillna(0)
+                    X_train[freq_feature] = train_col_str.map(category_counts).fillna(0)
+                    X_test[freq_feature] = test_col_str.map(category_counts).fillna(0)
                     
                     # CTR variance feature (safe calculation)
                     try:
                         ctr_var_feature = f"{col}_ctr_var"
-                        # Calculate CTR variance by category
-                        category_stats = train_temp_df.assign(target=y_train).groupby(col)['target'].agg(['var', 'count']).fillna(0)
-                        # Only use categories with sufficient samples
-                        category_stats = category_stats[category_stats['count'] >= 5]
-                        ctr_variance_map = category_stats['var'].to_dict()
                         
-                        X_train[ctr_var_feature] = train_col_str.map(ctr_variance_map).fillna(0)
-                        X_test[ctr_var_feature] = test_col_str.map(ctr_variance_map).fillna(0)
+                        # Calculate variance for each category
+                        category_variances = {}
+                        for category in train_col_str.unique():
+                            mask = train_col_str == category
+                            if mask.sum() > 5:  # Need at least 5 samples for variance
+                                category_target_values = y_train[mask]
+                                category_variances[category] = category_target_values.var()
+                        
+                        # Fill missing variances with global variance
+                        global_var = y_train.var()
+                        for category in train_col_str.unique():
+                            if category not in category_variances:
+                                category_variances[category] = global_var
+                        
+                        X_train[ctr_var_feature] = train_col_str.map(category_variances).fillna(global_var)
+                        X_test[ctr_var_feature] = test_col_str.map(category_variances).fillna(global_var)
                         
                         self.target_encoding_features.extend([feature_name, freq_feature, ctr_var_feature])
+                        created_features = 3
                     except Exception as var_e:
                         logger.warning(f"CTR variance calculation failed for {col}: {var_e}")
                         self.target_encoding_features.extend([feature_name, freq_feature])
-                    
-                    self.target_encoders[col] = encoder
+                        created_features = 2
                     
                     # Memory cleanup after each encoding
-                    if len(self.target_encoding_features) % 5 == 0:
+                    if len(self.target_encoding_features) % 10 == 0:
                         self.memory_monitor.force_cleanup()
                     
-                    logger.info(f"Target encoding successful for {col}: {len([f for f in [feature_name, freq_feature, ctr_var_feature] if f in self.target_encoding_features])} features")
+                    logger.info(f"Target encoding successful for {col}: {created_features} features created")
                     
                 except Exception as e:
                     logger.warning(f"Target encoding failed for {col}: {e}")
