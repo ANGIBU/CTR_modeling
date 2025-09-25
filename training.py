@@ -1,8 +1,4 @@
 # training.py
-"""
-CTR Model Training Module
-Training pipeline for Click-Through Rate prediction models
-"""
 
 import os
 import gc
@@ -93,29 +89,20 @@ class LargeDataMemoryTracker:
                 cached = torch.cuda.memory_reserved() / (1024**3)
                 
                 # RTX 4060 Ti optimization check
-                gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else ""
-                rtx_4060_ti = "4060 Ti" in gpu_name
+                gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "Unknown"
+                rtx_optimized = "4060 Ti" in gpu_name
                 
                 return {
                     'available': True,
                     'allocated_gb': allocated,
                     'cached_gb': cached,
-                    'rtx_4060_ti_optimized': rtx_4060_ti,
-                    'gpu_name': gpu_name
+                    'gpu_name': gpu_name,
+                    'rtx_4060_ti_optimized': rtx_optimized
                 }
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"GPU memory check failed: {e}")
         
         return {'available': False, 'rtx_4060_ti_optimized': False}
-    
-    def optimize_gpu_memory(self):
-        """Optimize GPU memory usage"""
-        if self.gpu_available and TORCH_AVAILABLE:
-            try:
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-            except Exception:
-                pass
     
     def force_cleanup(self):
         """Force memory cleanup"""
@@ -123,426 +110,739 @@ class LargeDataMemoryTracker:
         if self.gpu_available and TORCH_AVAILABLE:
             try:
                 torch.cuda.empty_cache()
-            except Exception:
-                pass
+                torch.cuda.synchronize()
+            except Exception as e:
+                logger.warning(f"GPU cleanup failed: {e}")
+    
+    def optimize_gpu_memory(self):
+        """Optimize GPU memory usage"""
+        if self.gpu_available and TORCH_AVAILABLE:
+            try:
+                # Set memory fraction for RTX 4060 Ti
+                torch.cuda.set_per_process_memory_fraction(0.8)
+                self.force_cleanup()
+                logger.info("GPU memory optimization applied")
+            except Exception as e:
+                logger.warning(f"GPU optimization failed: {e}")
+
+class CTRValidationStrategy:
+    """CTR-specific validation strategy with temporal awareness"""
+    
+    def __init__(self, n_splits: int = 5, random_state: int = 42):
+        self.n_splits = n_splits
+        self.random_state = random_state
+        self.target_ctr = 0.0191
+        
+    def create_stratified_splits(self, X: pd.DataFrame, y: pd.Series) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """Create stratified splits maintaining CTR distribution"""
+        try:
+            # Use stratified k-fold to maintain class balance
+            skf = StratifiedKFold(n_splits=self.n_splits, shuffle=True, random_state=self.random_state)
+            
+            splits = []
+            for train_idx, val_idx in skf.split(X, y):
+                # Validate split quality
+                train_ctr = y.iloc[train_idx].mean()
+                val_ctr = y.iloc[val_idx].mean()
+                
+                # Check if CTR distribution is reasonable
+                ctr_diff = abs(train_ctr - val_ctr)
+                if ctr_diff < 0.01:  # Accept if difference < 1%
+                    splits.append((train_idx, val_idx))
+                    logger.info(f"Split created - Train CTR: {train_ctr:.4f}, Val CTR: {val_ctr:.4f}")
+                else:
+                    logger.warning(f"Split rejected - CTR difference too large: {ctr_diff:.4f}")
+            
+            if len(splits) == 0:
+                # Fallback to simple random split
+                logger.warning("Using fallback random split")
+                train_idx, val_idx = train_test_split(
+                    range(len(X)), test_size=0.2, random_state=self.random_state, 
+                    stratify=y
+                )
+                splits = [(train_idx, val_idx)]
+            
+            return splits
+            
+        except Exception as e:
+            logger.error(f"Stratified splits creation failed: {e}")
+            # Simple fallback
+            train_idx, val_idx = train_test_split(
+                range(len(X)), test_size=0.2, random_state=self.random_state
+            )
+            return [(train_idx, val_idx)]
+    
+    def create_temporal_splits(self, X: pd.DataFrame, y: pd.Series, 
+                             time_col: Optional[str] = None) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """Create temporal splits if time column exists"""
+        try:
+            if time_col and time_col in X.columns:
+                # Sort by time and create splits
+                sorted_indices = X.sort_values(time_col).index
+                
+                splits = []
+                split_size = len(X) // self.n_splits
+                
+                for i in range(self.n_splits):
+                    start_idx = i * split_size
+                    end_idx = (i + 1) * split_size if i < self.n_splits - 1 else len(X)
+                    
+                    train_indices = sorted_indices[:start_idx + int(split_size * 0.8)]
+                    val_indices = sorted_indices[start_idx + int(split_size * 0.8):end_idx]
+                    
+                    if len(train_indices) > 0 and len(val_indices) > 0:
+                        splits.append((train_indices.values, val_indices.values))
+                
+                return splits if splits else self.create_stratified_splits(X, y)
+            else:
+                return self.create_stratified_splits(X, y)
+                
+        except Exception as e:
+            logger.warning(f"Temporal splits creation failed: {e}")
+            return self.create_stratified_splits(X, y)
+    
+    def validate_split_quality(self, y_train: pd.Series, y_val: pd.Series) -> Dict[str, float]:
+        """Validate split quality for CTR prediction"""
+        try:
+            train_ctr = y_train.mean()
+            val_ctr = y_val.mean()
+            
+            quality_metrics = {
+                'train_ctr': train_ctr,
+                'val_ctr': val_ctr,
+                'ctr_difference': abs(train_ctr - val_ctr),
+                'train_target_alignment': abs(train_ctr - self.target_ctr),
+                'val_target_alignment': abs(val_ctr - self.target_ctr),
+                'class_balance_train': min(train_ctr, 1 - train_ctr) * 2,
+                'class_balance_val': min(val_ctr, 1 - val_ctr) * 2
+            }
+            
+            # Overall quality score
+            ctr_alignment_score = 1 - min(quality_metrics['ctr_difference'] / 0.01, 1.0)
+            balance_score = (quality_metrics['class_balance_train'] + quality_metrics['class_balance_val']) / 2
+            
+            quality_metrics['overall_quality'] = (ctr_alignment_score + balance_score) / 2
+            
+            return quality_metrics
+            
+        except Exception as e:
+            logger.warning(f"Split quality validation failed: {e}")
+            return {'overall_quality': 0.5}
 
 class CTRHyperparameterOptimizer:
-    """Hyperparameter optimization for CTR models"""
+    """CTR-focused hyperparameter optimization"""
     
-    def __init__(self, config: Config):
-        self.config = config
-        self.quick_mode = False
-        self.memory_tracker = LargeDataMemoryTracker()
+    def __init__(self, target_ctr: float = 0.0191):
+        self.target_ctr = target_ctr
+        self.optimization_history = {}
         
-    def set_quick_mode(self, enabled: bool):
-        """Set quick mode for optimization"""
-        self.quick_mode = enabled
+    def get_optimized_params(self, model_name: str, quick_mode: bool = False) -> Dict[str, Any]:
+        """Get CTR-optimized parameters for each model"""
+        try:
+            if model_name == 'logistic':
+                if quick_mode:
+                    return {
+                        'C': 0.1,
+                        'penalty': 'l2',
+                        'solver': 'liblinear',
+                        'max_iter': 500,
+                        'random_state': 42
+                    }
+                else:
+                    # CTR-optimized logistic regression parameters
+                    return {
+                        'C': 0.01,  # Strong regularization for better generalization
+                        'penalty': 'l2',
+                        'solver': 'liblinear',
+                        'max_iter': 2000,
+                        'class_weight': 'balanced',
+                        'random_state': 42
+                    }
+            
+            elif model_name == 'lightgbm':
+                if quick_mode:
+                    return {
+                        'objective': 'binary',
+                        'metric': 'binary_logloss',
+                        'num_leaves': 15,
+                        'learning_rate': 0.1,
+                        'n_estimators': 50,
+                        'verbose': -1,
+                        'random_state': 42
+                    }
+                else:
+                    # CTR-optimized LightGBM parameters
+                    return {
+                        'objective': 'binary',
+                        'metric': 'binary_logloss',
+                        'boosting_type': 'gbdt',
+                        'num_leaves': 63,  # Increased for more complexity
+                        'learning_rate': 0.02,  # Lower for better convergence
+                        'n_estimators': 500,
+                        'feature_fraction': 0.8,
+                        'bagging_fraction': 0.8,
+                        'bagging_freq': 5,
+                        'min_data_in_leaf': 100,  # Higher to prevent overfitting
+                        'reg_alpha': 0.1,
+                        'reg_lambda': 0.1,
+                        'class_weight': 'balanced',
+                        'verbose': -1,
+                        'random_state': 42,
+                        'early_stopping_rounds': 100
+                    }
+            
+            elif model_name == 'xgboost':
+                if quick_mode:
+                    return {
+                        'objective': 'binary:logistic',
+                        'eval_metric': 'logloss',
+                        'max_depth': 4,
+                        'learning_rate': 0.1,
+                        'n_estimators': 50,
+                        'verbosity': 0,
+                        'random_state': 42
+                    }
+                else:
+                    # CTR-optimized XGBoost parameters
+                    return {
+                        'objective': 'binary:logistic',
+                        'eval_metric': 'logloss',
+                        'max_depth': 8,  # Deeper trees for complex patterns
+                        'learning_rate': 0.01,  # Lower for better convergence
+                        'n_estimators': 800,
+                        'subsample': 0.8,
+                        'colsample_bytree': 0.8,
+                        'min_child_weight': 10,  # Higher to prevent overfitting
+                        'reg_alpha': 0.1,
+                        'reg_lambda': 0.1,
+                        'gamma': 0.1,  # Minimum loss reduction
+                        'verbosity': 0,
+                        'random_state': 42,
+                        'early_stopping_rounds': 100
+                    }
+            
+            else:
+                logger.warning(f"Unknown model name: {model_name}")
+                return {}
+                
+        except Exception as e:
+            logger.error(f"Parameter optimization failed for {model_name}: {e}")
+            return {}
     
-    def _get_default_params(self, model_type: str) -> Dict[str, Any]:
-        """Get default parameters for each model type"""
-        
-        if model_type.lower() == 'lightgbm':
-            if self.quick_mode:
-                return {
-                    'objective': 'binary',
-                    'metric': 'binary_logloss',
-                    'boosting_type': 'gbdt',
-                    'num_leaves': 31,
-                    'learning_rate': 0.1,
-                    'feature_fraction': 0.8,
-                    'bagging_fraction': 0.8,
-                    'bagging_freq': 5,
-                    'min_child_samples': 20,
-                    'random_state': 42,
-                    'n_jobs': -1,
-                    'verbose': -1,
-                    'num_iterations': 50
-                }
+    def optimize_for_ctr_bias(self, params: Dict[str, Any], model_name: str, 
+                             ctr_bias: float) -> Dict[str, Any]:
+        """Adjust parameters based on CTR bias"""
+        try:
+            optimized_params = params.copy()
             
-            params = {
-                'objective': 'binary',
-                'metric': 'binary_logloss',
-                'boosting_type': 'gbdt',
-                'num_leaves': 64,
-                'learning_rate': 0.05,
-                'feature_fraction': 0.8,
-                'bagging_fraction': 0.8,
-                'bagging_freq': 5,
-                'min_child_samples': 20,
-                'min_child_weight': 0.001,
-                'min_split_gain': 0.02,
-                'reg_alpha': 0.1,
-                'reg_lambda': 0.1,
-                'random_state': 42,
-                'n_jobs': -1,
-                'verbose': -1,
-                'num_iterations': 500
-            }
+            # If over-predicting (positive bias), increase regularization
+            if ctr_bias > 0.01:
+                if model_name == 'logistic':
+                    optimized_params['C'] = min(optimized_params.get('C', 1.0) * 0.5, 0.001)
+                elif model_name == 'lightgbm':
+                    optimized_params['reg_alpha'] = optimized_params.get('reg_alpha', 0.0) + 0.1
+                    optimized_params['reg_lambda'] = optimized_params.get('reg_lambda', 0.0) + 0.1
+                    optimized_params['learning_rate'] = optimized_params.get('learning_rate', 0.1) * 0.8
+                elif model_name == 'xgboost':
+                    optimized_params['reg_alpha'] = optimized_params.get('reg_alpha', 0.0) + 0.1
+                    optimized_params['reg_lambda'] = optimized_params.get('reg_lambda', 0.0) + 0.1
+                    optimized_params['learning_rate'] = optimized_params.get('learning_rate', 0.1) * 0.8
             
-            if self.memory_tracker.gpu_available:
-                gpu_info = self.memory_tracker.get_gpu_memory_usage()
-                if gpu_info['rtx_4060_ti_optimized']:
-                    params.update({
-                        'device': 'gpu',
-                        'gpu_platform_id': 0,
-                        'gpu_device_id': 0
-                    })
+            # If under-predicting (negative bias), reduce regularization
+            elif ctr_bias < -0.01:
+                if model_name == 'logistic':
+                    optimized_params['C'] = optimized_params.get('C', 1.0) * 1.5
+                elif model_name == 'lightgbm':
+                    optimized_params['reg_alpha'] = max(optimized_params.get('reg_alpha', 0.1) - 0.05, 0.0)
+                    optimized_params['reg_lambda'] = max(optimized_params.get('reg_lambda', 0.1) - 0.05, 0.0)
+                elif model_name == 'xgboost':
+                    optimized_params['reg_alpha'] = max(optimized_params.get('reg_alpha', 0.1) - 0.05, 0.0)
+                    optimized_params['reg_lambda'] = max(optimized_params.get('reg_lambda', 0.1) - 0.05, 0.0)
             
+            logger.info(f"Parameter optimization for CTR bias {ctr_bias:.4f}: {model_name}")
+            
+            return optimized_params
+            
+        except Exception as e:
+            logger.warning(f"CTR bias optimization failed: {e}")
             return params
-        
-        elif model_type.lower() == 'xgboost':
-            if self.quick_mode:
-                return {
-                    'objective': 'binary:logistic',
-                    'eval_metric': 'logloss',
-                    'max_depth': 6,
-                    'learning_rate': 0.1,
-                    'subsample': 0.8,
-                    'colsample_bytree': 0.8,
-                    'random_state': 42,
-                    'n_jobs': -1,
-                    'n_estimators': 50
-                }
-            
-            params = {
-                'objective': 'binary:logistic',
-                'eval_metric': 'logloss',
-                'max_depth': 8,
-                'learning_rate': 0.05,
-                'subsample': 0.8,
-                'colsample_bytree': 0.8,
-                'random_state': 42,
-                'n_jobs': -1,
-                'n_estimators': 500
-            }
-            
-            if self.memory_tracker.gpu_available:
-                gpu_info = self.memory_tracker.get_gpu_memory_usage()
-                if gpu_info['rtx_4060_ti_optimized']:
-                    params.update({
-                        'tree_method': 'gpu_hist',
-                        'gpu_id': 0,
-                        'predictor': 'gpu_predictor'
-                    })
-            
-            return params
-        
-        elif model_type.lower() == 'logistic':
-            if self.quick_mode:
-                return {
-                    'C': 1.0,
-                    'penalty': 'l2',
-                    'solver': 'lbfgs',
-                    'max_iter': 100,
-                    'random_state': 42
-                }
-            
-            return {
-                'penalty': 'l2',
-                'C': 1.0,
-                'solver': 'liblinear',
-                'max_iter': 1000,
-                'random_state': 42,
-                'class_weight': 'balanced',
-                'n_jobs': -1
-            }
-        
-        return {}
 
 class CTRModelTrainer:
-    """Main trainer class for CTR models"""
+    """Main CTR model trainer with validation and calibration"""
     
     def __init__(self, config: Config):
         self.config = config
         self.memory_tracker = LargeDataMemoryTracker()
-        self.hyperparameter_optimizer = CTRHyperparameterOptimizer(config)
-        self.gpu_available = self.memory_tracker.gpu_available
-        self.quick_mode = False
-        self.trainer_initialized = False
+        self.validation_strategy = CTRValidationStrategy()
+        self.param_optimizer = CTRHyperparameterOptimizer()
+        
+        # Training state
         self.trained_models = {}
-        self.best_params = {}
         self.model_performance = {}
+        self.calibration_history = {}
+        self.quick_mode = False
+        
+        # Hardware detection
+        self.gpu_available = TORCH_AVAILABLE and torch.cuda.is_available()
+        logger.info(f"Trainer initialized - GPU available: {self.gpu_available}")
         
     def set_quick_mode(self, enabled: bool):
-        """Set quick mode for training"""
+        """Enable or disable quick mode"""
         self.quick_mode = enabled
-        self.hyperparameter_optimizer.set_quick_mode(enabled)
-        
-    def initialize_trainer(self):
-        """Initialize trainer with memory optimization"""
-        if not self.trainer_initialized:
-            self.memory_tracker.optimize_gpu_memory()
-            logger.info("Trainer initialization completed")
-            self.trainer_initialized = True
+        logger.info(f"Quick mode {'enabled' if enabled else 'disabled'}")
     
-    def _safe_train_validation_split(self, X: pd.DataFrame, y: pd.Series, 
-                                   test_size: float = 0.2, random_state: int = 42) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-        """Safe train validation split with proper class balance"""
-        try:
-            # Check class balance
-            unique_classes, class_counts = np.unique(y, return_counts=True)
-            min_class_count = min(class_counts) if len(class_counts) > 1 else len(y)
-            
-            # Ensure minimum samples for each class in validation
-            min_val_samples = max(100, int(len(y) * 0.05))
-            actual_test_size = min(test_size, min_val_samples / len(y))
-            
-            # Check if stratification is possible
-            if len(unique_classes) < 2 or min_class_count < 2:
-                logger.warning("Class imbalance detected - using simple split")
-                X_train, X_val, y_train, y_val = train_test_split(
-                    X, y, test_size=actual_test_size, random_state=random_state
-                )
-            else:
-                # Stratified split
-                X_train, X_val, y_train, y_val = train_test_split(
-                    X, y, test_size=actual_test_size, random_state=random_state, stratify=y
-                )
-            
-            # Validate the split results
-            if len(np.unique(y_val)) < 2:
-                logger.warning("Validation set has only one class - adjusting split")
-                
-                # Force balanced validation set
-                pos_indices = np.where(y == 1)[0]
-                neg_indices = np.where(y == 0)[0]
-                
-                if len(pos_indices) > 0 and len(neg_indices) > 0:
-                    # Take balanced samples for validation
-                    pos_val_size = min(len(pos_indices) // 20, 50)  # 5% of positives or max 50
-                    neg_val_size = min(len(neg_indices) // 20, 1000)  # 5% of negatives or max 1000
-                    
-                    if pos_val_size > 0 and neg_val_size > 0:
-                        val_pos_idx = np.random.choice(pos_indices, size=pos_val_size, replace=False)
-                        val_neg_idx = np.random.choice(neg_indices, size=neg_val_size, replace=False)
-                        val_indices = np.concatenate([val_pos_idx, val_neg_idx])
-                        train_indices = np.setdiff1d(np.arange(len(y)), val_indices)
-                        
-                        X_train = X.iloc[train_indices]
-                        X_val = X.iloc[val_indices]
-                        y_train = y.iloc[train_indices]
-                        y_val = y.iloc[val_indices]
-            
-            # Final validation
-            logger.info(f"Data split - Train: {len(y_train)}, Val: {len(y_val)}")
-            logger.info(f"Train CTR: {y_train.mean():.4f}, Val CTR: {y_val.mean():.4f}")
-            logger.info(f"Val classes: {len(np.unique(y_val))}")
-            
-            return X_train, X_val, y_train, y_val
-            
-        except Exception as e:
-            logger.error(f"Train validation split failed: {e}")
-            # Fallback to simple split
-            split_point = int(len(X) * (1 - test_size))
-            return X.iloc[:split_point], X.iloc[split_point:], y.iloc[:split_point], y.iloc[split_point:]
+    def get_default_params_by_model_type(self, model_name: str) -> Dict[str, Any]:
+        """Get default parameters optimized for CTR prediction"""
+        return self.param_optimizer.get_optimized_params(model_name, self.quick_mode)
     
-    def train_model(self,
-                    model_class: Type,
-                    model_name: str,
-                    X_train: pd.DataFrame,
-                    y_train: pd.Series,
-                    X_val: Optional[pd.DataFrame] = None,
-                    y_val: Optional[pd.Series] = None) -> Optional[Any]:
-        """Train individual model with proper validation data"""
-        
-        logger.info(f"Starting {model_name} model training")
-        
+    def train_logistic_regression(self, X_train: pd.DataFrame, y_train: pd.Series,
+                                X_val: pd.DataFrame, y_val: pd.Series) -> Tuple[Any, Dict[str, float]]:
+        """Train logistic regression model with CTR optimization"""
         try:
-            start_time = time.time()
-            
-            # Initialize if needed
-            self.initialize_trainer()
-            
-            # Memory cleanup
-            self.memory_tracker.force_cleanup()
-            logger.info("GPU memory cache cleared")
-            
-            # Memory status check
-            memory_status = self.memory_tracker.get_memory_status()
-            logger.info(f"Pre-training memory: {memory_status['available_gb']:.1f}GB available")
-            
-            # Prepare validation data with proper split
-            if X_val is None or y_val is None:
-                logger.info("Creating train/validation split for proper calibration")
-                X_train_split, X_val_split, y_train_split, y_val_split = self._safe_train_validation_split(
-                    X_train, y_train, test_size=0.2, random_state=42
-                )
-            else:
-                X_train_split, y_train_split = X_train, y_train
-                X_val_split, y_val_split = X_val, y_val
-                logger.info("Using provided validation data")
-            
-            # Validate validation data
-            if len(np.unique(y_val_split)) < 2:
-                logger.error("Validation data has only one class - cannot proceed with calibration")
-                X_val_split, y_val_split = None, None
-            else:
-                logger.info(f"Validation data ready: {len(y_val_split)} samples, CTR: {y_val_split.mean():.4f}")
+            logger.info("Training logistic regression model")
             
             # Get optimized parameters
-            best_params = self.hyperparameter_optimizer._get_default_params(model_name)
-            if not best_params:
-                logger.warning(f"Using default parameters for {model_name}")
-                best_params = {}
-            else:
-                logger.info(f"Using optimized parameters for {model_name}")
+            params = self.get_default_params_by_model_type('logistic')
             
-            # Train final model with validation data
-            logger.info(f"Training final {model_name} model with calibration support")
-            model = model_class()
+            # Scale features
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_val_scaled = scaler.transform(X_val)
             
-            if hasattr(model, 'set_quick_mode'):
-                model.set_quick_mode(self.quick_mode)
+            # Train model
+            model = LogisticRegression(**params)
+            model.fit(X_train_scaled, y_train)
             
-            # Train model with proper validation data passing
-            try:
-                if hasattr(model, 'fit') and X_val_split is not None and y_val_split is not None:
-                    # Pass validation data for calibration
-                    model.fit(X_train_split, y_train_split, X_val_split, y_val_split)
-                    logger.info(f"{model_name}: Model trained with calibration support")
-                elif hasattr(model, 'fit'):
-                    # Train without validation data
-                    model.fit(X_train_split, y_train_split)
-                    logger.warning(f"{model_name}: Model trained without calibration")
-                else:
-                    logger.error(f"{model_name}: Model does not have fit method")
-                    return None
-            except Exception as e:
-                logger.error(f"{model_name}: Model training failed: {e}")
-                return None
+            # Predictions and calibration
+            val_pred_proba = model.predict_proba(X_val_scaled)[:, 1]
             
-            # Calculate performance on validation set
-            try:
-                if X_val_split is not None and y_val_split is not None:
-                    if hasattr(model, 'predict_proba'):
-                        y_pred_proba = model.predict_proba(X_val_split)
-                        if len(y_pred_proba.shape) > 1 and y_pred_proba.shape[1] > 1:
-                            y_pred_proba = y_pred_proba[:, 1]
-                    else:
-                        y_pred_proba = model.predict(X_val_split)
-                    
-                    # Calculate metrics
-                    auc = roc_auc_score(y_val_split, y_pred_proba) if len(np.unique(y_val_split)) > 1 else 0.5
-                    ap = average_precision_score(y_val_split, y_pred_proba)
-                    logloss = log_loss(y_val_split, np.clip(y_pred_proba, 1e-15, 1-1e-15))
-                    
-                    self.model_performance[model_name] = {
-                        'auc': auc,
-                        'average_precision': ap,
-                        'logloss': logloss,
-                        'validation_samples': len(y_val_split),
-                        'validation_ctr': float(y_val_split.mean())
-                    }
-                    
-                    logger.info(f"{model_name} validation performance:")
-                    logger.info(f"  AUC: {auc:.4f}")
-                    logger.info(f"  AP: {ap:.4f}")
-                    logger.info(f"  Log Loss: {logloss:.4f}")
-                    logger.info(f"  Validation CTR: {float(y_val_split.mean()):.4f}")
-                else:
-                    logger.warning(f"{model_name}: No validation data for performance calculation")
-                    self.model_performance[model_name] = {'error': 'no_validation_data'}
-                
-            except Exception as e:
-                logger.warning(f"Performance calculation failed for {model_name}: {e}")
-                self.model_performance[model_name] = {'error': str(e)}
+            # CTR-focused calibration
+            calibrated_model = self._calibrate_model_for_ctr(
+                model, X_val_scaled, y_val, val_pred_proba
+            )
             
-            # Store trained model
-            training_time = time.time() - start_time
-            self.trained_models[model_name] = {
-                'model': model,
-                'params': best_params,
-                'performance': self.model_performance.get(model_name, {}),
-                'training_time': training_time,
-                'gpu_trained': self.gpu_available,
-                'calibration_available': X_val_split is not None and y_val_split is not None
+            # Evaluate performance
+            performance = self._evaluate_model_performance(y_val, val_pred_proba, 'logistic')
+            
+            # Store scaler with model
+            model_package = {
+                'model': calibrated_model if calibrated_model else model,
+                'scaler': scaler,
+                'performance': performance
             }
             
-            logger.info(f"{model_name} model training completed successfully in {training_time:.2f}s")
-            return model
+            return model_package, performance
             
         except Exception as e:
-            logger.error(f"{model_name} model training failed: {e}")
+            logger.error(f"Logistic regression training failed: {e}")
+            return None, {}
+    
+    def train_lightgbm(self, X_train: pd.DataFrame, y_train: pd.Series,
+                      X_val: pd.DataFrame, y_val: pd.Series) -> Tuple[Any, Dict[str, float]]:
+        """Train LightGBM model with CTR optimization"""
+        try:
+            if not LIGHTGBM_AVAILABLE:
+                logger.error("LightGBM not available")
+                return None, {}
+            
+            logger.info("Training LightGBM model")
+            
+            # Get optimized parameters
+            params = self.get_default_params_by_model_type('lightgbm')
+            
+            # Prepare datasets
+            train_data = lgb.Dataset(X_train, label=y_train)
+            val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+            
+            # Train model
+            model = lgb.train(
+                params,
+                train_data,
+                valid_sets=[train_data, val_data],
+                callbacks=[lgb.log_evaluation(0)]  # Silent training
+            )
+            
+            # Predictions and calibration
+            val_pred_proba = model.predict(X_val, num_iteration=model.best_iteration)
+            
+            # CTR-focused calibration
+            calibrated_model = self._calibrate_model_for_ctr(
+                model, X_val, y_val, val_pred_proba, model_type='lightgbm'
+            )
+            
+            # Evaluate performance
+            performance = self._evaluate_model_performance(y_val, val_pred_proba, 'lightgbm')
+            
+            model_package = {
+                'model': calibrated_model if calibrated_model else model,
+                'performance': performance
+            }
+            
+            return model_package, performance
+            
+        except Exception as e:
+            logger.error(f"LightGBM training failed: {e}")
+            return None, {}
+    
+    def train_xgboost(self, X_train: pd.DataFrame, y_train: pd.Series,
+                     X_val: pd.DataFrame, y_val: pd.Series) -> Tuple[Any, Dict[str, float]]:
+        """Train XGBoost model with CTR optimization"""
+        try:
+            if not XGBOOST_AVAILABLE:
+                logger.error("XGBoost not available")
+                return None, {}
+            
+            logger.info("Training XGBoost model")
+            
+            # Get optimized parameters and adjust for class imbalance
+            params = self.get_default_params_by_model_type('xgboost')
+            
+            # Calculate scale_pos_weight for class imbalance
+            pos_count = (y_train == 1).sum()
+            neg_count = (y_train == 0).sum()
+            if pos_count > 0:
+                params['scale_pos_weight'] = neg_count / pos_count
+            
+            # Train model
+            model = xgb.XGBClassifier(**params)
+            model.fit(
+                X_train, y_train,
+                eval_set=[(X_train, y_train), (X_val, y_val)],
+                verbose=False
+            )
+            
+            # Predictions and calibration
+            val_pred_proba = model.predict_proba(X_val)[:, 1]
+            
+            # CTR-focused calibration
+            calibrated_model = self._calibrate_model_for_ctr(
+                model, X_val, y_val, val_pred_proba, model_type='xgboost'
+            )
+            
+            # Evaluate performance
+            performance = self._evaluate_model_performance(y_val, val_pred_proba, 'xgboost')
+            
+            model_package = {
+                'model': calibrated_model if calibrated_model else model,
+                'performance': performance
+            }
+            
+            return model_package, performance
+            
+        except Exception as e:
+            logger.error(f"XGBoost training failed: {e}")
+            return None, {}
+    
+    def _calibrate_model_for_ctr(self, model: Any, X_val: np.ndarray, y_val: pd.Series, 
+                               val_pred_proba: np.ndarray, model_type: str = 'sklearn') -> Any:
+        """CTR-focused model calibration"""
+        try:
+            # Check if sufficient validation data
+            if len(y_val) < 50:
+                logger.warning("Insufficient validation data for calibration")
+                return None
+            
+            # Calculate CTR bias
+            actual_ctr = y_val.mean()
+            predicted_ctr = val_pred_proba.mean()
+            ctr_bias = predicted_ctr - actual_ctr
+            
+            logger.info(f"Pre-calibration CTR - Actual: {actual_ctr:.4f}, Predicted: {predicted_ctr:.4f}, Bias: {ctr_bias:.4f}")
+            
+            # Apply calibration if bias is significant
+            if abs(ctr_bias) > 0.005:  # Calibrate if bias > 0.5%
+                try:
+                    if model_type == 'sklearn' or model_type == 'xgboost':
+                        # Use CalibratedClassifierCV for sklearn-compatible models
+                        calibrated = CalibratedClassifierCV(model, method='isotonic', cv=3)
+                        
+                        # Fit on validation data (in practice, use separate calibration set)
+                        calibrated.fit(X_val, y_val)
+                        
+                        # Test calibration quality
+                        calibrated_proba = calibrated.predict_proba(X_val)[:, 1]
+                        calibrated_ctr = calibrated_proba.mean()
+                        calibrated_bias = calibrated_ctr - actual_ctr
+                        
+                        logger.info(f"Post-calibration CTR - Predicted: {calibrated_ctr:.4f}, Bias: {calibrated_bias:.4f}")
+                        
+                        if abs(calibrated_bias) < abs(ctr_bias):
+                            logger.info("Calibration improved CTR prediction")
+                            return calibrated
+                        else:
+                            logger.warning("Calibration did not improve CTR prediction")
+                            return None
+                    
+                    else:  # LightGBM or other models
+                        # Simple linear calibration
+                        correction_factor = actual_ctr / predicted_ctr if predicted_ctr > 0 else 1.0
+                        
+                        # Create wrapper for calibrated predictions
+                        class CalibratedLGBModel:
+                            def __init__(self, base_model, correction_factor):
+                                self.base_model = base_model
+                                self.correction_factor = correction_factor
+                                
+                            def predict(self, X, **kwargs):
+                                raw_pred = self.base_model.predict(X, **kwargs)
+                                return np.clip(raw_pred * self.correction_factor, 0, 1)
+                        
+                        calibrated_model = CalibratedLGBModel(model, correction_factor)
+                        logger.info(f"Applied linear calibration with factor: {correction_factor:.4f}")
+                        return calibrated_model
+                        
+                except Exception as e:
+                    logger.warning(f"Calibration failed: {e}")
+                    return None
+            else:
+                logger.info("CTR bias within acceptable range, no calibration needed")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Model calibration failed: {e}")
             return None
     
-    def train_multiple_models(self,
-                            model_configs: List[Dict[str, Any]],
-                            X_train: pd.DataFrame,
-                            y_train: pd.Series,
-                            X_val: Optional[pd.DataFrame] = None,
-                            y_val: Optional[pd.Series] = None) -> Dict[str, Any]:
-        """Train multiple models with proper validation handling"""
-        
-        logger.info(f"Training {len(model_configs)} models with validation data")
-        trained_models = {}
-        
-        # Create validation split if not provided
-        if X_val is None or y_val is None:
-            logger.info("Creating global train/validation split")
-            X_train_global, X_val_global, y_train_global, y_val_global = self._safe_train_validation_split(
-                X_train, y_train, test_size=0.2, random_state=42
-            )
-        else:
-            X_train_global, y_train_global = X_train, y_train
-            X_val_global, y_val_global = X_val, y_val
-            logger.info("Using provided validation data")
-        
-        for config in model_configs:
-            model_name = config['name']
-            model_class = config['class']
+    def _evaluate_model_performance(self, y_true: pd.Series, y_pred_proba: np.ndarray, 
+                                  model_name: str) -> Dict[str, float]:
+        """Comprehensive model performance evaluation"""
+        try:
+            performance = {}
+            
+            # Basic classification metrics
+            try:
+                performance['auc'] = roc_auc_score(y_true, y_pred_proba)
+            except:
+                performance['auc'] = 0.5
             
             try:
-                model = self.train_model(
-                    model_class=model_class,
-                    model_name=model_name,
-                    X_train=X_train_global,
-                    y_train=y_train_global,
-                    X_val=X_val_global,
-                    y_val=y_val_global
-                )
-                
-                if model:
-                    trained_models[model_name] = model
-                
-            except Exception as e:
-                logger.error(f"Training failed for {model_name}: {e}")
-                continue
-        
-        logger.info(f"Multiple models training completed - Successful: {len(trained_models)}")
-        
-        return trained_models
+                performance['avg_precision'] = average_precision_score(y_true, y_pred_proba)
+            except:
+                performance['avg_precision'] = y_true.mean()
+            
+            try:
+                performance['log_loss'] = log_loss(y_true, y_pred_proba)
+            except:
+                performance['log_loss'] = 1.0
+            
+            # CTR-specific metrics
+            actual_ctr = y_true.mean()
+            predicted_ctr = y_pred_proba.mean()
+            target_ctr = 0.0191
+            
+            performance.update({
+                'actual_ctr': actual_ctr,
+                'predicted_ctr': predicted_ctr,
+                'ctr_bias': predicted_ctr - actual_ctr,
+                'ctr_absolute_error': abs(predicted_ctr - actual_ctr),
+                'target_alignment': abs(predicted_ctr - target_ctr),
+                'ctr_relative_error': abs(predicted_ctr - actual_ctr) / max(actual_ctr, 0.001)
+            })
+            
+            # Combined score for CTR prediction
+            auc_score = performance['auc']
+            ap_score = performance['avg_precision']
+            ctr_alignment_score = max(0, 1 - performance['target_alignment'] / 0.02)
+            log_loss_score = max(0, 1 - performance['log_loss'] / 2.0)
+            
+            # Weighted combination emphasizing CTR alignment
+            performance['combined_score'] = (
+                0.3 * auc_score + 
+                0.2 * ap_score + 
+                0.4 * ctr_alignment_score + 
+                0.1 * log_loss_score
+            )
+            
+            # Binary classification metrics
+            y_pred_binary = (y_pred_proba >= 0.5).astype(int)
+            performance['accuracy'] = (y_pred_binary == y_true).mean()
+            
+            # Precision and Recall
+            tp = ((y_pred_binary == 1) & (y_true == 1)).sum()
+            fp = ((y_pred_binary == 1) & (y_true == 0)).sum()
+            fn = ((y_pred_binary == 0) & (y_true == 1)).sum()
+            
+            performance['precision'] = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            performance['recall'] = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            
+            logger.info(f"{model_name} Performance: AUC={performance['auc']:.3f}, "
+                       f"AP={performance['avg_precision']:.3f}, "
+                       f"CTR_bias={performance['ctr_bias']:.4f}, "
+                       f"Combined={performance['combined_score']:.3f}")
+            
+            return performance
+            
+        except Exception as e:
+            logger.error(f"Performance evaluation failed: {e}")
+            return {'combined_score': 0.0, 'auc': 0.5}
     
-    def get_default_params_by_model_type(self, model_type: str) -> Dict[str, Any]:
-        """Get default parameters by model type"""
-        return self.hyperparameter_optimizer._get_default_params(model_type)
+    def train_multiple_models(self, model_configs: List[Dict[str, Any]], 
+                            X_train: pd.DataFrame, y_train: pd.Series,
+                            X_val: Optional[pd.DataFrame] = None,
+                            y_val: Optional[pd.Series] = None) -> Dict[str, Any]:
+        """Train multiple models with proper validation"""
+        try:
+            logger.info(f"Training {len(model_configs)} models")
+            
+            # Create validation split if not provided
+            if X_val is None or y_val is None:
+                logger.info("Creating validation split")
+                splits = self.validation_strategy.create_stratified_splits(X_train, y_train)
+                train_idx, val_idx = splits[0]  # Use first split
+                
+                X_train_split = X_train.iloc[train_idx]
+                y_train_split = y_train.iloc[train_idx]
+                X_val = X_train.iloc[val_idx]
+                y_val = y_train.iloc[val_idx]
+            else:
+                X_train_split = X_train
+                y_train_split = y_train
+            
+            # Validate split quality
+            split_quality = self.validation_strategy.validate_split_quality(y_train_split, y_val)
+            logger.info(f"Split quality score: {split_quality.get('overall_quality', 0):.3f}")
+            
+            trained_models = {}
+            
+            # Train each model
+            for config in model_configs:
+                model_name = config.get('name', 'unknown')
+                
+                try:
+                    logger.info(f"Starting {model_name} training")
+                    
+                    # Memory cleanup before each model
+                    self.memory_tracker.force_cleanup()
+                    
+                    # Train based on model type
+                    if model_name == 'logistic':
+                        model_result, performance = self.train_logistic_regression(
+                            X_train_split, y_train_split, X_val, y_val
+                        )
+                    elif model_name == 'lightgbm':
+                        model_result, performance = self.train_lightgbm(
+                            X_train_split, y_train_split, X_val, y_val
+                        )
+                    elif model_name == 'xgboost':
+                        model_result, performance = self.train_xgboost(
+                            X_train_split, y_train_split, X_val, y_val
+                        )
+                    else:
+                        logger.warning(f"Unknown model type: {model_name}")
+                        continue
+                    
+                    if model_result is not None:
+                        trained_models[model_name] = model_result
+                        self.model_performance[model_name] = performance
+                        logger.info(f"{model_name} training completed successfully")
+                    else:
+                        logger.error(f"{model_name} training failed")
+                    
+                except Exception as e:
+                    logger.error(f"{model_name} training failed: {e}")
+                    continue
+            
+            logger.info(f"Model training completed. Successful models: {list(trained_models.keys())}")
+            self.trained_models = trained_models
+            
+            return trained_models
+            
+        except Exception as e:
+            logger.error(f"Multiple model training failed: {e}")
+            return {}
+    
+    def get_best_model(self) -> Tuple[str, Any]:
+        """Get the best performing model"""
+        try:
+            if not self.model_performance:
+                return None, None
+            
+            # Find best model based on combined score
+            best_model_name = max(
+                self.model_performance.items(),
+                key=lambda x: x[1].get('combined_score', 0)
+            )[0]
+            
+            best_model = self.trained_models.get(best_model_name)
+            
+            logger.info(f"Best model: {best_model_name} "
+                       f"(Combined Score: {self.model_performance[best_model_name].get('combined_score', 0):.3f})")
+            
+            return best_model_name, best_model
+            
+        except Exception as e:
+            logger.error(f"Best model selection failed: {e}")
+            return None, None
+    
+    def save_models(self, output_dir: str = "models") -> bool:
+        """Save trained models and performance metrics"""
+        try:
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            
+            saved_count = 0
+            
+            # Save each model
+            for model_name, model_data in self.trained_models.items():
+                model_file = output_path / f"{model_name}_model.pkl"
+                
+                try:
+                    with open(model_file, 'wb') as f:
+                        pickle.dump(model_data, f)
+                    saved_count += 1
+                    logger.info(f"Saved {model_name} model to {model_file}")
+                except Exception as e:
+                    logger.error(f"Failed to save {model_name}: {e}")
+            
+            # Save performance metrics
+            performance_file = output_path / "model_performance.json"
+            try:
+                with open(performance_file, 'w') as f:
+                    json.dump(self.model_performance, f, indent=2)
+                logger.info(f"Saved performance metrics to {performance_file}")
+            except Exception as e:
+                logger.error(f"Failed to save performance metrics: {e}")
+            
+            logger.info(f"Successfully saved {saved_count}/{len(self.trained_models)} models")
+            return saved_count > 0
+            
+        except Exception as e:
+            logger.error(f"Model saving failed: {e}")
+            return False
     
     def get_training_summary(self) -> Dict[str, Any]:
         """Get comprehensive training summary"""
-        calibrated_base_models = sum(
-            1 for model_data in self.trained_models.values() 
-            if model_data.get('calibration_available', False)
-        )
-        
-        avg_performance = {}
-        if self.model_performance:
-            metrics = ['auc', 'average_precision', 'logloss']
-            for metric in metrics:
-                values = [
-                    perf.get(metric, 0) for perf in self.model_performance.values() 
-                    if isinstance(perf, dict) and metric in perf
-                ]
-                avg_performance[f'avg_{metric}'] = np.mean(values) if values else 0.0
-        
-        return {
-            'total_models_trained': len(self.trained_models),
-            'calibration_ready_models': calibrated_base_models,
-            'calibration_rate': calibrated_base_models / max(len(self.trained_models), 1),
-            'model_performance': self.model_performance,
-            'average_performance': avg_performance,
-            'quick_mode': self.quick_mode,
-            'gpu_used': self.gpu_available,
-            'training_completed': True
-        }
+        try:
+            calibrated_base_models = 0
+            for model_name, model_data in self.trained_models.items():
+                if isinstance(model_data, dict) and 'model' in model_data:
+                    model = model_data['model']
+                    if hasattr(model, 'calibrated_classifiers_') or 'Calibrated' in str(type(model)):
+                        calibrated_base_models += 1
+            
+            # Calculate average performance metrics
+            avg_performance = {}
+            if self.model_performance:
+                for metric in ['auc', 'combined_score', 'ctr_absolute_error', 'target_alignment']:
+                    values = [
+                        perf.get(metric, 0) for perf in self.model_performance.values() 
+                        if isinstance(perf, dict) and metric in perf
+                    ]
+                    avg_performance[f'avg_{metric}'] = np.mean(values) if values else 0.0
+            
+            return {
+                'total_models_trained': len(self.trained_models),
+                'calibration_ready_models': calibrated_base_models,
+                'calibration_rate': calibrated_base_models / max(len(self.trained_models), 1),
+                'model_performance': self.model_performance,
+                'average_performance': avg_performance,
+                'quick_mode': self.quick_mode,
+                'gpu_used': self.gpu_available,
+                'training_completed': True
+            }
+            
+        except Exception as e:
+            logger.error(f"Training summary generation failed: {e}")
+            return {'training_completed': False, 'error': str(e)}
 
 class CTRTrainingPipeline:
     """Complete CTR training pipeline"""
@@ -660,253 +960,79 @@ class CTRTrainer(CTRModelTrainer):
             logger.info(f"Training final {model_name} model")
             
             if model_name == 'logistic':
-                from models import LogisticModel
-                model = LogisticModel()
-                if hasattr(model, 'set_quick_mode'):
-                    model.set_quick_mode(quick_mode)
-                logger.info(f"{model_name}: Quick mode enabled - simplified parameters")
+                from sklearn.linear_model import LogisticRegression
+                from sklearn.preprocessing import StandardScaler
+                
+                # Scale features
+                scaler = StandardScaler()
+                X_train_scaled = scaler.fit_transform(X_train)
+                X_val_scaled = scaler.transform(X_val)
+                
+                # Train model
+                model = LogisticRegression(**params)
+                model.fit(X_train_scaled, y_train)
+                
+                # Get predictions
+                val_pred_proba = model.predict_proba(X_val_scaled)[:, 1]
+                
+                # Evaluate performance
+                performance = self._evaluate_model_performance(y_val, val_pred_proba, model_name)
+                
+                # Package model with scaler
+                model_package = {'model': model, 'scaler': scaler}
+                
+                return model_package, performance
                 
             elif model_name == 'lightgbm' and LIGHTGBM_AVAILABLE:
-                from models import LightGBMModel
-                model = LightGBMModel()
-                if hasattr(model, 'set_quick_mode'):
-                    model.set_quick_mode(quick_mode)
-                    
-            elif model_name == 'xgboost' and XGBOOST_AVAILABLE:
-                from models import XGBoostModel
-                model = XGBoostModel()
-                if hasattr(model, 'set_quick_mode'):
-                    model.set_quick_mode(quick_mode)
-            else:
-                # Fallback to LogisticRegression
-                model = LogisticRegression(**params)
-            
-            logger.info(f"{model_name} model training started (data: {len(X_train)})")
-            logger.info(f"{model_name}: Quick mode parameters applied")
-            logger.info(f"{model_name}: Starting training")
-            
-            # Train the model with validation data for calibration
-            if hasattr(model, 'fit') and X_val is not None and y_val is not None:
-                # Check validation data quality
-                if len(np.unique(y_val)) < 2:
-                    logger.warning(f"{model_name}: Validation data has only one class")
-                    model.fit(X_train, y_train)
-                    logger.warning(f"{model_name}: Training without calibration")
-                else:
-                    model.fit(X_train, y_train, X_val, y_val)
-                    logger.info(f"{model_name}: Training with calibration support")
-            elif hasattr(model, 'fit'):
-                model.fit(X_train, y_train)
-                logger.warning(f"{model_name}: Training without validation data")
-            else:
-                raise ValueError(f"{model_name}: Model does not have fit method")
-            
-            logger.info(f"{model_name}: Training completed successfully")
-            
-            # Calculate performance with proper validation
-            try:
-                if X_val is not None and y_val is not None and len(np.unique(y_val)) >= 2:
-                    if hasattr(model, 'predict_proba'):
-                        y_pred_proba = model.predict_proba(X_val)
-                        if len(y_pred_proba.shape) > 1 and y_pred_proba.shape[1] > 1:
-                            y_pred_proba = y_pred_proba[:, 1]
-                    else:
-                        y_pred_proba = model.predict(X_val)
-                    
-                    # Calculate metrics
-                    auc = roc_auc_score(y_val, y_pred_proba)
-                    ap = average_precision_score(y_val, y_pred_proba)
-                    
-                    performance = {'auc': auc, 'ap': ap}
-                    logger.info(f"{model_name} performance - AUC: {auc:.4f}, AP: {ap:.4f}")
-                else:
-                    logger.warning(f"{model_name}: Using dummy performance metrics")
-                    performance = {'auc': 0.5, 'ap': 0.02}
+                # Train LightGBM
+                train_data = lgb.Dataset(X_train, label=y_train)
+                val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
                 
-            except Exception as e:
-                logger.warning(f"Performance calculation failed: {e}")
-                performance = {'auc': 0.5, 'ap': 0.02}
+                model = lgb.train(
+                    params,
+                    train_data,
+                    valid_sets=[train_data, val_data],
+                    callbacks=[lgb.log_evaluation(0)]
+                )
+                
+                val_pred_proba = model.predict(X_val, num_iteration=model.best_iteration)
+                performance = self._evaluate_model_performance(y_val, val_pred_proba, model_name)
+                
+                return model, performance
+                
+            elif model_name == 'xgboost' and XGBOOST_AVAILABLE:
+                # Calculate class weight for imbalanced data
+                pos_count = (y_train == 1).sum()
+                neg_count = (y_train == 0).sum()
+                if pos_count > 0:
+                    params['scale_pos_weight'] = neg_count / pos_count
+                
+                model = xgb.XGBClassifier(**params)
+                model.fit(
+                    X_train, y_train,
+                    eval_set=[(X_train, y_train), (X_val, y_val)],
+                    verbose=False
+                )
+                
+                val_pred_proba = model.predict_proba(X_val)[:, 1]
+                performance = self._evaluate_model_performance(y_val, val_pred_proba, model_name)
+                
+                return model, performance
             
-            logger.info(f"{model_name} model training completed successfully")
-            return model, performance
-            
+            else:
+                logger.error(f"Model {model_name} not available or not supported")
+                return None, {}
+                
         except Exception as e:
             logger.error(f"{model_name} model training failed: {e}")
             return None, {}
-    
-    def train(self, X_train, y_train, X_val=None, y_val=None):
-        """Training interface for compatibility"""
-        if X_val is None or y_val is None:
-            X_train, X_val, y_train, y_val = self._safe_train_validation_split(
-                X_train, y_train, test_size=0.2, random_state=42
-            )
-        
-        # Use LogisticRegression as default model
-        model = LogisticRegression(**self.get_default_params_by_model_type('logistic'))
-        
-        # Train with validation if available
-        if hasattr(model, 'fit') and X_val is not None and y_val is not None:
-            try:
-                model.fit(X_train, y_train)
-            except Exception as e:
-                logger.error(f"Model training failed: {e}")
-                model.fit(X_train, y_train)
-        else:
-            model.fit(X_train, y_train)
-        
-        return model
 
-class CTRTrainerGPU(CTRModelTrainer):
-    """GPU-optimized CTR trainer class"""
-    
-    def __init__(self, config: Config = Config):
-        super().__init__(config)
-        self.name = "CTRTrainerGPU"
-        
-        if not self.gpu_available:
-            logger.warning("GPU not available, falling back to CPU mode")
-        else:
-            logger.info("CTR Trainer GPU initialized (RTX 4060 Ti mode)")
-    
-    def get_available_models(self) -> List[str]:
-        """Get list of available models"""
-        available_models = ['logistic']
-        
-        if LIGHTGBM_AVAILABLE:
-            available_models.append('lightgbm')
-        
-        if XGBOOST_AVAILABLE:
-            available_models.append('xgboost')
-        
-        return available_models
-    
-    def enable_gpu_optimization(self):
-        """Enable GPU optimization"""
-        if self.gpu_available:
-            self.memory_tracker.optimize_gpu_memory()
-            logger.info("RTX 4060 Ti GPU optimization enabled")
-        else:
-            logger.warning("GPU not available, using CPU mode")
-    
-    def train_model(self, model_name: str, X_train: pd.DataFrame, y_train: pd.Series,
-                   X_val: pd.DataFrame, y_val: pd.Series, quick_mode: bool = False) -> Tuple[Any, Dict[str, float]]:
-        """Train model with GPU optimization"""
-        
-        logger.info(f"Starting {model_name} model training")
-        
-        try:
-            # Enable GPU optimization
-            self.enable_gpu_optimization()
-            
-            # Set quick mode
-            if quick_mode:
-                self.set_quick_mode(True)
-            
-            # Use parent class method but with GPU optimizations and validation
-            return super().train_model(model_name, X_train, y_train, X_val, y_val, quick_mode)
-            
-        except Exception as e:
-            logger.error(f"GPU {model_name} training failed, falling back to CPU: {e}")
-            
-            # Fallback to CPU training with validation
-            params = self.get_default_params_by_model_type(model_name)
-            model = LogisticRegression(**params)
-            
-            try:
-                if X_val is not None and y_val is not None and len(np.unique(y_val)) >= 2:
-                    model.fit(X_train, y_train)
-                else:
-                    model.fit(X_train, y_train)
-            except Exception as fit_error:
-                logger.error(f"CPU fallback training failed: {fit_error}")
-                model.fit(X_train, y_train)
-            
-            # Simple performance calculation
-            try:
-                if X_val is not None and y_val is not None and len(np.unique(y_val)) >= 2:
-                    y_pred_proba = model.predict_proba(X_val)[:, 1]
-                    auc = roc_auc_score(y_val, y_pred_proba)
-                    ap = average_precision_score(y_val, y_pred_proba)
-                    performance = {'auc': auc, 'ap': ap}
-                else:
-                    performance = {'auc': 0.5, 'ap': 0.02}
-            except Exception:
-                performance = {'auc': 0.5, 'ap': 0.02}
-            
-            return model, performance
-    
-    def train(self, X_train, y_train, X_val=None, y_val=None):
-        """Training interface with GPU optimization"""
-        if X_val is None or y_val is None:
-            X_train, X_val, y_train, y_val = self._safe_train_validation_split(
-                X_train, y_train, test_size=0.2, random_state=42
-            )
-        
-        # Use GPU-optimized parameters if available
-        if self.gpu_available:
-            # Try to use GPU-accelerated model if available
-            try:
-                # Default to logistic regression with GPU-friendly settings
-                params = self.get_default_params_by_model_type('logistic')
-                params.update({
-                    'n_jobs': -1,  # Use all available cores
-                    'max_iter': 2000 if not self.quick_mode else 100
-                })
-                model = LogisticRegression(**params)
-                model.fit(X_train, y_train)
-                return model
-                
-            except Exception as e:
-                logger.warning(f"GPU training failed, falling back to CPU: {e}")
-        
-        # Fallback to CPU training
-        model = LogisticRegression(**self.get_default_params_by_model_type('logistic'))
-        model.fit(X_train, y_train)
-        
-        return model
-
-# Legacy aliases for backward compatibility
-ModelTrainer = CTRModelTrainer
-TrainingPipeline = CTRTrainingPipeline
-
-if __name__ == "__main__":
-    # Test code for development
-    logging.basicConfig(level=logging.INFO)
-    
-    try:
-        # Create dummy data for testing
-        X_train = pd.DataFrame({
-            'feature_1': np.random.randn(100),
-            'feature_2': np.random.randn(100),
-            'feature_3': np.random.randint(0, 10, 100)
-        })
-        y_train = np.random.binomial(1, 0.1, 100)
-        
-        X_val = pd.DataFrame({
-            'feature_1': np.random.randn(50),
-            'feature_2': np.random.randn(50),
-            'feature_3': np.random.randint(0, 10, 50)
-        })
-        y_val = np.random.binomial(1, 0.1, 50)
-        
-        config = Config()
-        
-        # Test basic trainer
-        print("Testing CTRTrainer...")
-        trainer = CTRTrainer(config)
-        trainer.set_quick_mode(True)
-        available_models = trainer.get_available_models()
-        print(f"Available models: {available_models}")
-        
-        model = trainer.train(X_train, y_train, X_val, y_val)
-        print(f"Basic trainer completed: {type(model)}")
-        
-        # Test GPU trainer
-        print("Testing CTRTrainerGPU...")
-        gpu_trainer = CTRTrainerGPU(config)
-        gpu_trainer.set_quick_mode(True)
-        gpu_model = gpu_trainer.train(X_train, y_train, X_val, y_val)
-        print(f"GPU trainer completed: {type(gpu_model)}")
-        
-    except Exception as e:
-        logger.error(f"Test execution failed: {e}")
+# Export for compatibility
+__all__ = [
+    'CTRTrainer', 
+    'CTRModelTrainer', 
+    'CTRTrainingPipeline', 
+    'LargeDataMemoryTracker',
+    'CTRValidationStrategy',
+    'CTRHyperparameterOptimizer'
+]
