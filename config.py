@@ -1,25 +1,30 @@
 # config.py
 
 import os
+import sys
 from pathlib import Path
+import psutil
 import logging
 
-# PyTorch import safe handling
-try:
-    import torch
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-    logging.warning("PyTorch not installed. GPU functions will be disabled.")
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('logs/ctr_modeling.log', encoding='utf-8')
+    ]
+)
 
 class Config:
-    """Project-wide configuration management"""
+    """Configuration class for CTR modeling system"""
     
-    # Basic path settings
-    BASE_DIR = Path(__file__).parent
+    # Base paths
+    BASE_DIR = Path(__file__).parent.absolute()
     DATA_DIR = BASE_DIR / "data"
     MODEL_DIR = BASE_DIR / "models"
     LOG_DIR = BASE_DIR / "logs"
+    OUTPUT_DIR = BASE_DIR / "output"
     
     # Data file paths
     TRAIN_PATH = DATA_DIR / "train.parquet"
@@ -27,235 +32,204 @@ class Config:
     SUBMISSION_PATH = DATA_DIR / "sample_submission.csv"
     SUBMISSION_TEMPLATE_PATH = DATA_DIR / "sample_submission.csv"
     
-    # Target column settings
-    TARGET_COLUMN_CANDIDATES = [
-        'clicked',      # Most common CTR target column name
-        'click',        # Abbreviated form
-        'is_click',     # Boolean form
-        'target',       # General target name
-        'label',        # Label
-        'y',            # Mathematical expression
-        'ctr',          # Direct CTR expression
-        'response',     # Response
-        'conversion',   # Conversion
-        'action'        # Action
-    ]
+    # Memory configuration (40GB limit - 60% of 64GB)
+    MAX_MEMORY_GB = 40.0  # Reduced from higher values
+    MEMORY_WARNING_THRESHOLD = 0.75  # 30GB
+    MEMORY_CRITICAL_THRESHOLD = 0.85  # 34GB
+    MEMORY_ABORT_THRESHOLD = 0.95  # 38GB
     
-    # Target column detection settings
-    TARGET_DETECTION_CONFIG = {
-        'binary_values': {0, 1},           # Binary classification values
-        'min_ctr': 0.001,                  # Minimum CTR (0.1%)
-        'max_ctr': 0.1,                    # Maximum CTR (10%)
-        'prefer_low_ctr': True,            # Prefer low CTR (CTR characteristic)
-        'typical_ctr_range': (0.005, 0.05) # Typical CTR range (0.5%-5%)
-    }
+    # Processing configuration optimized for 40GB limit
+    CHUNK_SIZE = 50000  # Reduced from 100000 for memory efficiency
+    BATCH_SIZE_CPU = 8000  # Reduced batch size for CPU processing
+    BATCH_SIZE_GPU = 16000
     
-    # GPU and hardware settings
-    if TORCH_AVAILABLE:
-        DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        GPU_AVAILABLE = torch.cuda.is_available()
-    else:
-        DEVICE = 'cpu'
-        GPU_AVAILABLE = False
+    # Data size limits (adjusted for memory efficiency)
+    MAX_TRAIN_SIZE = 8000000  # Reduced from 10M to manage memory better
+    MAX_TEST_SIZE = 1200000   # Reduced accordingly
     
-    GPU_MEMORY_LIMIT = 14
-    CUDA_VISIBLE_DEVICES = "0"
-    USE_MIXED_PRECISION = True
-    GPU_OPTIMIZATION_LEVEL = 3
+    # Sampling configuration for memory management
+    AGGRESSIVE_SAMPLING_THRESHOLD = 0.8  # Start sampling at 80% memory
+    MIN_SAMPLE_SIZE = 100000
+    MAX_SAMPLE_SIZE = 5000000  # Reduced max sample size
     
-    # Memory settings - adjusted for stability
-    MAX_MEMORY_GB = 55  # Reduced from 60 for safety margin
-    CHUNK_SIZE = 100000  # Increased for efficiency
-    BATCH_SIZE_GPU = 16384  # Increased for better GPU utilization
-    BATCH_SIZE_CPU = 4096  
-    PREFETCH_FACTOR = 4
-    NUM_WORKERS = 8
+    # Feature engineering limits
+    MAX_FEATURES = 500  # Reduced from higher values
+    MAX_CATEGORICAL_UNIQUE = 1000  # Limit unique categories
     
-    # Memory thresholds
-    MEMORY_WARNING_THRESHOLD = 45  # Adjusted for 64GB system
-    MEMORY_CRITICAL_THRESHOLD = 50
-    MEMORY_ABORT_THRESHOLD = 58
+    # Model training configuration
+    CV_FOLDS = 3  # Reduced from 5 for memory efficiency
+    EARLY_STOPPING_ROUNDS = 50
+    RANDOM_STATE = 42
     
-    # Data size limits - increased for full data processing
-    MAX_TRAIN_SIZE = 12000000  # Increased to handle full dataset
-    MAX_TEST_SIZE = 2000000
-    MAX_INTERACTION_FEATURES = 50  # Reduced for memory efficiency
+    # Quick mode configuration
+    QUICK_SAMPLE_SIZE = 50
+    QUICK_TEST_SIZE = 25
     
-    # Model training settings - tuned for CTR prediction accuracy
-    MODEL_TRAINING_CONFIG = {
+    # Thread configuration
+    N_JOBS = min(6, os.cpu_count())  # Limit threads to reduce memory overhead
+    
+    # Model parameters optimized for memory efficiency
+    MODEL_PARAMS = {
         'lightgbm': {
-            'max_depth': 4,  # Reduced for better generalization
-            'num_leaves': 15,  # Significantly reduced
-            'min_data_in_leaf': 300,  # Increased for regularization
-            'feature_fraction': 0.6,  # Reduced for regularization
-            'bagging_fraction': 0.6,
+            'objective': 'binary',
+            'metric': 'binary_logloss',
+            'boosting_type': 'gbdt',
+            'num_leaves': 31,  # Reduced for memory efficiency
+            'learning_rate': 0.1,
+            'feature_fraction': 0.8,
+            'bagging_fraction': 0.8,
             'bagging_freq': 5,
-            'lambda_l1': 1.0,  # Increased regularization
-            'lambda_l2': 1.0,
-            'min_gain_to_split': 0.05,  # Increased threshold
-            'max_cat_threshold': 16,  # Reduced
-            'cat_smooth': 20.0,  # Increased smoothing
-            'cat_l2': 20.0,
-            'learning_rate': 0.02,  # Reduced learning rate
-            'num_iterations': 500,  # Reduced iterations
-            'scale_pos_weight': 52.3,  # Adjust for class imbalance
-            'is_unbalance': True
+            'verbose': -1,
+            'random_state': RANDOM_STATE,
+            'n_jobs': N_JOBS,
+            'max_depth': 6,  # Reduced depth
+            'min_data_in_leaf': 100,  # Increased for stability
+            'force_col_wise': True,  # Better memory usage
         },
         'xgboost': {
-            'max_depth': 4,  # Reduced depth
-            'learning_rate': 0.03,  # Reduced learning rate
-            'n_estimators': 400,  # Reduced estimators
-            'subsample': 0.6,  # Reduced subsample
-            'colsample_bytree': 0.6,
-            'min_child_weight': 15,  # Increased
-            'gamma': 0.2,  # Increased regularization
-            'alpha': 1.0,  # Increased L1 regularization
-            'lambda': 1.0,  # Increased L2 regularization
-            'scale_pos_weight': 52.3,  # Adjust for class imbalance
-            'reg_alpha': 1.0,
-            'reg_lambda': 1.0
+            'objective': 'binary:logistic',
+            'eval_metric': 'logloss',
+            'max_depth': 6,  # Reduced depth
+            'learning_rate': 0.1,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'random_state': RANDOM_STATE,
+            'n_jobs': N_JOBS,
+            'tree_method': 'hist',  # Memory efficient method
+            'max_leaves': 31,  # Limit leaves
         },
         'logistic': {
-            'C': 0.01,  # Much stronger regularization
-            'penalty': 'l2',
-            'solver': 'saga',
-            'max_iter': 3000,  # Reduced iterations
-            'class_weight': 'balanced',
-            'random_state': 42,
-            'tol': 0.0001
+            'max_iter': 1000,
+            'random_state': RANDOM_STATE,
+            'n_jobs': N_JOBS,
+            'solver': 'lbfgs',  # Memory efficient solver
         }
     }
     
-    # Feature engineering settings - focused on CTR prediction
-    FEATURE_ENGINEERING_CONFIG = {
-        'enable_interaction_features': True,
-        'enable_polynomial_features': False,  # Disabled for memory and simplicity
-        'enable_binning': True,
-        'enable_target_encoding': True,
-        'enable_frequency_encoding': True,
-        'enable_statistical_features': True,  # Re-enabled with memory limits
-        'max_interaction_degree': 2,
-        'binning_strategy': 'uniform',  # Changed from quantile to uniform
-        'n_bins': 5,  # Reduced bins
-        'min_frequency': 20,  # Increased threshold
-        'target_encoding_smoothing': 50.0,  # Much higher smoothing for CTR bias
-        'enable_cross_validation_encoding': False
+    # Ensemble configuration
+    ENSEMBLE_WEIGHTS = {
+        'lightgbm': 0.4,
+        'xgboost': 0.35,
+        'logistic': 0.25
     }
-    
-    # Cross-validation settings
-    CV_FOLDS = 3
-    CV_SHUFFLE = True
-    RANDOM_STATE = 42
-    
-    # Early stopping settings
-    EARLY_STOPPING_ROUNDS = 100  # Reduced
-    EARLY_STOPPING_TOLERANCE = 1e-4
-    
-    # Hyperparameter tuning settings
-    OPTUNA_N_TRIALS = 30  # Reduced
-    OPTUNA_TIMEOUT = 1200  # Reduced
-    OPTUNA_N_JOBS = 1
-    OPTUNA_VERBOSITY = 1
-    
-    # Ensemble settings - simplified strategy
-    ENSEMBLE_CONFIG = {
-        'voting_weights': {'lightgbm': 0.4, 'xgboost': 0.3, 'logistic': 0.3},
-        'stacking_cv_folds': 3,
-        'blending_ratio': 0.7,
-        'diversity_threshold': 0.05,
-        'performance_threshold': 0.25,  # Lowered threshold
-        'enable_meta_features': False,
-        'use_simple_average': True
-    }
-    
-    # Calibration settings - mandatory and aggressive
-    CALIBRATION_METHOD = 'isotonic'
-    CALIBRATION_CV_FOLDS = 3
-    CALIBRATION_MANDATORY = True
-    
-    # Evaluation configuration - CTR-focused tuning
-    EVALUATION_CONFIG = {
-        'ap_weight': 0.5,  # Reduced AP weight
-        'wll_weight': 0.5,  # Increased WLL weight
-        'target_combined_score': 0.34,
-        'target_ctr': 0.0191,
-        'ctr_tolerance': 0.0005,  # Tighter tolerance
-        'bias_penalty_weight': 15.0,  # Much higher penalty for CTR bias
-        'calibration_weight': 0.7,  # Increased calibration importance
-        'pos_weight': 52.3,
-        'neg_weight': 1.0,
-        'wll_normalization_factor': 1.8,  # Adjusted normalization
-        'ctr_bias_multiplier': 20.0  # Strong CTR bias penalty
-    }
-    
-    # CTR bias correction settings - much more aggressive
-    CTR_BIAS_CORRECTION = {
-        'enable': True,
-        'target_ctr': 0.0191,
-        'correction_factor': 0.15,  # Much more aggressive correction (85% reduction)
-        'post_processing': True,
-        'clip_range': (0.001, 0.08),  # Tighter range
-        'bias_threshold': 0.0002,  # Strict threshold
-        'calibration_strength': 2.0,  # Strong calibration
-        'prediction_scaling': 0.38  # Additional scaling factor
-    }
-    
-    # Evaluation metrics
-    PRIMARY_METRIC = 'combined_score'
-    SECONDARY_METRICS = ['ap', 'auc', 'log_loss', 'ctr_bias', 'ctr_quality']
-    TARGET_COMBINED_SCORE = 0.34
-    TARGET_CTR = 0.0191
-    
-    # Logging settings
-    LOG_LEVEL = logging.INFO
-    LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    LOG_FILE_MAX_SIZE = 10 * 1024 * 1024  # 10MB
-    LOG_FILE_BACKUP_COUNT = 5
-    
-    # Performance settings
-    ENABLE_PARALLEL_PROCESSING = True
-    ENABLE_MEMORY_MAPPING = False
-    ENABLE_CACHING = False
-    CACHE_SIZE_MB = 1024
-    
-    # Large dataset specific settings
-    LARGE_DATASET_MODE = True
-    MEMORY_EFFICIENT_SAMPLING = True
-    AGGRESSIVE_SAMPLING_THRESHOLD = 0.5
-    MIN_SAMPLE_SIZE = 1000000
-    MAX_SAMPLE_SIZE = 5000000
-    
-    # RTX 4060 Ti specific settings
-    RTX_4060_TI_OPTIMIZATION = True
     
     @classmethod
     def setup_directories(cls):
         """Create necessary directories"""
-        directories = [cls.DATA_DIR, cls.MODEL_DIR, cls.LOG_DIR]
-        created_dirs = []
+        directories = [cls.DATA_DIR, cls.MODEL_DIR, cls.LOG_DIR, cls.OUTPUT_DIR]
+        created = []
         
         for directory in directories:
-            try:
+            if not directory.exists():
                 directory.mkdir(parents=True, exist_ok=True)
-                created_dirs.append(str(directory))
-            except Exception as e:
-                print(f"Directory creation failed {directory}: {e}")
+                created.append(str(directory))
         
-        if created_dirs:
-            print(f"Created directories: {created_dirs}")
+        if created:
+            print(f"Created directories: {created}")
         
-        return created_dirs
+        return created
     
     @classmethod
-    def verify_paths(cls):
-        """Path validation"""
+    def get_available_memory(cls) -> float:
+        """Get available system memory in GB"""
+        try:
+            memory = psutil.virtual_memory()
+            available_gb = memory.available / (1024**3)
+            return min(available_gb, cls.MAX_MEMORY_GB)  # Never exceed our limit
+        except:
+            return cls.MAX_MEMORY_GB * 0.8  # Conservative fallback
+    
+    @classmethod
+    def get_memory_usage_percent(cls) -> float:
+        """Get current memory usage percentage"""
+        try:
+            memory = psutil.virtual_memory()
+            return memory.percent
+        except:
+            return 50.0  # Conservative fallback
+    
+    @classmethod
+    def should_use_sampling(cls) -> bool:
+        """Check if aggressive sampling should be used"""
+        try:
+            memory_usage = cls.get_memory_usage_percent() / 100.0
+            return memory_usage > cls.AGGRESSIVE_SAMPLING_THRESHOLD
+        except:
+            return False
+    
+    @classmethod
+    def get_optimal_chunk_size(cls) -> int:
+        """Get optimal chunk size based on available memory"""
+        try:
+            available_memory = cls.get_available_memory()
+            
+            if available_memory < 20:
+                return 25000  # Very conservative for low memory
+            elif available_memory < 30:
+                return cls.CHUNK_SIZE  # Use default
+            else:
+                return min(cls.CHUNK_SIZE * 2, 75000)  # Can use larger chunks
+        except:
+            return 25000  # Conservative fallback
+    
+    @classmethod
+    def validate_system_requirements(cls):
+        """Validate system has minimum requirements"""
+        print("=== System requirements validation ===")
+        
+        # Check memory
+        try:
+            total_memory = psutil.virtual_memory().total / (1024**3)
+            available_memory = psutil.virtual_memory().available / (1024**3)
+            
+            print(f"Total memory: {total_memory:.1f}GB")
+            print(f"Available memory: {available_memory:.1f}GB")
+            print(f"Configured limit: {cls.MAX_MEMORY_GB}GB")
+            
+            if total_memory < 32:
+                print("WARNING: Less than 32GB total memory detected")
+                return False
+            
+            if available_memory < 20:
+                print("WARNING: Less than 20GB available memory")
+                return False
+                
+        except Exception as e:
+            print(f"Memory check failed: {e}")
+            return False
+        
+        # Check CPU cores
+        cpu_cores = os.cpu_count()
+        print(f"CPU cores: {cpu_cores}")
+        
+        if cpu_cores < 4:
+            print("WARNING: Less than 4 CPU cores detected")
+        
+        # Check disk space
+        try:
+            disk_usage = psutil.disk_usage(str(cls.BASE_DIR))
+            free_gb = disk_usage.free / (1024**3)
+            print(f"Free disk space: {free_gb:.1f}GB")
+            
+            if free_gb < 50:
+                print("WARNING: Less than 50GB free disk space")
+                return False
+                
+        except Exception as e:
+            print(f"Disk check failed: {e}")
+            return False
+        
+        print("System requirements check: PASSED")
+        return True
+    
+    @classmethod
+    def validate_paths(cls):
+        """Validate all required paths"""
         print("=== Path validation ===")
         
         paths_to_check = {
             'BASE_DIR': cls.BASE_DIR,
             'DATA_DIR': cls.DATA_DIR,
-            'MODEL_DIR': cls.MODEL_DIR,
-            'LOG_DIR': cls.LOG_DIR,
             'TRAIN_PATH': cls.TRAIN_PATH,
             'TEST_PATH': cls.TEST_PATH,
             'SUBMISSION_PATH': cls.SUBMISSION_PATH,
@@ -292,7 +266,7 @@ class Config:
         # Additional validations
         requirements['train_size_adequate'] = requirements['train_file_size_mb'] > 1000  # > 1GB
         requirements['test_size_adequate'] = requirements['test_file_size_mb'] > 100    # > 100MB
-        requirements['memory_adequate'] = requirements['memory_available'] > 40         # > 40GB
+        requirements['memory_adequate'] = requirements['memory_available'] >= 20       # >= 20GB minimum
         
         # Display results
         for key, value in requirements.items():
@@ -309,7 +283,7 @@ class Config:
         
         print(f"\nAll requirements met: {'✓' if all_met else '✗'}")
         if all_met:
-            print("Large data processing ready!")
+            print("Large data processing ready with memory limit!")
         else:
             print("Requirements not met. Check data files and system resources.")
         
@@ -319,10 +293,11 @@ class Config:
     def get_memory_efficient_config(cls):
         """Get memory efficient configuration"""
         return {
-            'chunk_size': cls.CHUNK_SIZE,
+            'chunk_size': cls.get_optimal_chunk_size(),
             'batch_size': cls.BATCH_SIZE_CPU,
             'max_train_size': cls.MAX_TRAIN_SIZE,
             'max_test_size': cls.MAX_TEST_SIZE,
+            'memory_limit_gb': cls.MAX_MEMORY_GB,
             'memory_thresholds': {
                 'warning': cls.MEMORY_WARNING_THRESHOLD,
                 'critical': cls.MEMORY_CRITICAL_THRESHOLD,
@@ -332,5 +307,71 @@ class Config:
                 'aggressive_threshold': cls.AGGRESSIVE_SAMPLING_THRESHOLD,
                 'min_sample_size': cls.MIN_SAMPLE_SIZE,
                 'max_sample_size': cls.MAX_SAMPLE_SIZE
+            },
+            'feature_limits': {
+                'max_features': cls.MAX_FEATURES,
+                'max_categorical_unique': cls.MAX_CATEGORICAL_UNIQUE
             }
         }
+    
+    @classmethod
+    def get_processing_config(cls):
+        """Get processing configuration optimized for current system"""
+        available_memory = cls.get_available_memory()
+        memory_usage = cls.get_memory_usage_percent()
+        
+        # Adjust configuration based on memory status
+        config = {
+            'chunk_size': cls.get_optimal_chunk_size(),
+            'n_jobs': cls.N_JOBS,
+            'memory_efficient': True,
+            'use_sampling': cls.should_use_sampling(),
+            'available_memory': available_memory,
+            'memory_usage': memory_usage
+        }
+        
+        # Memory-based adjustments
+        if available_memory < 25:
+            config.update({
+                'chunk_size': 20000,
+                'n_jobs': max(1, cls.N_JOBS // 2),
+                'aggressive_gc': True
+            })
+        elif available_memory > 35:
+            config.update({
+                'chunk_size': min(75000, cls.CHUNK_SIZE * 2),
+                'n_jobs': cls.N_JOBS,
+                'aggressive_gc': False
+            })
+        
+        return config
+
+# Create default instance
+config = Config()
+
+if __name__ == "__main__":
+    # Validation script
+    print("CTR Modeling System Configuration Validation")
+    print("=" * 50)
+    
+    # Setup directories
+    Config.setup_directories()
+    
+    # Validate system
+    Config.validate_system_requirements()
+    
+    # Validate paths
+    Config.validate_paths()
+    
+    # Verify data requirements
+    Config.verify_data_requirements()
+    
+    # Display memory efficient config
+    print("\n=== Memory Efficient Configuration ===")
+    mem_config = Config.get_memory_efficient_config()
+    for key, value in mem_config.items():
+        print(f"{key}: {value}")
+    
+    print(f"\nMemory limit enforced: {Config.MAX_MEMORY_GB}GB (60% of 64GB system)")
+    print(f"Current memory usage: {Config.get_memory_usage_percent():.1f}%")
+    print(f"Available for processing: {Config.get_available_memory():.1f}GB")

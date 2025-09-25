@@ -18,12 +18,79 @@ from data_loader import MemoryMonitor
 
 logger = logging.getLogger(__name__)
 
-class CTRFeatureEngineer:
-    """CTR feature engineering class"""
+class SafeDataTypeConverter:
+    """Safe data type conversion for mixed categorical data"""
     
-    def __init__(self, config: Config = Config):
+    @staticmethod
+    def safe_categorical_conversion(series: pd.Series, handle_mixed: bool = True) -> pd.Series:
+        """Safely convert mixed data types to categorical"""
+        try:
+            if series.dtype == 'category':
+                return series
+            
+            # Handle mixed float/string data
+            if handle_mixed and series.dtype == 'object':
+                # Convert all to string first to ensure consistency
+                series_str = series.astype(str)
+                # Replace 'nan' and 'None' with actual NaN
+                series_str = series_str.replace(['nan', 'None', 'NaT', 'null'], np.nan)
+                return series_str.astype('category')
+            
+            # For numeric data with NaN, convert to string then categorical
+            if series.dtype in ['float64', 'float32'] and series.isna().any():
+                series_str = series.fillna('missing').astype(str)
+                return series_str.astype('category')
+            
+            return series.astype('category')
+            
+        except Exception as e:
+            logger.warning(f"Categorical conversion failed: {e}")
+            # Fallback: convert everything to string then categorical
+            try:
+                return series.astype(str).astype('category')
+            except:
+                return series  # Return original if all conversions fail
+    
+    @staticmethod
+    def safe_fillna_categorical(series: pd.Series, fill_value: str = 'missing') -> pd.Series:
+        """Safely fill NaN in categorical series"""
+        try:
+            if series.dtype.name == 'category':
+                # Add the fill_value to categories if not present
+                if fill_value not in series.cat.categories:
+                    series = series.cat.add_categories([fill_value])
+                return series.fillna(fill_value)
+            else:
+                return series.fillna(fill_value)
+                
+        except Exception as e:
+            logger.warning(f"Safe fillna failed: {e}")
+            # Fallback: convert to string and fill
+            try:
+                return series.astype(str).fillna(fill_value).astype('category')
+            except:
+                return series.fillna(fill_value)
+    
+    @staticmethod
+    def ensure_string_categorical(series: pd.Series) -> pd.Series:
+        """Ensure categorical series contains only strings"""
+        try:
+            # Convert to string first, then to category
+            str_series = series.astype(str)
+            # Replace string representations of NaN
+            str_series = str_series.replace(['nan', 'None', 'NaT', 'null'], 'missing')
+            return str_series.astype('category')
+        except Exception as e:
+            logger.warning(f"String categorical conversion failed: {e}")
+            return series
+
+class CTRFeatureEngineer:
+    """CTR feature engineering class with memory efficiency and safe data handling"""
+    
+    def __init__(self, config: Config = Config()):
         self.config = config
         self.memory_monitor = MemoryMonitor()
+        self.data_converter = SafeDataTypeConverter()
         
         # Processing modes
         self.quick_mode = False
@@ -77,377 +144,159 @@ class CTRFeatureEngineer:
         else:
             logger.info("Quick mode disabled - comprehensive feature engineering")
     
-    def engineer_features(self, 
-                         train_df: pd.DataFrame, 
-                         test_df: pd.DataFrame, 
-                         target_col: str = 'clicked') -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
-        """Main feature engineering entry point"""
-        try:
-            logger.info("=== CTR Feature engineering started ===")
-            
-            if self.quick_mode:
-                return self.create_quick_features(train_df, test_df, target_col)
-            else:
-                return self.create_all_features(train_df, test_df, target_col)
-                
-        except Exception as e:
-            logger.error(f"Feature engineering failed: {e}")
-            return None, None
-    
-    def create_quick_features(self, 
-                            train_df: pd.DataFrame, 
-                            test_df: pd.DataFrame, 
-                            target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Quick feature engineering for rapid testing"""
-        logger.info("Creating basic features for quick testing")
-        
-        try:
-            self._initialize_processing(train_df, test_df, target_col)
-            
-            # 1. Basic data preparation
-            X_train, X_test, y_train = self._prepare_basic_data(train_df, test_df, target_col)
-            
-            # 2. Column classification
-            self._classify_columns(X_train)
-            
-            # 3. Data type unification
-            X_train, X_test = self._unify_data_types_safe(X_train, X_test)
-            
-            # 4. Fill missing values with safe categorical handling
-            X_train = self._safe_fillna(X_train)
-            X_test = self._safe_fillna(X_test)
-            
-            # 5. Safe categorical encoding
-            X_train, X_test = self._encode_categorical_safe(X_train, X_test)
-            
-            # 6. Simple numeric normalization
-            X_train, X_test = self._normalize_numeric_basic(X_train, X_test)
-            
-            # 7. Remove any problematic columns
-            X_train, X_test = self._clean_final_features(X_train, X_test)
-            
-            # Store final feature order
-            self.final_feature_columns = list(X_train.columns)
-            
-            logger.info(f"Quick feature engineering completed: {X_train.shape[1]} features")
-            logger.info(f"Final features - Train: {X_train.shape}, Test: {X_test.shape}")
-            
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.error(f"Quick feature engineering failed: {e}")
-            return self._create_minimal_features(train_df, test_df, target_col)
-    
-    def create_all_features(self, 
-                          train_df: pd.DataFrame, 
-                          test_df: pd.DataFrame, 
-                          target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Complete feature engineering pipeline for full dataset processing"""
-        logger.info("Creating comprehensive features for full dataset")
-        
-        try:
-            self._initialize_processing(train_df, test_df, target_col)
-            
-            # 1. Basic data preparation
-            X_train, X_test, y_train = self._prepare_basic_data(train_df, test_df, target_col)
-            
-            # 2. Column classification
-            self._classify_columns(X_train)
-            
-            # 3. Safe data type unification
-            X_train, X_test = self._unify_data_types_safe(X_train, X_test)
-            
-            # 4. Basic feature cleanup
-            X_train, X_test = self._clean_basic_features(X_train, X_test)
-            
-            # Memory check for full processing
-            memory_status = self.memory_monitor.get_memory_status()
-            if not memory_status['should_cleanup'] and memory_status['available_gb'] > 8:
-                logger.info("Full feature engineering enabled - sufficient memory available")
-                
-                # 5. Target encoding features
-                X_train, X_test = self._create_target_encoding_features(X_train, X_test, y_train)
-                
-                # 6. Interaction feature creation
-                X_train, X_test = self._create_interaction_features(X_train, X_test, y_train)
-                
-                # 7. Statistical features
-                X_train, X_test = self._create_statistical_features(X_train, X_test)
-                
-                # 8. Frequency-based features
-                X_train, X_test = self._create_frequency_features(X_train, X_test)
-                
-                # 9. Cross features
-                X_train, X_test = self._create_cross_features(X_train, X_test, y_train)
-                
-                # 10. Time-based features
-                X_train, X_test = self._create_temporal_features(X_train, X_test)
-                
-                # 11. Binning features
-                if self.config.FEATURE_ENGINEERING_CONFIG.get('enable_binning', True):
-                    X_train, X_test = self._create_binning_features_fixed(X_train, X_test)
-                
-                # 12. Rank features
-                X_train, X_test = self._create_rank_features(X_train, X_test)
-                
-                # 13. Ratio features
-                X_train, X_test = self._create_ratio_features(X_train, X_test)
-                
-                # 14. Polynomial features
-                if self.config.FEATURE_ENGINEERING_CONFIG.get('enable_polynomial_features', True):
-                    X_train, X_test = self._create_polynomial_features(X_train, X_test)
-                
-            else:
-                logger.warning("Simplified feature engineering due to memory constraints")
-            
-            # 15. Safe categorical feature encoding
-            X_train, X_test = self._encode_categorical_features_safe(X_train, X_test, y_train)
-            
-            # 16. Numeric feature transformation
-            X_train, X_test = self._create_numeric_features(X_train, X_test)
-            
-            # 17. Final data cleanup
-            X_train, X_test = self._final_data_cleanup(X_train, X_test)
-            
-            self._finalize_processing(X_train, X_test)
-            
-            logger.info(f"=== Feature engineering completed: {X_train.shape} ===")
-            
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.error(f"Feature engineering failed: {e}")
-            self.memory_monitor.force_memory_cleanup()
-            
-            # Use basic features only on failure
-            logger.warning("Using basic features only due to error")
-            return self._create_basic_features_only(train_df, test_df, target_col)
-    
-    def _initialize_processing(self, train_df: pd.DataFrame, test_df: pd.DataFrame, target_col: str):
-        """Initialize feature engineering processing"""
-        try:
-            self.processing_stats['start_time'] = time.time()
-            
-            # Target column detection
-            self.target_column = self._detect_target_column(train_df, target_col)
-            
-            self.original_feature_order = sorted([col for col in train_df.columns if col != self.target_column])
-            
-            mode_info = "QUICK MODE" if self.quick_mode else "FULL MODE"
-            logger.info(f"Feature engineering initialization ({mode_info})")
-            logger.info(f"Initial data: Training {train_df.shape}, Test {test_df.shape}")
-            logger.info(f"Target column: {self.target_column}")
-            logger.info(f"Original feature count: {len(self.original_feature_order)}")
-            
-            self.memory_monitor.log_memory_status("Initialization")
-            
-        except Exception as e:
-            logger.warning(f"Initialization failed: {e}")
-            self.target_column = target_col
-    
-    def _detect_target_column(self, train_df: pd.DataFrame, provided_target_col: str = None) -> str:
-        """Detect CTR target column with validation"""
-        try:
-            # First, try provided target column
-            if provided_target_col and provided_target_col in train_df.columns:
-                unique_values = train_df[provided_target_col].dropna().unique()
-                if len(unique_values) == 2 and set(unique_values).issubset({0, 1}):
-                    positive_ratio = train_df[provided_target_col].mean()
-                    logger.info(f"Target column confirmed: {provided_target_col} (CTR: {positive_ratio:.4f})")
-                    return provided_target_col
-            
-            # Search for common CTR target column names
-            ctr_target_names = ['clicked', 'click', 'is_click', 'target', 'label', 'y']
-            
-            for col_name in ctr_target_names:
-                if col_name in train_df.columns:
-                    unique_values = train_df[col_name].dropna().unique()
-                    if len(unique_values) == 2 and set(unique_values).issubset({0, 1}):
-                        positive_ratio = train_df[col_name].mean()
-                        logger.info(f"Target column detected: {col_name} (CTR: {positive_ratio:.4f})")
-                        return col_name
-            
-            # Fallback
-            return provided_target_col or 'clicked'
-            
-        except Exception as e:
-            logger.warning(f"Target column detection failed: {e}")
-            return provided_target_col or 'clicked'
-    
-    def _prepare_basic_data(self, train_df: pd.DataFrame, test_df: pd.DataFrame, target_col: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
-        """Prepare basic data for feature engineering"""
-        try:
-            # Extract target
-            if target_col in train_df.columns:
-                y_train = train_df[target_col].copy()
-                X_train = train_df.drop(columns=[target_col]).copy()
-            else:
-                logger.warning(f"Target column '{target_col}' not found, using zeros")
-                y_train = pd.Series([0] * len(train_df))
-                X_train = train_df.copy()
-            
-            X_test = test_df.copy()
-            
-            # Ensure consistent columns
-            common_cols = sorted(set(X_train.columns) & set(X_test.columns))
-            X_train = X_train[common_cols]
-            X_test = X_test[common_cols]
-            
-            logger.info(f"Data preparation completed - Train: {X_train.shape}, Test: {X_test.shape}")
-            
-            return X_train, X_test, y_train
-            
-        except Exception as e:
-            logger.error(f"Data preparation failed: {e}")
-            raise
-    
-    def _classify_columns(self, X: pd.DataFrame):
-        """Classify columns into numerical and categorical"""
+    def _classify_columns(self, X_train: pd.DataFrame) -> None:
+        """Classify columns into numerical and categorical with safe handling"""
         try:
             self.numerical_features = []
             self.categorical_features = []
             
-            for col in X.columns:
-                if X[col].dtype in ['int64', 'float64', 'int32', 'float32']:
-                    unique_count = X[col].nunique()
-                    if unique_count > 20:  # Treat as numerical
-                        self.numerical_features.append(col)
-                    else:
-                        self.categorical_features.append(col)
-                else:
+            for col in X_train.columns:
+                if col == self.target_column:
+                    continue
+                
+                # Check data type and unique values
+                dtype = X_train[col].dtype
+                nunique = X_train[col].nunique()
+                total_rows = len(X_train)
+                
+                # Determine if column should be treated as categorical
+                is_categorical = False
+                
+                if dtype == 'object' or dtype.name == 'category':
+                    is_categorical = True
+                elif dtype in ['int64', 'int32', 'int16', 'int8']:
+                    # Integer columns with limited unique values might be categorical
+                    if nunique < min(50, total_rows * 0.05):
+                        is_categorical = True
+                elif dtype in ['float64', 'float32']:
+                    # Float columns with very few unique values might be categorical IDs
+                    if nunique < min(20, total_rows * 0.01):
+                        is_categorical = True
+                
+                # Enforce limits for memory efficiency
+                if is_categorical and nunique > self.config.MAX_CATEGORICAL_UNIQUE:
+                    logger.warning(f"Column {col} has {nunique} unique values, treating as numerical")
+                    is_categorical = False
+                
+                if is_categorical:
                     self.categorical_features.append(col)
+                else:
+                    self.numerical_features.append(col)
             
             logger.info(f"Column classification completed - Numeric: {len(self.numerical_features)}, Categorical: {len(self.categorical_features)}")
             
         except Exception as e:
-            logger.warning(f"Column classification failed: {e}")
-    
-    def _unify_data_types_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Safe data type unification"""
-        try:
+            logger.error(f"Column classification failed: {e}")
+            # Fallback: treat object columns as categorical, others as numerical
             for col in X_train.columns:
-                if col in X_test.columns:
-                    train_type = X_train[col].dtype
-                    test_type = X_test[col].dtype
-                    
-                    if train_type != test_type:
-                        # Convert to string as fallback
-                        X_train[col] = X_train[col].astype('object')
-                        X_test[col] = X_test[col].astype('object')
-            
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.warning(f"Data type unification failed: {e}")
-            return X_train, X_test
+                if col != self.target_column:
+                    if X_train[col].dtype == 'object':
+                        self.categorical_features.append(col)
+                    else:
+                        self.numerical_features.append(col)
     
-    def _safe_fillna(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Safe missing value filling"""
+    def _safe_preprocessing(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Safe data preprocessing with memory efficiency"""
         try:
-            for col in X.columns:
-                if X[col].dtype in ['int64', 'float64', 'int32', 'float32']:
-                    X[col] = X[col].fillna(X[col].median())
-                else:
-                    X[col] = X[col].fillna('unknown')
+            logger.info("Safe data preprocessing started")
             
-            return X
+            # Check memory before preprocessing
+            if not self.memory_monitor.check_memory_safety(5.0):
+                self.memory_monitor.force_cleanup()
             
-        except Exception as e:
-            logger.warning(f"Safe fillna failed: {e}")
-            return X
-    
-    def _encode_categorical_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Safe categorical encoding"""
-        try:
+            # Handle missing values safely for categorical columns
             for col in self.categorical_features:
                 if col in X_train.columns and col in X_test.columns:
-                    # Use label encoder
-                    le = LabelEncoder()
-                    
-                    # Combine train and test for consistent encoding
-                    combined = pd.concat([X_train[col].astype(str), X_test[col].astype(str)])
-                    le.fit(combined)
-                    
-                    X_train[col] = le.transform(X_train[col].astype(str))
-                    X_test[col] = le.transform(X_test[col].astype(str))
-                    
-                    self.label_encoders[col] = le
+                    try:
+                        # Safe categorical conversion
+                        X_train[col] = self.data_converter.safe_categorical_conversion(X_train[col])
+                        X_test[col] = self.data_converter.safe_categorical_conversion(X_test[col])
+                        
+                        # Safe fillna
+                        X_train[col] = self.data_converter.safe_fillna_categorical(X_train[col], 'missing')
+                        X_test[col] = self.data_converter.safe_fillna_categorical(X_test[col], 'missing')
+                        
+                        # Ensure both train and test have consistent categories
+                        all_categories = set(X_train[col].cat.categories) | set(X_test[col].cat.categories)
+                        X_train[col] = X_train[col].cat.set_categories(all_categories)
+                        X_test[col] = X_test[col].cat.set_categories(all_categories)
+                        
+                    except Exception as e:
+                        logger.warning(f"Categorical preprocessing failed for {col}: {e}")
+                        # Fallback to string conversion
+                        X_train[col] = X_train[col].astype(str).fillna('missing')
+                        X_test[col] = X_test[col].astype(str).fillna('missing')
             
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.warning(f"Categorical encoding failed: {e}")
-            return X_train, X_test
-    
-    def _normalize_numeric_basic(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Basic numeric normalization"""
-        try:
+            # Handle missing values for numerical columns
             for col in self.numerical_features:
                 if col in X_train.columns and col in X_test.columns:
-                    scaler = StandardScaler()
-                    X_train[col] = scaler.fit_transform(X_train[[col]])
-                    X_test[col] = scaler.transform(X_test[[col]])
-                    
-                    self.scalers[col] = scaler
+                    try:
+                        # Use median for numerical columns
+                        median_val = X_train[col].median()
+                        if pd.isna(median_val):
+                            median_val = 0.0
+                        
+                        X_train[col] = X_train[col].fillna(median_val)
+                        X_test[col] = X_test[col].fillna(median_val)
+                        
+                    except Exception as e:
+                        logger.warning(f"Numerical preprocessing failed for {col}: {e}")
+                        X_train[col] = X_train[col].fillna(0)
+                        X_test[col] = X_test[col].fillna(0)
             
+            logger.info("Safe data preprocessing completed")
             return X_train, X_test
             
         except Exception as e:
-            logger.warning(f"Numeric normalization failed: {e}")
+            logger.error(f"Safe preprocessing failed: {e}")
             return X_train, X_test
     
-    def _clean_final_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Clean final features"""
+    def _safe_target_encoding(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Safe target encoding for categorical features"""
         try:
-            # Remove infinite values
-            X_train = X_train.replace([np.inf, -np.inf], 0)
-            X_test = X_test.replace([np.inf, -np.inf], 0)
+            if self.memory_efficient_mode:
+                # Limit number of columns for memory efficiency
+                categorical_subset = self.categorical_features[:min(20, len(self.categorical_features))]
+            else:
+                categorical_subset = self.categorical_features
             
-            # Remove NaN values
-            X_train = X_train.fillna(0)
-            X_test = X_test.fillna(0)
+            logger.info(f"Target encoding started for {len(categorical_subset)} categorical features")
             
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.warning(f"Final feature cleaning failed: {e}")
-            return X_train, X_test
-    
-    def _create_target_encoding_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create CTR-optimized target encoding features"""
-        try:
-            logger.info("Creating CTR target encoding features")
-            
-            categorical_cols = [col for col in self.categorical_features if col in X_train.columns][:8]
-            
-            for col in categorical_cols:
+            for col in categorical_subset:
+                if col not in X_train.columns or col not in X_test.columns:
+                    continue
+                
                 try:
-                    # Use smoothed target encoding for better CTR prediction
-                    encoder = TargetEncoder(
-                        categories='auto',
-                        target_type='binary',
-                        smooth='auto',
-                        cv=5,
-                        random_state=42
-                    )
+                    # Ensure consistent string categorical data
+                    X_train[col] = self.data_converter.ensure_string_categorical(X_train[col])
+                    X_test[col] = self.data_converter.ensure_string_categorical(X_test[col])
                     
-                    encoded_train = encoder.fit_transform(X_train[[col]], y_train)
-                    encoded_test = encoder.transform(X_test[[col]])
+                    # Check for memory before encoding
+                    if not self.memory_monitor.check_memory_safety(2.0):
+                        logger.warning(f"Skipping target encoding for {col} due to memory constraints")
+                        continue
                     
+                    # Target encoding with smoothing
+                    encoder = TargetEncoder(smooth='auto', target_type='binary')
+                    
+                    # Fit on training data
+                    X_train_encoded = encoder.fit_transform(X_train[[col]], y_train)
+                    X_test_encoded = encoder.transform(X_test[[col]])
+                    
+                    # Create feature names
                     feature_name = f"{col}_target_enc"
-                    X_train[feature_name] = encoded_train.ravel()
-                    X_test[feature_name] = encoded_test.ravel()
                     
-                    # CTR-specific statistic features
+                    # Add encoded features
+                    X_train[feature_name] = X_train_encoded.flatten()
+                    X_test[feature_name] = X_test_encoded.flatten()
+                    
+                    # Additional frequency-based features
                     value_counts = X_train[col].value_counts()
-                    ctr_by_category = X_train.groupby(col).apply(lambda x: y_train.iloc[x.index].mean())
-                    
-                    # Category frequency feature
                     freq_feature = f"{col}_freq"
-                    X_train[freq_feature] = X_train[col].map(value_counts)
+                    X_train[freq_feature] = X_train[col].map(value_counts).fillna(0)
                     X_test[freq_feature] = X_test[col].map(value_counts).fillna(0)
                     
-                    # Category CTR variance feature
+                    # CTR variance feature
                     ctr_var_feature = f"{col}_ctr_var"
                     ctr_variance = X_train.groupby(col).apply(lambda x: y_train.iloc[x.index].var()).fillna(0)
                     X_train[ctr_var_feature] = X_train[col].map(ctr_variance)
@@ -455,6 +304,10 @@ class CTRFeatureEngineer:
                     
                     self.target_encoding_features.extend([feature_name, freq_feature, ctr_var_feature])
                     self.target_encoders[col] = encoder
+                    
+                    # Memory cleanup after each encoding
+                    if len(self.target_encoding_features) % 5 == 0:
+                        self.memory_monitor.force_cleanup()
                     
                 except Exception as e:
                     logger.warning(f"Target encoding failed for {col}: {e}")
@@ -469,19 +322,28 @@ class CTRFeatureEngineer:
             return X_train, X_test
     
     def _create_interaction_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create CTR-optimized interaction features"""
+        """Create CTR-optimized interaction features with memory management"""
         try:
+            if self.quick_mode:
+                logger.info("Quick mode: Skipping interaction features")
+                return X_train, X_test
+            
             logger.info("Creating CTR interaction features")
             
-            # Select most important features for interactions
-            important_features = self._select_important_features(X_train, y_train, max_features=10)
+            # Select most important features for interactions (limit for memory)
+            important_features = self._select_important_features(X_train, y_train, max_features=8)
             
             interaction_count = 0
-            max_interactions = 15
+            max_interactions = 10 if self.memory_efficient_mode else 15
             
             for i in range(len(important_features)):
                 for j in range(i + 1, len(important_features)):
                     if interaction_count >= max_interactions:
+                        break
+                    
+                    # Memory check
+                    if not self.memory_monitor.check_memory_safety(1.5):
+                        logger.warning("Stopping interaction feature creation due to memory constraints")
                         break
                     
                     feat1, feat2 = important_features[i], important_features[j]
@@ -501,572 +363,264 @@ class CTRFeatureEngineer:
                         interaction_count += 2
                         
                     except Exception as e:
-                        logger.warning(f"Interaction feature creation failed for {feat1}x{feat2}: {e}")
+                        logger.warning(f"Interaction feature creation failed for {feat1} x {feat2}: {e}")
                         continue
+                
+                if not self.memory_monitor.check_memory_safety(1.5):
+                    break
             
             logger.info(f"Interaction features completed: {len(self.interaction_features)} features created")
-            
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Interaction features failed: {e}")
+            logger.error(f"Interaction feature creation failed: {e}")
             return X_train, X_test
     
     def _select_important_features(self, X: pd.DataFrame, y: pd.Series, max_features: int = 10) -> List[str]:
-        """Select most important features for interaction creation"""
+        """Select most important numerical features for interactions"""
         try:
-            selector = SelectKBest(score_func=f_classif, k=min(max_features, X.shape[1]))
-            selector.fit(X, y)
+            # Use only numerical features for feature selection
+            numerical_cols = [col for col in self.numerical_features if col in X.columns]
             
-            feature_scores = selector.scores_
-            feature_names = X.columns[selector.get_support()]
+            if len(numerical_cols) == 0:
+                return []
             
-            # Sort by score
-            scored_features = list(zip(feature_names, feature_scores))
-            scored_features.sort(key=lambda x: x[1], reverse=True)
+            # Limit to prevent memory issues
+            if len(numerical_cols) > 50:
+                numerical_cols = numerical_cols[:50]
             
-            return [feat[0] for feat in scored_features]
+            X_num = X[numerical_cols].fillna(0)
+            
+            # Use SelectKBest with f_classif for binary classification
+            selector = SelectKBest(score_func=f_classif, k=min(max_features, len(numerical_cols)))
+            selector.fit(X_num, y)
+            
+            selected_features = [numerical_cols[i] for i in selector.get_support(indices=True)]
+            
+            return selected_features
             
         except Exception as e:
             logger.warning(f"Feature selection failed: {e}")
-            return list(X.columns)[:max_features]
+            # Fallback: return first few numerical features
+            return self.numerical_features[:max_features]
     
     def _create_statistical_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create statistical aggregation features"""
+        """Create statistical features with memory efficiency"""
         try:
+            if self.quick_mode or self.memory_efficient_mode:
+                logger.info("Skipping statistical features for memory efficiency")
+                return X_train, X_test
+            
             logger.info("Creating statistical features")
             
-            numeric_features = [col for col in self.numerical_features if col in X_train.columns][:6]
+            numerical_cols = [col for col in self.numerical_features if col in X_train.columns][:10]  # Limit columns
             
-            if len(numeric_features) >= 2:
-                # Row-wise statistical features
-                X_train['row_mean'] = X_train[numeric_features].mean(axis=1)
-                X_test['row_mean'] = X_test[numeric_features].mean(axis=1)
-                
-                X_train['row_std'] = X_train[numeric_features].std(axis=1)
-                X_test['row_std'] = X_test[numeric_features].std(axis=1)
-                
-                X_train['row_max'] = X_train[numeric_features].max(axis=1)
-                X_test['row_max'] = X_test[numeric_features].max(axis=1)
-                
-                X_train['row_min'] = X_train[numeric_features].min(axis=1)
-                X_test['row_min'] = X_test[numeric_features].min(axis=1)
-                
-                self.statistical_features.extend(['row_mean', 'row_std', 'row_max', 'row_min'])
+            if len(numerical_cols) < 2:
+                return X_train, X_test
+            
+            # Row-wise statistics
+            X_train_num = X_train[numerical_cols]
+            X_test_num = X_test[numerical_cols]
+            
+            # Mean, std, min, max
+            X_train['row_mean'] = X_train_num.mean(axis=1)
+            X_test['row_mean'] = X_test_num.mean(axis=1)
+            
+            X_train['row_std'] = X_train_num.std(axis=1).fillna(0)
+            X_test['row_std'] = X_test_num.std(axis=1).fillna(0)
+            
+            self.statistical_features.extend(['row_mean', 'row_std'])
             
             logger.info(f"Statistical features completed: {len(self.statistical_features)} features created")
-            
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Statistical features failed: {e}")
+            logger.error(f"Statistical feature creation failed: {e}")
             return X_train, X_test
     
-    def _create_frequency_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create frequency-based features for CTR prediction"""
+    def engineer_features(self, train_df: pd.DataFrame, test_df: pd.DataFrame) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+        """Main feature engineering pipeline with memory management and safe data handling"""
         try:
-            logger.info("Creating frequency features")
+            logger.info("=== CTR Feature engineering started ===")
+            self.processing_stats['start_time'] = time.time()
             
-            categorical_cols = [col for col in self.categorical_features if col in X_train.columns][:5]
+            # Check initial memory
+            if not self.memory_monitor.check_memory_safety(8.0):
+                logger.warning("Low memory detected, enabling memory efficient mode")
+                self.memory_efficient_mode = True
             
-            for col in categorical_cols:
-                try:
-                    # Value frequency
-                    freq_map = X_train[col].value_counts()
-                    
-                    freq_feature = f"{col}_value_freq"
-                    X_train[freq_feature] = X_train[col].map(freq_map)
-                    X_test[freq_feature] = X_test[col].map(freq_map).fillna(0)
-                    
-                    # Relative frequency
-                    rel_freq_feature = f"{col}_rel_freq"
-                    total_count = len(X_train)
-                    X_train[rel_freq_feature] = X_train[freq_feature] / total_count
-                    X_test[rel_freq_feature] = X_test[freq_feature] / total_count
-                    
-                    self.frequency_features.extend([freq_feature, rel_freq_feature])
-                    
-                except Exception as e:
-                    logger.warning(f"Frequency feature creation failed for {col}: {e}")
-                    continue
+            # Detect target column and CTR
+            target_candidates = ['clicked', 'click', 'target', 'label', 'y']
+            self.target_column = None
             
-            logger.info(f"Frequency features completed: {len(self.frequency_features)} features created")
+            for col in target_candidates:
+                if col in train_df.columns:
+                    self.target_column = col
+                    ctr = train_df[col].mean()
+                    logger.info(f"Target column confirmed: {col} (CTR: {ctr:.4f})")
+                    break
             
-            return X_train, X_test
+            if self.target_column is None:
+                logger.error("No target column found")
+                return None, None
             
-        except Exception as e:
-            logger.error(f"Frequency features failed: {e}")
-            return X_train, X_test
-    
-    def _create_cross_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create cross features between categorical variables"""
-        try:
-            logger.info("Creating cross features")
+            # Create feature datasets (exclude target)
+            feature_columns = [col for col in train_df.columns if col != self.target_column]
+            X_train = train_df[feature_columns].copy()
+            X_test = test_df[feature_columns].copy()
+            y_train = train_df[self.target_column].copy()
             
-            categorical_cols = [col for col in self.categorical_features if col in X_train.columns][:4]
+            mode_info = "QUICK MODE" if self.quick_mode else "FULL MODE"
+            efficiency_info = "MEMORY EFFICIENT" if self.memory_efficient_mode else "FULL FEATURES"
+            logger.info(f"Feature engineering initialization ({mode_info}, {efficiency_info})")
+            logger.info(f"Initial data: Training {X_train.shape}, Test {X_test.shape}")
+            logger.info(f"Target column: {self.target_column}")
+            logger.info(f"Original feature count: {len(feature_columns)}")
             
-            cross_count = 0
-            max_crosses = 6
+            # Memory status before processing
+            self.memory_monitor.log_memory_status("Initialization")
             
-            for i in range(len(categorical_cols)):
-                for j in range(i + 1, len(categorical_cols)):
-                    if cross_count >= max_crosses:
-                        break
-                    
-                    col1, col2 = categorical_cols[i], categorical_cols[j]
-                    
-                    try:
-                        cross_feature = f"{col1}_cross_{col2}"
-                        
-                        # Create cross feature by combining values
-                        X_train[cross_feature] = X_train[col1].astype(str) + "_" + X_train[col2].astype(str)
-                        X_test[cross_feature] = X_test[col1].astype(str) + "_" + X_test[col2].astype(str)
-                        
-                        # Encode the cross feature
-                        le = LabelEncoder()
-                        combined_values = pd.concat([X_train[cross_feature], X_test[cross_feature]])
-                        le.fit(combined_values)
-                        
-                        X_train[cross_feature] = le.transform(X_train[cross_feature])
-                        X_test[cross_feature] = le.transform(X_test[cross_feature])
-                        
-                        self.cross_features.append(cross_feature)
-                        self.label_encoders[cross_feature] = le
-                        cross_count += 1
-                        
-                    except Exception as e:
-                        logger.warning(f"Cross feature creation failed for {col1}x{col2}: {e}")
-                        continue
+            # Phase 1: Data preparation and classification
+            logger.info("Phase 1: Data preparation")
             
-            logger.info(f"Cross features completed: {len(self.cross_features)} features created")
+            # Classify columns
+            self._classify_columns(X_train)
             
-            return X_train, X_test
+            # Log feature distribution
+            logger.info(f"Data preparation completed - Train: {X_train.shape}, Test: {X_test.shape}")
             
-        except Exception as e:
-            logger.error(f"Cross features failed: {e}")
-            return X_train, X_test
-    
-    def _create_temporal_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create time-based features if temporal columns exist"""
-        try:
-            logger.info("Creating temporal features")
+            # Phase 2: Safe preprocessing
+            logger.info("Phase 2: Safe preprocessing")
+            X_train, X_test = self._safe_preprocessing(X_train, X_test)
             
-            # Look for potential time-related columns
-            time_cols = [col for col in X_train.columns if any(time_word in col.lower() for time_word in ['time', 'hour', 'day', 'date', 'timestamp'])]
-            
-            for col in time_cols[:3]:  # Limit to 3 columns
-                try:
-                    if X_train[col].dtype in ['int64', 'float64']:
-                        # Assume it's a numeric time feature
-                        
-                        # Hour of day (if values are in 0-23 range)
-                        if X_train[col].max() <= 23 and X_train[col].min() >= 0:
-                            hour_feature = f"{col}_hour_bin"
-                            X_train[hour_feature] = pd.cut(X_train[col], bins=4, labels=['morning', 'afternoon', 'evening', 'night'])
-                            X_test[hour_feature] = pd.cut(X_test[col], bins=4, labels=['morning', 'afternoon', 'evening', 'night'])
-                            
-                            # Encode
-                            le = LabelEncoder()
-                            combined_hour = pd.concat([X_train[hour_feature].astype(str), X_test[hour_feature].astype(str)])
-                            le.fit(combined_hour)
-                            
-                            X_train[hour_feature] = le.transform(X_train[hour_feature].astype(str))
-                            X_test[hour_feature] = le.transform(X_test[hour_feature].astype(str))
-                            
-                            self.temporal_features.append(hour_feature)
-                            self.label_encoders[hour_feature] = le
-                    
-                except Exception as e:
-                    logger.warning(f"Temporal feature creation failed for {col}: {e}")
-                    continue
-            
-            logger.info(f"Temporal features completed: {len(self.temporal_features)} features created")
-            
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.error(f"Temporal features failed: {e}")
-            return X_train, X_test
-    
-    def _create_binning_features_fixed(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create binning features with proper handling"""
-        try:
-            logger.info("Creating binning features")
-            
-            numeric_features = [col for col in self.numerical_features if col in X_train.columns][:4]
-            
-            for col in numeric_features:
-                try:
-                    # Create quantile-based bins
-                    _, bins = pd.qcut(X_train[col], q=5, retbins=True, duplicates='drop')
-                    
-                    bin_feature = f"{col}_binned"
-                    X_train[bin_feature] = pd.cut(X_train[col], bins=bins, include_lowest=True, duplicates='drop')
-                    X_test[bin_feature] = pd.cut(X_test[col], bins=bins, include_lowest=True, duplicates='drop')
-                    
-                    # Encode bins
-                    le = LabelEncoder()
-                    combined_bins = pd.concat([X_train[bin_feature].astype(str), X_test[bin_feature].astype(str)])
-                    le.fit(combined_bins)
-                    
-                    X_train[bin_feature] = le.transform(X_train[bin_feature].astype(str))
-                    X_test[bin_feature] = le.transform(X_test[bin_feature].astype(str))
-                    
-                    self.binning_features.append(bin_feature)
-                    self.label_encoders[bin_feature] = le
-                    
-                except Exception as e:
-                    logger.warning(f"Binning feature creation failed for {col}: {e}")
-                    continue
-            
-            logger.info(f"Binning features completed: {len(self.binning_features)} features created")
-            
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.error(f"Binning features failed: {e}")
-            return X_train, X_test
-    
-    def _create_rank_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create ranking features for CTR prediction"""
-        try:
-            logger.info("Creating rank features")
-            
-            numeric_features = [col for col in self.numerical_features if col in X_train.columns][:5]
-            
-            for col in numeric_features:
-                try:
-                    feature_name = f"{col}_rank"
-                    
-                    # Create rank feature based on training data distribution
-                    X_train[feature_name] = X_train[col].rank(pct=True)
-                    
-                    # For test set, use training set distribution
-                    X_test[feature_name] = X_test[col].rank(pct=True)
-                    
-                    self.rank_features.append(feature_name)
-                    
-                except Exception as e:
-                    logger.warning(f"Rank feature creation failed for {col}: {e}")
-                    continue
-            
-            logger.info(f"Rank features completed: {len(self.rank_features)} features created")
-            
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.error(f"Rank features failed: {e}")
-            return X_train, X_test
-    
-    def _create_ratio_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create ratio features with memory efficiency"""
-        try:
-            if len(self.numerical_features) < 2:
-                return X_train, X_test
-            
-            logger.info("Creating ratio features")
-            
-            # Select numerical features for ratio calculation
-            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:6]
-            
-            ratio_count = 0
-            max_ratios = 8
-            
-            for i in range(len(numeric_features_selected)):
-                for j in range(i + 1, len(numeric_features_selected)):
-                    if ratio_count >= max_ratios:
-                        break
-                    
-                    col1, col2 = numeric_features_selected[i], numeric_features_selected[j]
-                    
-                    try:
-                        # Create ratio feature
-                        feature_name = f"{col1}_div_{col2}"
-                        
-                        denominator_train = X_train[col2].replace(0, 0.001)
-                        denominator_test = X_test[col2].replace(0, 0.001)
-                        
-                        X_train[feature_name] = X_train[col1] / denominator_train
-                        X_test[feature_name] = X_test[col1] / denominator_test
-                        
-                        # Handle infinite values
-                        X_train[feature_name] = X_train[feature_name].replace([np.inf, -np.inf], 0)
-                        X_test[feature_name] = X_test[feature_name].replace([np.inf, -np.inf], 0)
-                        
-                        self.ratio_features.append(feature_name)
-                        ratio_count += 1
-                        
-                    except Exception as e:
-                        logger.warning(f"Ratio feature creation failed for {col1}/{col2}: {e}")
-                        continue
-            
-            logger.info(f"Ratio features completed: {len(self.ratio_features)} features created")
-            
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.error(f"Ratio features failed: {e}")
-            return X_train, X_test
-    
-    def _create_polynomial_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create polynomial features with memory efficiency"""
-        try:
-            if len(self.numerical_features) == 0:
-                return X_train, X_test
-            
-            logger.info("Creating polynomial features")
-            
-            # Select top numerical features for polynomial transformation
-            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:3]
-            
-            for col in numeric_features_selected:
-                try:
-                    # Create squared feature
-                    feature_name = f"{col}_squared"
-                    X_train[feature_name] = X_train[col] ** 2
-                    X_test[feature_name] = X_test[col] ** 2
-                    
-                    self.polynomial_features.append(feature_name)
-                    
-                except Exception as e:
-                    logger.warning(f"Polynomial feature creation failed for {col}: {e}")
-                    continue
-            
-            logger.info(f"Polynomial features completed: {len(self.polynomial_features)} features created")
-            
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.error(f"Polynomial features failed: {e}")
-            return X_train, X_test
-    
-    def _encode_categorical_features_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Safe categorical feature encoding"""
-        try:
-            # Get all categorical features including cross features
-            all_categorical_features = self.categorical_features + self.cross_features
-            
-            for col in all_categorical_features:
-                if col in X_train.columns and col in X_test.columns:
-                    try:
-                        # Safe label encoding with object conversion
-                        train_str = X_train[col].astype('object').fillna('missing')
-                        test_str = X_test[col].astype('object').fillna('missing')
-                        
-                        # Use existing encoder if available
-                        if col in self.label_encoders:
-                            le = self.label_encoders[col]
-                        else:
-                            le = LabelEncoder()
-                            combined = pd.concat([train_str, test_str])
-                            le.fit(combined)
-                            self.label_encoders[col] = le
-                        
-                        # Transform safely
+            # Phase 3: Feature engineering based on mode
+            if self.quick_mode:
+                logger.info("Quick mode: Basic feature engineering only")
+                # Only do essential target encoding for a few features
+                categorical_subset = self.categorical_features[:5]
+                for col in categorical_subset:
+                    if col in X_train.columns:
                         try:
-                            X_train[col] = le.transform(train_str)
-                            X_test[col] = le.transform(test_str)
-                        except ValueError:
-                            # Handle unseen categories
-                            X_train[col] = train_str.map(dict(zip(le.classes_, le.transform(le.classes_)))).fillna(0)
-                            X_test[col] = test_str.map(dict(zip(le.classes_, le.transform(le.classes_)))).fillna(0)
-                        
-                    except Exception as e:
-                        logger.warning(f"Categorical encoding failed for {col}: {e}")
-                        continue
-            
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.error(f"Categorical feature encoding failed: {e}")
-            return X_train, X_test
-    
-    def _create_numeric_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create numeric feature transformations"""
-        try:
-            logger.info("Creating numeric transformations")
-            
-            numeric_features = [col for col in self.numerical_features if col in X_train.columns]
-            
-            for col in numeric_features:
-                if col not in self.scalers:
-                    try:
-                        scaler = StandardScaler()
-                        X_train[col] = scaler.fit_transform(X_train[[col]])
-                        X_test[col] = scaler.transform(X_test[[col]])
-                        
-                        self.scalers[col] = scaler
-                        
-                    except Exception as e:
-                        logger.warning(f"Numeric transformation failed for {col}: {e}")
-                        continue
-            
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.error(f"Numeric feature creation failed: {e}")
-            return X_train, X_test
-    
-    def _final_data_cleanup(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Final data cleanup and validation"""
-        try:
-            logger.info("Final data cleanup")
-            
-            # Remove infinite and NaN values
-            X_train = X_train.replace([np.inf, -np.inf], 0)
-            X_test = X_test.replace([np.inf, -np.inf], 0)
-            
-            X_train = X_train.fillna(0)
-            X_test = X_test.fillna(0)
-            
-            # Ensure consistent columns
-            common_cols = sorted(set(X_train.columns) & set(X_test.columns))
-            X_train = X_train[common_cols]
-            X_test = X_test[common_cols]
-            
-            # Convert all to numeric where possible
-            for col in X_train.columns:
-                try:
-                    X_train[col] = pd.to_numeric(X_train[col], errors='ignore')
-                    X_test[col] = pd.to_numeric(X_test[col], errors='ignore')
-                except Exception:
-                    continue
-            
-            logger.info(f"Final cleanup completed - Train: {X_train.shape}, Test: {X_test.shape}")
-            
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.error(f"Final data cleanup failed: {e}")
-            return X_train, X_test
-    
-    def _finalize_processing(self, X_train: pd.DataFrame, X_test: pd.DataFrame):
-        """Finalize feature engineering processing"""
-        try:
-            self.final_feature_columns = list(X_train.columns)
-            
-            # Update processing stats
-            self.processing_stats['processing_time'] = time.time() - self.processing_stats['start_time']
-            self.processing_stats['total_features_generated'] = len(self.final_feature_columns)
-            self.processing_stats['feature_types_count'] = {
-                'target_encoding': len(self.target_encoding_features),
-                'interaction': len(self.interaction_features),
-                'statistical': len(self.statistical_features),
-                'frequency': len(self.frequency_features),
-                'cross': len(self.cross_features),
-                'temporal': len(self.temporal_features),
-                'binning': len(self.binning_features),
-                'rank': len(self.rank_features),
-                'ratio': len(self.ratio_features),
-                'polynomial': len(self.polynomial_features)
-            }
-            
-            logger.info("Feature engineering processing completed")
-            logger.info(f"Processing time: {self.processing_stats['processing_time']:.2f}s")
-            logger.info(f"Total features generated: {self.processing_stats['total_features_generated']}")
-            logger.info(f"Feature type counts: {self.processing_stats['feature_types_count']}")
-            
-        except Exception as e:
-            logger.warning(f"Processing finalization failed: {e}")
-    
-    def _clean_basic_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Clean basic features"""
-        try:
-            # Remove columns with too many missing values
-            missing_threshold = 0.5
-            
-            for col in list(X_train.columns):
-                train_missing = X_train[col].isnull().sum() / len(X_train)
-                test_missing = X_test[col].isnull().sum() / len(X_test) if col in X_test.columns else 1.0
-                
-                if train_missing > missing_threshold or test_missing > missing_threshold:
-                    X_train = X_train.drop(columns=[col], errors='ignore')
-                    X_test = X_test.drop(columns=[col], errors='ignore')
-                    self.removed_columns.append(col)
-            
-            # Fill remaining missing values
-            X_train = self._safe_fillna(X_train)
-            X_test = self._safe_fillna(X_test)
-            
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.warning(f"Basic feature cleaning failed: {e}")
-            return X_train, X_test
-    
-    def _create_minimal_features(self, train_df: pd.DataFrame, test_df: pd.DataFrame, target_col: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create minimal features as fallback"""
-        try:
-            logger.warning("Creating minimal features as fallback")
-            
-            # Extract target
-            if target_col in train_df.columns:
-                X_train = train_df.drop(columns=[target_col]).copy()
+                            # Simple frequency encoding
+                            value_counts = X_train[col].value_counts()
+                            freq_feature = f"{col}_freq"
+                            X_train[freq_feature] = X_train[col].map(value_counts).fillna(0)
+                            X_test[freq_feature] = X_test[col].map(value_counts).fillna(0)
+                            self.frequency_features.append(freq_feature)
+                        except Exception as e:
+                            logger.warning(f"Quick frequency encoding failed for {col}: {e}")
             else:
-                X_train = train_df.copy()
+                # Full feature engineering
+                logger.info("Phase 3: Target encoding")
+                X_train, X_test = self._safe_target_encoding(X_train, X_test, y_train)
+                
+                logger.info("Phase 4: Interaction features")
+                X_train, X_test = self._create_interaction_features(X_train, X_test, y_train)
+                
+                logger.info("Phase 5: Statistical features")
+                X_train, X_test = self._create_statistical_features(X_train, X_test)
             
-            X_test = test_df.copy()
+            # Final cleanup and validation
+            logger.info("Phase 6: Final processing")
             
-            # Keep only common columns
-            common_cols = sorted(set(X_train.columns) & set(X_test.columns))
-            X_train = X_train[common_cols]
-            X_test = X_test[common_cols]
+            # Remove any remaining object columns that couldn't be processed
+            for col in list(X_train.columns):
+                if X_train[col].dtype == 'object':
+                    logger.warning(f"Removing unprocessed object column: {col}")
+                    X_train = X_train.drop(columns=[col])
+                    X_test = X_test.drop(columns=[col])
             
-            # Simple preprocessing
+            # Feature count validation
+            max_features = self.config.MAX_FEATURES
+            if X_train.shape[1] > max_features:
+                logger.warning(f"Too many features ({X_train.shape[1]}), selecting top {max_features}")
+                # Select features based on variance
+                try:
+                    feature_variances = X_train.var().fillna(0)
+                    top_features = feature_variances.nlargest(max_features).index.tolist()
+                    X_train = X_train[top_features]
+                    X_test = X_test[top_features]
+                except Exception as e:
+                    logger.warning(f"Feature selection failed: {e}")
+                    # Fallback: take first N features
+                    X_train = X_train.iloc[:, :max_features]
+                    X_test = X_test.iloc[:, :max_features]
+            
+            # Final data validation
+            X_train = X_train.select_dtypes(include=[np.number])
+            X_test = X_test.select_dtypes(include=[np.number])
+            
+            # Align columns
+            common_columns = list(set(X_train.columns) & set(X_test.columns))
+            X_train = X_train[common_columns]
+            X_test = X_test[common_columns]
+            
+            # Fill any remaining NaN values
             X_train = X_train.fillna(0)
             X_test = X_test.fillna(0)
             
-            # Convert to numeric
-            for col in X_train.columns:
-                try:
-                    X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0)
-                    X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0)
-                except Exception:
-                    # Use label encoding for non-numeric
-                    le = LabelEncoder()
-                    combined = pd.concat([X_train[col].astype(str), X_test[col].astype(str)])
-                    le.fit(combined)
-                    X_train[col] = le.transform(X_train[col].astype(str))
-                    X_test[col] = le.transform(X_test[col].astype(str))
+            # Final memory cleanup
+            self.memory_monitor.force_cleanup()
             
-            logger.info(f"Minimal features created - Train: {X_train.shape}, Test: {X_test.shape}")
+            # Update statistics
+            self.processing_stats.update({
+                'processing_time': time.time() - self.processing_stats['start_time'],
+                'total_features_generated': X_train.shape[1] - len(feature_columns),
+                'feature_types_count': {
+                    'target_encoding': len(self.target_encoding_features),
+                    'interaction': len(self.interaction_features),
+                    'statistical': len(self.statistical_features),
+                    'frequency': len(self.frequency_features)
+                }
+            })
+            
+            logger.info(f"=== CTR Feature engineering completed ===")
+            logger.info(f"Final features: {X_train.shape[1]} (created: {self.processing_stats['total_features_generated']})")
+            logger.info(f"Processing time: {self.processing_stats['processing_time']:.2f}s")
+            self.memory_monitor.log_memory_status("Feature engineering completed")
             
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Minimal feature creation failed: {e}")
-            raise
+            logger.error(f"Feature engineering failed: {e}")
+            return None, None
+
+# Test function
+if __name__ == "__main__":
+    # Test feature engineering
+    logging.basicConfig(level=logging.INFO)
     
-    def _create_basic_features_only(self, train_df: pd.DataFrame, test_df: pd.DataFrame, target_col: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create only basic features when full processing fails"""
-        try:
-            logger.warning("Using basic features only due to processing failure")
-            return self.create_quick_features(train_df, test_df, target_col)
-            
-        except Exception as e:
-            logger.error(f"Basic feature creation failed: {e}")
-            return self._create_minimal_features(train_df, test_df, target_col)
+    print("CTR Feature Engineering Test")
+    print("=" * 40)
     
-    def get_feature_info(self) -> Dict[str, Any]:
-        """Get feature engineering information"""
-        return {
-            'final_feature_count': len(self.final_feature_columns),
-            'processing_stats': self.processing_stats,
-            'feature_types': {
-                'numerical': len(self.numerical_features),
-                'categorical': len(self.categorical_features),
-                'target_encoding': len(self.target_encoding_features),
-                'interaction': len(self.interaction_features),
-                'statistical': len(self.statistical_features),
-                'frequency': len(self.frequency_features),
-                'cross': len(self.cross_features),
-                'temporal': len(self.temporal_features),
-                'binning': len(self.binning_features),
-                'rank': len(self.rank_features),
-                'ratio': len(self.ratio_features),
-                'polynomial': len(self.polynomial_features)
-            },
-            'removed_columns': self.removed_columns,
-            'quick_mode': self.quick_mode,
-            'memory_efficient_mode': self.memory_efficient_mode
-        }
+    # Create sample data
+    np.random.seed(42)
+    n_samples = 1000
+    
+    sample_data = pd.DataFrame({
+        'feat_a_1': np.random.choice(['A', 'B', 'C', None], n_samples),
+        'feat_a_2': np.random.choice([1, 2, 3], n_samples),
+        'feat_b_1': np.random.randn(n_samples),
+        'feat_b_2': np.random.randn(n_samples),
+        'clicked': np.random.choice([0, 1], n_samples, p=[0.98, 0.02])
+    })
+    
+    # Split into train and test
+    train_df = sample_data.iloc[:800].copy()
+    test_df = sample_data.iloc[800:].copy()
+    test_df = test_df.drop(columns=['clicked'])  # Remove target from test
+    
+    print(f"Sample data: Train {train_df.shape}, Test {test_df.shape}")
+    
+    # Test feature engineering
+    feature_engineer = CTRFeatureEngineer()
+    feature_engineer.set_quick_mode(True)  # Quick test
+    
+    X_train, X_test = feature_engineer.engineer_features(train_df, test_df)
+    
+    if X_train is not None and X_test is not None:
+        print(f"Feature engineering successful!")
+        print(f"Output: Train {X_train.shape}, Test {X_test.shape}")
+        print(f"Generated features: {X_train.shape[1] - 4}")
+    else:
+        print("Feature engineering failed!")
