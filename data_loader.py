@@ -33,10 +33,9 @@ class MemoryMonitor:
             available_gb = memory.available / (1024**3)
             usage_percent = memory.percent / 100.0
             
-            # Apply our limit
             effective_available = min(available_gb, self.memory_limit_gb - used_gb)
             if effective_available < 0:
-                effective_available = min(5.0, available_gb)  # Emergency minimum
+                effective_available = min(5.0, available_gb)
             
             return {
                 'used_gb': used_gb,
@@ -90,22 +89,19 @@ class MemoryMonitor:
         self.quick_mode = enabled
 
 class StreamingDataLoader:
-    """Memory-efficient streaming data loader with 40GB limit enforcement"""
+    """Memory-efficient streaming data loader with complete data processing"""
     
     def __init__(self, config: Config = Config()):
         self.config = config
         self.memory_monitor = MemoryMonitor()
         
-        # Configuration
         self.chunk_size = config.get_optimal_chunk_size()
         self.quick_mode = False
         
-        # State tracking
         self.detected_target_column = None
         self.column_info = {}
         self.temp_files = []
         
-        # Processing statistics
         self.processing_stats = {
             'start_time': None,
             'total_rows_processed': 0,
@@ -124,18 +120,16 @@ class StreamingDataLoader:
     def _detect_target_column(self, df: pd.DataFrame) -> Optional[str]:
         """Detect target column in the dataset"""
         try:
-            # Known CTR target columns
             target_candidates = ['clicked', 'click', 'target', 'label', 'y']
             
             for col in target_candidates:
                 if col in df.columns:
                     unique_values = df[col].nunique()
-                    if unique_values == 2:  # Binary classification
+                    if unique_values == 2:
                         logger.info(f"Target column detected: {col}")
                         self.detected_target_column = col
                         return col
             
-            # Look for binary columns
             binary_columns = []
             for col in df.columns:
                 if df[col].dtype in ['int64', 'int32', 'bool']:
@@ -144,8 +138,7 @@ class StreamingDataLoader:
                         binary_columns.append(col)
             
             if binary_columns:
-                # Select the most likely target
-                target_col = binary_columns[0]  # Take first binary column
+                target_col = binary_columns[0]
                 logger.info(f"Binary target column detected: {target_col}")
                 self.detected_target_column = target_col
                 return target_col
@@ -158,7 +151,6 @@ class StreamingDataLoader:
     def _analyze_parquet_file(self, file_path: Path) -> Dict[str, Any]:
         """Analyze parquet file structure efficiently"""
         try:
-            # Read metadata only
             parquet_file = pq.ParquetFile(file_path)
             
             info = {
@@ -222,7 +214,6 @@ class StreamingDataLoader:
     def _process_chunk_streaming(self, chunk: pd.DataFrame) -> pd.DataFrame:
         """Process data chunk with memory efficiency"""
         try:
-            # Memory check before processing
             if not self.memory_monitor.check_memory_safety(2.0):
                 self.memory_monitor.force_cleanup()
                 if not self.memory_monitor.check_memory_safety(2.0):
@@ -231,20 +222,17 @@ class StreamingDataLoader:
             # Basic data type optimization
             for col in chunk.columns:
                 if chunk[col].dtype == 'object':
-                    # Try to convert to category if not too many unique values
                     if chunk[col].nunique() < len(chunk) * 0.5:
                         try:
                             chunk[col] = chunk[col].astype('category')
                         except:
                             pass
                 elif chunk[col].dtype == 'float64':
-                    # Downcast float64 to float32 where possible
                     try:
                         chunk[col] = pd.to_numeric(chunk[col], downcast='float')
                     except:
                         pass
                 elif chunk[col].dtype == 'int64':
-                    # Downcast int64 where possible
                     try:
                         chunk[col] = pd.to_numeric(chunk[col], downcast='integer')
                     except:
@@ -256,8 +244,9 @@ class StreamingDataLoader:
             logger.error(f"Chunk processing failed: {e}")
             return chunk
     
-    def load_parquet_streaming(self, file_path: Path, max_rows: Optional[int] = None) -> Optional[pd.DataFrame]:
-        """Load parquet file with memory-efficient streaming"""
+    def load_parquet_streaming(self, file_path: Path, max_rows: Optional[int] = None, 
+                             ensure_complete: bool = True) -> Optional[pd.DataFrame]:
+        """Load parquet file with memory-efficient streaming and complete data processing"""
         try:
             self.processing_stats['start_time'] = time.time()
             self.memory_monitor.log_memory_status("Streaming start")
@@ -267,10 +256,15 @@ class StreamingDataLoader:
             if file_info['total_rows'] == 0:
                 return None
             
-            # Determine processing strategy
             total_rows = file_info['total_rows']
-            if max_rows:
-                total_rows = min(total_rows, max_rows)
+            target_rows = total_rows
+            
+            # Apply max_rows limit only if specified and not ensuring complete data
+            if max_rows and not ensure_complete:
+                target_rows = min(total_rows, max_rows)
+                logger.info(f"Processing limited to {target_rows:,} rows (max_rows applied)")
+            elif ensure_complete:
+                logger.info(f"Complete data processing mode: {total_rows:,} rows")
             
             # Memory-based chunk size adjustment
             memory_status = self.memory_monitor.get_memory_status()
@@ -278,22 +272,22 @@ class StreamingDataLoader:
                 self.chunk_size = min(self.chunk_size, 25000)
                 logger.info(f"Reduced chunk size to {self.chunk_size} due to low memory")
             
-            processed_chunks = []
+            processed_data_chunks = []
+            temp_files_created = []
             rows_processed = 0
-            temp_file_path = None
             
             # Process in chunks
             parquet_file = pq.ParquetFile(file_path)
             
-            for batch in parquet_file.iter_batches(batch_size=self.chunk_size):
-                if max_rows and rows_processed >= max_rows:
+            for batch_idx, batch in enumerate(parquet_file.iter_batches(batch_size=self.chunk_size)):
+                if not ensure_complete and max_rows and rows_processed >= max_rows:
                     break
                 
                 # Convert to pandas DataFrame
                 chunk_df = batch.to_pandas()
                 
-                # Limit rows if needed
-                if max_rows and rows_processed + len(chunk_df) > max_rows:
+                # Apply row limit if specified and not ensuring complete data
+                if not ensure_complete and max_rows and rows_processed + len(chunk_df) > max_rows:
                     chunk_df = chunk_df.head(max_rows - rows_processed)
                 
                 # Detect target column in first chunk
@@ -303,50 +297,90 @@ class StreamingDataLoader:
                 # Process chunk
                 processed_chunk = self._process_chunk_streaming(chunk_df)
                 
-                # Memory management
-                if memory_status['available_gb'] < 10 or len(processed_chunks) > 5:
-                    # Save to temp file and clear memory
-                    if processed_chunks:
-                        combined_chunk = pd.concat(processed_chunks, ignore_index=True)
-                        temp_file_path = self._create_temp_file(combined_chunk, "streaming_data")
-                        processed_chunks = []
-                        del combined_chunk
-                        self.memory_monitor.force_cleanup()
-                
-                processed_chunks.append(processed_chunk)
                 rows_processed += len(processed_chunk)
                 self.processing_stats['chunks_processed'] += 1
                 
+                # Memory management - save to temp files for large datasets
+                if len(processed_data_chunks) >= 10 or memory_status['available_gb'] < 10:
+                    if processed_data_chunks:
+                        # Combine current chunks and save to temp file
+                        combined_chunk = pd.concat(processed_data_chunks, ignore_index=True)
+                        temp_file_path = self._create_temp_file(combined_chunk, "streaming_data")
+                        temp_files_created.append(temp_file_path)
+                        processed_data_chunks = []
+                        del combined_chunk
+                        self.memory_monitor.force_cleanup()
+                        
+                        logger.info(f"Saved batch {batch_idx + 1} to temp file, memory cleared")
+                
+                processed_data_chunks.append(processed_chunk)
+                
                 # Progress logging
                 if self.processing_stats['chunks_processed'] % 10 == 0:
-                    progress = (rows_processed / total_rows) * 100
+                    progress = (rows_processed / target_rows) * 100
                     logger.info(f"Progress: {progress:.1f}% ({rows_processed:,} rows)")
                     self.memory_monitor.log_memory_status("Processing")
                 
                 # Memory safety check
                 if not self.memory_monitor.check_memory_safety(5.0):
                     logger.warning("Memory safety threshold reached")
-                    break
+                    if ensure_complete:
+                        # Force save current data to temp file and continue
+                        if processed_data_chunks:
+                            combined_chunk = pd.concat(processed_data_chunks, ignore_index=True)
+                            temp_file_path = self._create_temp_file(combined_chunk, "streaming_data")
+                            temp_files_created.append(temp_file_path)
+                            processed_data_chunks = []
+                            del combined_chunk
+                            self.memory_monitor.force_cleanup()
+                    else:
+                        break
             
             # Combine final result
             final_df = None
-            if processed_chunks:
-                final_df = pd.concat(processed_chunks, ignore_index=True)
             
-            # If we have a temp file, combine with it
-            if temp_file_path and temp_file_path.exists():
-                temp_df = self._load_from_temp_file(temp_file_path)
+            # Handle remaining chunks in memory
+            if processed_data_chunks:
+                final_df = pd.concat(processed_data_chunks, ignore_index=True)
+                logger.info(f"Combined {len(processed_data_chunks)} in-memory chunks")
+            
+            # Load and combine temp files
+            if temp_files_created:
+                temp_dataframes = []
+                
+                # Add in-memory data first
                 if final_df is not None:
-                    final_df = pd.concat([temp_df, final_df], ignore_index=True)
-                else:
-                    final_df = temp_df
-                del temp_df
+                    temp_dataframes.append(final_df)
+                
+                # Load all temp files
+                for temp_file in temp_files_created:
+                    try:
+                        temp_df = self._load_from_temp_file(temp_file)
+                        temp_dataframes.append(temp_df)
+                    except Exception as e:
+                        logger.error(f"Failed to load temp file {temp_file}: {e}")
+                
+                # Combine all data
+                if temp_dataframes:
+                    final_df = pd.concat(temp_dataframes, ignore_index=True)
+                    logger.info(f"Combined {len(temp_dataframes)} data chunks")
+                
+                # Cleanup temp dataframes from memory
+                for temp_df in temp_dataframes:
+                    del temp_df
+                self.memory_monitor.force_cleanup()
             
             # Final cleanup
             self.memory_monitor.force_cleanup()
             self.processing_stats['total_rows_processed'] = rows_processed
             
-            logger.info(f"File streaming completed: {rows_processed:,} rows")
+            if final_df is not None:
+                logger.info(f"File streaming completed: {len(final_df):,} rows (target: {target_rows:,})")
+                
+                # Verify we got complete data if ensure_complete is True
+                if ensure_complete and len(final_df) < total_rows * 0.95:  # Allow 5% tolerance
+                    logger.warning(f"Incomplete data loaded: {len(final_df):,} / {total_rows:,} rows")
+                
             self.memory_monitor.log_memory_status("Streaming completed")
             
             return final_df
@@ -362,7 +396,6 @@ class StreamingDataLoader:
         logger.info("=== Full data streaming loading started ===")
         
         try:
-            # Check memory before starting
             if not self.memory_monitor.check_memory_safety(10.0):
                 logger.error("Insufficient memory for full data loading")
                 return None, None
@@ -370,35 +403,47 @@ class StreamingDataLoader:
             train_df = None
             test_df = None
             
-            # Load training data
+            # Load training data with complete processing
             logger.info("Training data streaming processing started")
             if self.config.TRAIN_PATH.exists():
                 max_train_rows = None if not self.quick_mode else Config.QUICK_SAMPLE_SIZE
-                train_df = self.load_parquet_streaming(self.config.TRAIN_PATH, max_train_rows)
-                
-                if train_df is not None:
-                    # Save to temp file and clear from memory for large datasets
-                    if len(train_df) > 1000000:  # More than 1M rows
-                        train_temp_file = self._create_temp_file(train_df, "train_processed")
-                        del train_df
-                        self.memory_monitor.force_cleanup()
-                        self.memory_monitor.log_memory_status("Training data saved, memory cleared")
-                    
-            # Load test data
+                train_df = self.load_parquet_streaming(
+                    self.config.TRAIN_PATH, 
+                    max_rows=max_train_rows,
+                    ensure_complete=not self.quick_mode  # Ensure complete data for non-quick mode
+                )
+            
+            # Memory cleanup between files
+            self.memory_monitor.force_cleanup()
+            
+            # Load test data with complete processing
             logger.info("Test data streaming processing started")
             if self.config.TEST_PATH.exists():
                 max_test_rows = None if not self.quick_mode else Config.QUICK_TEST_SIZE
-                test_df = self.load_parquet_streaming(self.config.TEST_PATH, max_test_rows)
-            
-            # Reload training data if it was saved to temp
-            if train_df is None and hasattr(self, 'train_temp_file'):
-                logger.info("Reloading training data from temporary storage")
-                train_df = self._load_from_temp_file(self.train_temp_file)
+                test_df = self.load_parquet_streaming(
+                    self.config.TEST_PATH, 
+                    max_rows=max_test_rows,
+                    ensure_complete=not self.quick_mode  # Ensure complete data for non-quick mode
+                )
             
             self.memory_monitor.log_memory_status("Streaming completed")
             
             if train_df is not None and test_df is not None:
                 logger.info(f"=== Full data streaming completed - Training: {train_df.shape}, Test: {test_df.shape} ===")
+                
+                # Verify complete data loading
+                if not self.quick_mode:
+                    expected_train_rows = 10704179  # From file analysis
+                    expected_test_rows = 1527298
+                    
+                    train_completeness = len(train_df) / expected_train_rows
+                    test_completeness = len(test_df) / expected_test_rows
+                    
+                    logger.info(f"Data completeness - Train: {train_completeness:.2%}, Test: {test_completeness:.2%}")
+                    
+                    if train_completeness < 0.95 or test_completeness < 0.95:
+                        logger.warning("Incomplete data loading detected")
+                
                 return train_df, test_df
             else:
                 logger.error("Data loading failed")
@@ -423,7 +468,6 @@ class LargeDataLoader:
         self.quick_mode = False
         self.target_column = None
         
-        # Loading statistics
         self.loading_stats = {
             'start_time': time.time(),
             'data_loaded': False,
@@ -448,24 +492,23 @@ class LargeDataLoader:
         try:
             logger.info(f"Quick mode: Loading {Config.QUICK_SAMPLE_SIZE} training and {Config.QUICK_TEST_SIZE} test samples")
             
-            # Use streaming loader in quick mode
             streaming_loader = StreamingDataLoader(self.config)
             streaming_loader.set_quick_mode(True)
             
             train_df = streaming_loader.load_parquet_streaming(
                 self.config.TRAIN_PATH, 
-                max_rows=Config.QUICK_SAMPLE_SIZE
+                max_rows=Config.QUICK_SAMPLE_SIZE,
+                ensure_complete=False
             )
             
             test_df = streaming_loader.load_parquet_streaming(
                 self.config.TEST_PATH, 
-                max_rows=Config.QUICK_TEST_SIZE
+                max_rows=Config.QUICK_TEST_SIZE,
+                ensure_complete=False
             )
             
-            # Store detected target column
             self.target_column = streaming_loader.get_detected_target_column()
             
-            # Update statistics
             self.loading_stats.update({
                 'data_loaded': True,
                 'train_rows': len(train_df) if train_df is not None else 0,
@@ -484,15 +527,12 @@ class LargeDataLoader:
         """Load complete dataset with memory optimization"""
         logger.info("=== Complete data processing started ===")
         
-        # Use streaming loader
         streaming_loader = StreamingDataLoader(self.config)
-        streaming_loader.set_quick_mode(False)
+        streaming_loader.set_quick_mode(False)  # Ensure complete data loading
         result = streaming_loader.load_full_data_streaming()
         
-        # Store detected target column
         self.target_column = streaming_loader.get_detected_target_column()
         
-        # Update statistics
         self.loading_stats.update({
             'data_loaded': True,
             'train_rows': result[0].shape[0] if result[0] is not None else 0,
@@ -515,7 +555,6 @@ DataLoader = StreamingDataLoader
 SimpleDataLoader = StreamingDataLoader
 
 if __name__ == "__main__":
-    # Test code for development
     logging.basicConfig(level=logging.INFO)
     
     config = Config()
@@ -523,7 +562,6 @@ if __name__ == "__main__":
     try:
         loader = LargeDataLoader(config)
         
-        # Test quick mode
         print("Testing quick mode...")
         loader.set_quick_mode(True)
         train_df, test_df = loader.load_quick_sample_data()
@@ -534,7 +572,6 @@ if __name__ == "__main__":
         print(f"Detected target column: {loader.get_detected_target_column()}")
         print(f"Total samples: {(len(train_df) if train_df is not None else 0) + (len(test_df) if test_df is not None else 0)}")
         
-        # Test memory status
         memory_monitor = MemoryMonitor()
         memory_monitor.log_memory_status("After quick test")
         

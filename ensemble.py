@@ -16,7 +16,6 @@ import warnings
 from pathlib import Path
 import pickle
 
-# Safe imports
 try:
     import joblib
     JOBLIB_AVAILABLE = True
@@ -24,7 +23,6 @@ except ImportError:
     JOBLIB_AVAILABLE = False
 
 from config import Config
-from models import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +31,8 @@ class CTRMetrics:
     
     def __init__(self, target_ctr: float = 0.0191):
         self.target_ctr = target_ctr
-        self.ap_weight = 0.6  # Increased AP weight
-        self.auc_weight = 0.4  # Reduced AUC weight
+        self.ap_weight = 0.6
+        self.auc_weight = 0.4
     
     def combined_score(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
         """Calculate combined score with proper CTR bias penalty"""
@@ -49,6 +47,10 @@ class CTRMetrics:
             unique_classes = np.unique(y_true)
             if len(unique_classes) < 2:
                 return 0.0
+            
+            # Ensure 1D arrays
+            y_true = np.asarray(y_true).flatten()
+            y_pred_proba = np.asarray(y_pred_proba).flatten()
             
             # Clip predictions
             y_pred_proba = np.clip(y_pred_proba, 1e-15, 1 - 1e-15)
@@ -70,7 +72,7 @@ class CTRMetrics:
             ctr_bias = abs(predicted_ctr - actual_ctr)
             
             # Apply penalty for large CTR bias
-            if ctr_bias > 0.005:  # 0.5% tolerance
+            if ctr_bias > 0.005:
                 bias_penalty = min(0.5, ctr_bias * 10)
                 penalized_score = base_score * (1.0 - bias_penalty)
             else:
@@ -87,12 +89,15 @@ class CTRMetrics:
         try:
             base_score = self.combined_score(y_true, y_pred_proba)
             
+            y_true = np.asarray(y_true).flatten()
+            y_pred_proba = np.asarray(y_pred_proba).flatten()
+            
             predicted_ctr = np.mean(y_pred_proba)
             actual_ctr = np.mean(y_true)
             ctr_bias = abs(predicted_ctr - actual_ctr)
             
             # CTR alignment bonus/penalty
-            if ctr_bias <= 0.002:  # Very close to actual CTR
+            if ctr_bias <= 0.002:
                 bonus = min(0.1, (0.002 - ctr_bias) * 50)
                 return base_score * (1.0 + bonus)
             else:
@@ -102,6 +107,21 @@ class CTRMetrics:
         except Exception as e:
             logger.error(f"CTR score calculation failed: {e}")
             return 0.0
+
+def ensure_1d_array(arr) -> np.ndarray:
+    """Ensure array is 1D"""
+    try:
+        arr = np.asarray(arr)
+        if arr.ndim > 1:
+            if arr.shape[1] == 1:
+                return arr.flatten()
+            elif arr.shape[1] == 2:
+                return arr[:, 1]  # Take positive class probabilities
+            else:
+                return arr.flatten()
+        return arr
+    except Exception:
+        return np.array([])
 
 class BaseEnsemble(ABC):
     """Base ensemble class"""
@@ -126,7 +146,7 @@ class BaseEnsemble(ABC):
         """Predict probabilities"""
         pass
     
-    def add_base_model(self, name: str, model: BaseModel):
+    def add_base_model(self, name: str, model):
         """Add base model"""
         self.base_models[name] = model
         logger.info(f"Base model added to {self.name}: {name}")
@@ -153,14 +173,14 @@ class CTRStackingEnsemble(BaseEnsemble):
                 self.is_fitted = True
                 return
             
-            # Generate out-of-fold predictions
+            # Generate out-of-fold predictions with proper shape handling
             logger.info("Generating out-of-fold predictions")
             self.oof_predictions = {}
             
-            # Use provided base_predictions as OOF predictions
             for name, pred in base_predictions.items():
-                if len(pred) == len(y):
-                    self.oof_predictions[name] = pred
+                pred_1d = ensure_1d_array(pred)
+                if len(pred_1d) == len(y):
+                    self.oof_predictions[name] = pred_1d
                 else:
                     logger.warning(f"Prediction length mismatch for {name}, using zeros")
                     self.oof_predictions[name] = np.zeros(len(y))
@@ -172,12 +192,11 @@ class CTRStackingEnsemble(BaseEnsemble):
             self.weights = performance_weights
             
             # Train meta-learner if we have enough data
-            if len(y) > 50:  # Only train meta-learner with sufficient data
+            if len(y) > 50:
                 logger.info("Training meta learners")
                 try:
                     meta_features = np.column_stack([self.oof_predictions[name] for name in self.base_models.keys()])
                     
-                    # Train logistic meta-learner
                     meta_learner = LogisticRegression(
                         max_iter=1000, 
                         random_state=42,
@@ -203,12 +222,13 @@ class CTRStackingEnsemble(BaseEnsemble):
         weights = {}
         total_score = 0.0
         
+        y_array = np.asarray(y).flatten()
+        
         for name, pred in self.oof_predictions.items():
             try:
-                # Use corrected combined score calculation
-                combined_score = self.metrics_calculator.combined_score(y.values, pred)
+                pred_1d = ensure_1d_array(pred)
+                combined_score = self.metrics_calculator.combined_score(y_array, pred_1d)
                 
-                # Ensure minimum weight
                 weights[name] = max(combined_score, 0.1)
                 total_score += weights[name]
                 
@@ -234,17 +254,22 @@ class CTRStackingEnsemble(BaseEnsemble):
             if not self.is_fitted:
                 raise ValueError("Ensemble not fitted")
             
+            # Ensure all predictions are 1D
+            clean_predictions = {}
+            for name, pred in base_predictions.items():
+                clean_predictions[name] = ensure_1d_array(pred)
+            
             # Try meta-learner first if available and we have enough models
-            if 'logistic' in self.meta_learners and len(base_predictions) >= 2:
+            if 'logistic' in self.meta_learners and len(clean_predictions) >= 2:
                 try:
-                    meta_features = np.column_stack([base_predictions[name] for name in self.base_models.keys() if name in base_predictions])
+                    meta_features = np.column_stack([clean_predictions[name] for name in self.base_models.keys() if name in clean_predictions])
                     pred = self.meta_learners['logistic'].predict_proba(meta_features)[:, 1]
-                    return pred
+                    return ensure_1d_array(pred)
                 except Exception as e:
                     logger.warning(f"Meta-learner prediction failed: {e}")
             
             # Fallback to weighted average
-            return self._weighted_average_prediction(base_predictions)
+            return self._weighted_average_prediction(clean_predictions)
             
         except Exception as e:
             logger.error(f"Stacking ensemble prediction failed: {e}")
@@ -256,14 +281,18 @@ class CTRStackingEnsemble(BaseEnsemble):
             if not base_predictions:
                 return np.array([])
                 
-            weighted_pred = np.zeros(len(next(iter(base_predictions.values()))))
+            # Get first prediction to determine length
+            first_pred = next(iter(base_predictions.values()))
+            weighted_pred = np.zeros(len(first_pred))
             total_weight = 0.0
             
             for name, pred in base_predictions.items():
                 if name in self.weights:
                     weight = self.weights[name]
-                    weighted_pred += weight * pred
-                    total_weight += weight
+                    pred_1d = ensure_1d_array(pred)
+                    if len(pred_1d) == len(weighted_pred):
+                        weighted_pred += weight * pred_1d
+                        total_weight += weight
             
             if total_weight > 0:
                 return weighted_pred / total_weight
@@ -278,10 +307,25 @@ class CTRStackingEnsemble(BaseEnsemble):
         try:
             if not base_predictions:
                 return np.array([])
-            return np.mean(list(base_predictions.values()), axis=0)
+            
+            # Ensure all predictions are 1D and same length
+            clean_preds = []
+            for name, pred in base_predictions.items():
+                pred_1d = ensure_1d_array(pred)
+                clean_preds.append(pred_1d)
+            
+            # Check all predictions have same length
+            if len(set(len(p) for p in clean_preds)) == 1:
+                return np.mean(clean_preds, axis=0)
+            else:
+                # Use first prediction as reference
+                return clean_preds[0] if clean_preds else np.array([0.0191])
+                
         except Exception as e:
             logger.error(f"Simple average failed: {e}")
-            return np.full(len(next(iter(base_predictions.values()))), 0.0191)
+            # Return default CTR
+            first_pred = next(iter(base_predictions.values()))
+            return np.full(len(ensure_1d_array(first_pred)), 0.0191)
 
 class CTRDynamicEnsemble(BaseEnsemble):
     """CTR dynamic ensemble with strategy selection"""
@@ -301,9 +345,16 @@ class CTRDynamicEnsemble(BaseEnsemble):
             logger.info("Initializing performance tracking")
             self.performance_history = {}
             
+            # Ensure all predictions are 1D
+            clean_predictions = {}
+            y_array = np.asarray(y).flatten()
+            
+            for name, pred in base_predictions.items():
+                clean_predictions[name] = ensure_1d_array(pred)
+            
             # Calculate weights for different strategies
             logger.info("Calculating multi-strategy weights")
-            self._calculate_strategy_weights(y, base_predictions)
+            self._calculate_strategy_weights(y_array, clean_predictions)
             
             # Select best strategy using corrected scoring
             logger.info("Selecting optimal strategy")
@@ -311,9 +362,9 @@ class CTRDynamicEnsemble(BaseEnsemble):
             
             for strategy in self.strategies:
                 try:
-                    pred = self._apply_strategy(strategy, base_predictions)
-                    if len(pred) > 0 and len(y) > 0:
-                        score = self.metrics_calculator.combined_score(y.values, pred)
+                    pred = self._apply_strategy(strategy, clean_predictions)
+                    if len(pred) > 0 and len(y_array) > 0:
+                        score = self.metrics_calculator.combined_score(y_array, pred)
                         
                         logger.info(f"Strategy {strategy}: Combined Score {score:.4f}")
                         
@@ -335,7 +386,7 @@ class CTRDynamicEnsemble(BaseEnsemble):
             self.best_strategy = 'simple_average'
             self.is_fitted = True
     
-    def _calculate_strategy_weights(self, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
+    def _calculate_strategy_weights(self, y: np.ndarray, base_predictions: Dict[str, np.ndarray]):
         """Calculate weights for different strategies"""
         self.strategy_weights = {
             'simple_average': {name: 1.0 / len(base_predictions) for name in base_predictions.keys()},
@@ -343,14 +394,15 @@ class CTRDynamicEnsemble(BaseEnsemble):
             'ctr_corrected': self._calculate_ctr_corrected_weights(y, base_predictions)
         }
     
-    def _calculate_performance_weights(self, y: pd.Series, base_predictions: Dict[str, np.ndarray]) -> Dict[str, float]:
+    def _calculate_performance_weights(self, y: np.ndarray, base_predictions: Dict[str, np.ndarray]) -> Dict[str, float]:
         """Calculate performance-based weights"""
         weights = {}
         total_score = 0.0
         
         for name, pred in base_predictions.items():
             try:
-                score = self.metrics_calculator.combined_score(y.values, pred)
+                pred_1d = ensure_1d_array(pred)
+                score = self.metrics_calculator.combined_score(y, pred_1d)
                 weights[name] = max(score, 0.1)
                 total_score += weights[name]
                 
@@ -367,7 +419,7 @@ class CTRDynamicEnsemble(BaseEnsemble):
         
         return weights
     
-    def _calculate_ctr_corrected_weights(self, y: pd.Series, base_predictions: Dict[str, np.ndarray]) -> Dict[str, float]:
+    def _calculate_ctr_corrected_weights(self, y: np.ndarray, base_predictions: Dict[str, np.ndarray]) -> Dict[str, float]:
         """Calculate CTR-corrected weights"""
         weights = {}
         total_score = 0.0
@@ -375,16 +427,17 @@ class CTRDynamicEnsemble(BaseEnsemble):
         
         for name, pred in base_predictions.items():
             try:
-                base_score = self.metrics_calculator.combined_score(y.values, pred)
+                pred_1d = ensure_1d_array(pred)
+                base_score = self.metrics_calculator.combined_score(y, pred_1d)
                 
                 # CTR alignment bonus/penalty
-                predicted_ctr = np.mean(pred)
+                predicted_ctr = np.mean(pred_1d)
                 ctr_bias = abs(predicted_ctr - actual_ctr)
                 
-                if ctr_bias <= 0.002:  # Good CTR alignment
+                if ctr_bias <= 0.002:
                     ctr_bonus = min(0.2, (0.002 - ctr_bias) * 100)
                     score = base_score * (1.0 + ctr_bonus)
-                else:  # Poor CTR alignment
+                else:
                     ctr_penalty = min(0.5, ctr_bias * 25)
                     score = base_score * (1.0 - ctr_penalty)
                 
@@ -409,29 +462,43 @@ class CTRDynamicEnsemble(BaseEnsemble):
         try:
             if not base_predictions:
                 return np.array([])
-                
+            
             if strategy == 'simple_average':
-                return np.mean(list(base_predictions.values()), axis=0)
+                clean_preds = [ensure_1d_array(pred) for pred in base_predictions.values()]
+                if len(set(len(p) for p in clean_preds)) == 1:
+                    return np.mean(clean_preds, axis=0)
+                else:
+                    return clean_preds[0]
+                    
             elif strategy in ['performance_weighted', 'ctr_corrected']:
                 weights = self.strategy_weights.get(strategy, {})
-                weighted_pred = np.zeros(len(next(iter(base_predictions.values()))))
+                
+                # Get first prediction to determine length
+                first_pred = next(iter(base_predictions.values()))
+                weighted_pred = np.zeros(len(ensure_1d_array(first_pred)))
                 total_weight = 0.0
                 
                 for name, pred in base_predictions.items():
                     if name in weights:
                         weight = weights[name]
-                        weighted_pred += weight * pred
-                        total_weight += weight
+                        pred_1d = ensure_1d_array(pred)
+                        if len(pred_1d) == len(weighted_pred):
+                            weighted_pred += weight * pred_1d
+                            total_weight += weight
                 
                 if total_weight > 0:
                     return weighted_pred / total_weight
                 else:
-                    return np.mean(list(base_predictions.values()), axis=0)
+                    clean_preds = [ensure_1d_array(pred) for pred in base_predictions.values()]
+                    return np.mean(clean_preds, axis=0)
             else:
-                return np.mean(list(base_predictions.values()), axis=0)
+                clean_preds = [ensure_1d_array(pred) for pred in base_predictions.values()]
+                return np.mean(clean_preds, axis=0)
+                
         except Exception as e:
             logger.error(f"Strategy application failed for {strategy}: {e}")
-            return np.mean(list(base_predictions.values()), axis=0)
+            clean_preds = [ensure_1d_array(pred) for pred in base_predictions.values()]
+            return np.mean(clean_preds, axis=0) if clean_preds else np.array([0.0191])
     
     def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
         """Predict probabilities using best strategy"""
@@ -439,11 +506,17 @@ class CTRDynamicEnsemble(BaseEnsemble):
             if not self.is_fitted:
                 raise ValueError("Ensemble not fitted")
             
-            return self._apply_strategy(self.best_strategy, base_predictions)
+            # Ensure all predictions are 1D
+            clean_predictions = {}
+            for name, pred in base_predictions.items():
+                clean_predictions[name] = ensure_1d_array(pred)
+            
+            return self._apply_strategy(self.best_strategy, clean_predictions)
             
         except Exception as e:
             logger.error(f"Dynamic ensemble prediction failed: {e}")
-            return np.mean(list(base_predictions.values()), axis=0)
+            clean_preds = [ensure_1d_array(pred) for pred in base_predictions.values()]
+            return np.mean(clean_preds, axis=0) if clean_preds else np.array([0.0191])
 
 class CTRMainEnsemble(BaseEnsemble):
     """CTR main ensemble with weighted combination"""
@@ -460,6 +533,13 @@ class CTRMainEnsemble(BaseEnsemble):
         logger.info(f"{self.name} ensemble training started - execution guaranteed")
         
         try:
+            # Ensure all predictions are 1D
+            clean_predictions = {}
+            y_array = np.asarray(y).flatten()
+            
+            for name, pred in base_predictions.items():
+                clean_predictions[name] = ensure_1d_array(pred)
+            
             # Create sub-ensembles
             logger.info("Stage 1: Creating sub-ensembles")
             
@@ -468,7 +548,7 @@ class CTRMainEnsemble(BaseEnsemble):
                 stacking_ensemble = CTRStackingEnsemble(cv_folds=3)
                 for name, model in self.base_models.items():
                     stacking_ensemble.add_base_model(name, model)
-                stacking_ensemble.fit(X, y, base_predictions)
+                stacking_ensemble.fit(X, y, clean_predictions)
                 self.sub_ensembles['stacking'] = stacking_ensemble
                 logger.info("Stacking ensemble created successfully")
             except Exception as e:
@@ -479,7 +559,7 @@ class CTRMainEnsemble(BaseEnsemble):
                 dynamic_ensemble = CTRDynamicEnsemble()
                 for name, model in self.base_models.items():
                     dynamic_ensemble.add_base_model(name, model)
-                dynamic_ensemble.fit(X, y, base_predictions)
+                dynamic_ensemble.fit(X, y, clean_predictions)
                 self.sub_ensembles['dynamic'] = dynamic_ensemble
                 logger.info("Dynamic ensemble created successfully")
             except Exception as e:
@@ -491,9 +571,10 @@ class CTRMainEnsemble(BaseEnsemble):
             
             for ensemble_name, ensemble in self.sub_ensembles.items():
                 try:
-                    pred = ensemble.predict_proba(base_predictions)
-                    combined_score = self.metrics_calculator.combined_score(y.values, pred)
-                    ctr_score = self.metrics_calculator.ctr_score(y.values, pred)
+                    pred = ensemble.predict_proba(clean_predictions)
+                    pred_1d = ensure_1d_array(pred)
+                    combined_score = self.metrics_calculator.combined_score(y_array, pred_1d)
+                    ctr_score = self.metrics_calculator.ctr_score(y_array, pred_1d)
                     
                     ensemble_scores[ensemble_name] = {
                         'combined_score': combined_score,
@@ -504,7 +585,6 @@ class CTRMainEnsemble(BaseEnsemble):
                     
                 except Exception as e:
                     logger.warning(f"{ensemble_name} ensemble evaluation failed: {e}")
-                    # Still add with minimal score
                     ensemble_scores[ensemble_name] = {
                         'combined_score': 0.1,
                         'ctr_score': 0.1
@@ -518,27 +598,26 @@ class CTRMainEnsemble(BaseEnsemble):
                 for ensemble_name, scores in ensemble_scores.items():
                     self.ensemble_weights[ensemble_name] = scores['combined_score'] / total_score
             else:
-                # Equal weights fallback
                 n_ensembles = len(self.sub_ensembles)
                 if n_ensembles > 0:
                     self.ensemble_weights = {name: 1.0 / n_ensembles for name in self.sub_ensembles.keys()}
                 else:
-                    self.final_prediction = np.mean(list(base_predictions.values()), axis=0)
+                    self.final_prediction = np.mean([ensure_1d_array(pred) for pred in clean_predictions.values()], axis=0)
             
             # Calculate final ensemble prediction
             if self.sub_ensembles:
                 ensemble_predictions = {}
                 for ensemble_name, ensemble in self.sub_ensembles.items():
                     try:
-                        pred = ensemble.predict_proba(base_predictions)
-                        ensemble_predictions[ensemble_name] = pred
+                        pred = ensemble.predict_proba(clean_predictions)
+                        ensemble_predictions[ensemble_name] = ensure_1d_array(pred)
                     except Exception as e:
                         logger.warning(f"Final prediction failed for {ensemble_name}: {e}")
                 
                 if ensemble_predictions:
                     self.final_prediction = self._calculate_final_ensemble_prediction(ensemble_predictions)
                 else:
-                    self.final_prediction = np.mean(list(base_predictions.values()), axis=0)
+                    self.final_prediction = np.mean([ensure_1d_array(pred) for pred in clean_predictions.values()], axis=0)
             
             self.is_fitted = True
             
@@ -547,7 +626,11 @@ class CTRMainEnsemble(BaseEnsemble):
         except Exception as e:
             logger.error(f"{self.name} ensemble training failed: {e}")
             # Emergency fallback
-            self.final_prediction = np.mean(list(base_predictions.values()), axis=0)
+            try:
+                clean_predictions = {name: ensure_1d_array(pred) for name, pred in base_predictions.items()}
+                self.final_prediction = np.mean([pred for pred in clean_predictions.values()], axis=0)
+            except:
+                self.final_prediction = np.array([0.0191])
             self.is_fitted = True
     
     def _calculate_final_ensemble_prediction(self, ensemble_predictions: Dict[str, np.ndarray]) -> np.ndarray:
@@ -555,23 +638,28 @@ class CTRMainEnsemble(BaseEnsemble):
         try:
             if not ensemble_predictions:
                 return np.array([])
-                
-            weighted_pred = np.zeros(len(next(iter(ensemble_predictions.values()))))
+            
+            # Get first prediction to determine length
+            first_pred = next(iter(ensemble_predictions.values()))
+            weighted_pred = np.zeros(len(first_pred))
             total_weight = 0.0
             
             for ensemble_name, pred in ensemble_predictions.items():
                 if ensemble_name in self.ensemble_weights:
                     weight = self.ensemble_weights[ensemble_name]
-                    weighted_pred += weight * pred
-                    total_weight += weight
+                    pred_1d = ensure_1d_array(pred)
+                    if len(pred_1d) == len(weighted_pred):
+                        weighted_pred += weight * pred_1d
+                        total_weight += weight
             
             if total_weight > 0:
                 return weighted_pred / total_weight
             else:
-                return np.mean(list(ensemble_predictions.values()), axis=0)
+                return np.mean([ensure_1d_array(pred) for pred in ensemble_predictions.values()], axis=0)
+                
         except Exception as e:
             logger.error(f"Final ensemble prediction calculation failed: {e}")
-            return np.mean(list(ensemble_predictions.values()), axis=0)
+            return np.mean([ensure_1d_array(pred) for pred in ensemble_predictions.values()], axis=0)
     
     def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
         """Predict probabilities using main ensemble"""
@@ -579,23 +667,28 @@ class CTRMainEnsemble(BaseEnsemble):
             if not self.is_fitted:
                 raise ValueError("Ensemble not fitted")
             
+            # Ensure all predictions are 1D
+            clean_predictions = {}
+            for name, pred in base_predictions.items():
+                clean_predictions[name] = ensure_1d_array(pred)
+            
             if len(self.sub_ensembles) == 0:
-                return self._simple_weighted_average(base_predictions)
+                return self._simple_weighted_average(clean_predictions)
             
             # Get predictions from sub-ensembles
             ensemble_predictions = {}
             
             for ensemble_name, ensemble in self.sub_ensembles.items():
                 try:
-                    pred = ensemble.predict_proba(base_predictions)
-                    ensemble_predictions[ensemble_name] = pred
+                    pred = ensemble.predict_proba(clean_predictions)
+                    ensemble_predictions[ensemble_name] = ensure_1d_array(pred)
                 except Exception as e:
                     logger.warning(f"Sub-ensemble prediction failed ({ensemble_name}): {e}")
             
             if ensemble_predictions:
                 return self._calculate_final_ensemble_prediction(ensemble_predictions)
             else:
-                return self._simple_weighted_average(base_predictions)
+                return self._simple_weighted_average(clean_predictions)
             
         except Exception as e:
             logger.error(f"Main ensemble prediction failed: {e}")
@@ -606,10 +699,12 @@ class CTRMainEnsemble(BaseEnsemble):
         try:
             if not base_predictions:
                 return np.array([])
-            return np.mean(list(base_predictions.values()), axis=0)
+            clean_preds = [ensure_1d_array(pred) for pred in base_predictions.values()]
+            return np.mean(clean_preds, axis=0)
         except Exception as e:
             logger.error(f"Simple weighted average failed: {e}")
-            return np.full(len(next(iter(base_predictions.values()))), 0.0191)
+            first_pred = next(iter(base_predictions.values()))
+            return np.full(len(ensure_1d_array(first_pred)), 0.0191)
 
 class CTREnsembleManager:
     """CTR ensemble manager with corrected metric calculation"""
@@ -624,10 +719,9 @@ class CTREnsembleManager:
         self.metrics_calculator = CTRMetrics()
         self.target_combined_score = getattr(config, 'TARGET_COMBINED_SCORE', 0.34)
         
-        # Initialize ensemble types
         self.ensemble_types = ['main_ensemble']
         
-    def add_base_model(self, name: str, model: BaseModel):
+    def add_base_model(self, name: str, model):
         """Add base model to ensemble manager"""
         self.base_models[name] = model
         logger.info(f"Base model added to ensemble manager: {name}")
@@ -637,20 +731,25 @@ class CTREnsembleManager:
         logger.info("All ensemble training started - execution guaranteed")
         
         try:
-            # Get base model predictions
+            # Get base model predictions with proper error handling
             logger.info("Generating base model predictions")
             base_predictions = {}
             
             for name, model in self.base_models.items():
                 try:
-                    pred = model.predict_proba(X)
-                    base_predictions[name] = pred
-                    pred_ctr = np.mean(pred)
+                    if hasattr(model, 'predict_proba'):
+                        pred = model.predict_proba(X)
+                        pred_1d = ensure_1d_array(pred)
+                    else:
+                        pred_1d = np.full(len(X), 0.0191)
+                        
+                    base_predictions[name] = pred_1d
+                    pred_ctr = np.mean(pred_1d)
                     actual_ctr = np.mean(y)
                     logger.info(f"{name} model prediction completed - CTR: {pred_ctr:.4f} (actual: {actual_ctr:.4f})")
                 except Exception as e:
                     logger.error(f"{name} model prediction failed: {e}")
-                    base_predictions[name] = np.full(len(X), 0.0191)  # Default CTR
+                    base_predictions[name] = np.full(len(X), 0.0191)
             
             # Create and train main ensemble
             logger.info("Creating main ensemble")
@@ -678,129 +777,16 @@ class CTREnsembleManager:
             logger.error(f"Ensemble training failed: {e}")
             # Create fallback ensemble
             main_ensemble = CTRMainEnsemble()
-            main_ensemble.final_prediction = np.mean(list(base_predictions.values()), axis=0) if base_predictions else np.array([0.0191])
+            if base_predictions:
+                clean_preds = [ensure_1d_array(pred) for pred in base_predictions.values()]
+                main_ensemble.final_prediction = np.mean(clean_preds, axis=0)
+            else:
+                main_ensemble.final_prediction = np.array([0.0191])
             main_ensemble.is_fitted = True
             self.ensembles['main_ensemble'] = main_ensemble
             self.final_ensemble = main_ensemble
     
-    def evaluate_ensembles(self, X: pd.DataFrame, y: pd.Series):
-        """Evaluate ensembles with corrected scoring"""
-        logger.info("Ensemble evaluation started")
-        
-        # Get base model predictions
-        base_predictions = {}
-        for name, model in self.base_models.items():
-            try:
-                pred = model.predict_proba(X)
-                base_predictions[name] = pred
-            except Exception as e:
-                logger.error(f"{name} model prediction failed during evaluation: {e}")
-                base_predictions[name] = np.full(len(X), 0.0191)
-        
-        best_score = -1
-        best_ensemble_name = None
-        
-        # Evaluate each ensemble
-        for ensemble_type, ensemble in self.ensembles.items():
-            try:
-                if not ensemble.is_fitted:
-                    continue
-                
-                ensemble_pred = ensemble.predict_proba(base_predictions)
-                combined_score = self.metrics_calculator.combined_score(y.values, ensemble_pred)
-                ctr_score = self.metrics_calculator.ctr_score(y.values, ensemble_pred)
-                
-                self.ensemble_results[f"ensemble_{ensemble_type}"] = combined_score
-                self.ensemble_results[f"ensemble_{ensemble_type}_ctr"] = ctr_score
-                
-                execution_guaranteed = getattr(ensemble, 'is_fitted', False)
-                self.ensemble_results[f"ensemble_{ensemble_type}_execution_guaranteed"] = 1.0 if execution_guaranteed else 0.0
-                
-                logger.info(f"{ensemble_type} ensemble Combined Score: {combined_score:.4f}")
-                logger.info(f"{ensemble_type} ensemble CTR Score: {ctr_score:.4f}")
-                logger.info(f"{ensemble_type} ensemble Execution Guaranteed: {'Yes' if execution_guaranteed else 'No'}")
-                
-                predicted_ctr = ensemble_pred.mean()
-                actual_ctr = y.mean()
-                ctr_bias = abs(predicted_ctr - actual_ctr)
-                logger.info(f"{ensemble_type} CTR: Predicted {predicted_ctr:.4f} vs Actual {actual_ctr:.4f} (Bias: {ctr_bias:.4f})")
-                
-                target_achieved = combined_score >= self.target_combined_score
-                logger.info(f"{ensemble_type} target achieved: {target_achieved} (Target: {self.target_combined_score})")
-                
-                if execution_guaranteed and combined_score > best_score:
-                    best_score = combined_score
-                    best_ensemble_name = ensemble_type
-                
-            except Exception as e:
-                logger.error(f"{ensemble_type} ensemble evaluation failed: {e}")
-        
-        # Select best ensemble
-        if best_ensemble_name:
-            self.best_ensemble = self.ensembles[best_ensemble_name]
-            logger.info(f"Best performance selected among execution-guaranteed ensembles")
-            logger.info(f"Best performance ensemble: {best_ensemble_name} (Combined Score: {best_score:.4f})")
-        else:
-            logger.warning("No execution-guaranteed ensemble found, selecting first available")
-            if self.ensembles:
-                self.best_ensemble = list(self.ensembles.values())[0]
-                best_ensemble_name = list(self.ensembles.keys())[0]
-        
-        if best_score < self.target_combined_score:
-            logger.info(f"Target Combined Score not achieved (Best: {best_score:.4f}, Target: {self.target_combined_score})")
-        
-        logger.info("Ensemble evaluation completed")
-    
-    def predict_best_ensemble(self, X: pd.DataFrame) -> np.ndarray:
-        """Predict using best ensemble"""
-        logger.info("Best performance ensemble prediction started - execution guaranteed")
-        
-        try:
-            if self.best_ensemble is None:
-                raise ValueError("No best ensemble available")
-            
-            # Get base model predictions
-            base_predictions = {}
-            for name, model in self.base_models.items():
-                try:
-                    pred = model.predict_proba(X)
-                    base_predictions[name] = pred
-                except Exception as e:
-                    logger.error(f"{name} model prediction failed: {e}")
-                    base_predictions[name] = np.full(len(X), 0.0191)
-            
-            # Get ensemble prediction
-            ensemble_pred = self.best_ensemble.predict_proba(base_predictions)
-            predicted_ctr = ensemble_pred.mean()
-            
-            logger.info(f"Ensemble prediction successful - CTR: {predicted_ctr:.4f}")
-            
-            return ensemble_pred
-            
-        except Exception as e:
-            logger.error(f"Best ensemble prediction failed: {e}")
-            
-            # Fallback to individual model average
-            if len(self.base_models) > 0:
-                logger.info("Falling back to simple model average")
-                predictions = []
-                for model in self.base_models.values():
-                    try:
-                        pred = model.predict_proba(X)
-                        predictions.append(pred)
-                    except Exception as e2:
-                        logger.error(f"Individual model fallback failed: {e2}")
-                        predictions.append(np.full(len(X), 0.0191))
-                
-                if predictions:
-                    return np.mean(predictions, axis=0)
-                else:
-                    return np.full(len(X), 0.0191)
-            else:
-                logger.error("No models available for prediction")
-                return np.full(len(X), 0.0191)
-    
-    def predict_with_best_ensemble(self, X: pd.DataFrame) -> Tuple[np.ndarray, bool]:
+    def predict_with_best_ensemble(self, X: pd.DataFrame) -> np.ndarray:
         """Predict using best ensemble with success indicator"""
         logger.info("Best ensemble prediction started")
         
@@ -817,34 +803,40 @@ class CTREnsembleManager:
             if available_ensemble is None:
                 logger.warning("No fitted ensemble available, using individual model")
                 if len(self.base_models) > 0:
-                    # Use first available model
                     model_name = list(self.base_models.keys())[0]
                     model = self.base_models[model_name]
-                    predictions = model.predict_proba(X)
+                    if hasattr(model, 'predict_proba'):
+                        predictions = model.predict_proba(X)
+                        predictions = ensure_1d_array(predictions)
+                    else:
+                        predictions = np.full(len(X), 0.0191)
                     logger.info(f"Using individual model: {model_name}")
-                    return predictions, False
+                    return predictions
                 else:
-                    # Default fallback
                     logger.warning("No models available, using default predictions")
-                    return np.full(len(X), 0.0191), False
+                    return np.full(len(X), 0.0191)
             
             # Get base predictions
             base_predictions = {}
             for name, model in self.base_models.items():
                 try:
-                    pred = model.predict_proba(X)
-                    base_predictions[name] = pred
+                    if hasattr(model, 'predict_proba'):
+                        pred = model.predict_proba(X)
+                        base_predictions[name] = ensure_1d_array(pred)
+                    else:
+                        base_predictions[name] = np.full(len(X), 0.0191)
                 except Exception as e:
                     logger.error(f"{name} model prediction failed: {e}")
                     base_predictions[name] = np.full(len(X), 0.0191)
             
             # Get ensemble prediction
             ensemble_pred = available_ensemble.predict_proba(base_predictions)
+            ensemble_pred = ensure_1d_array(ensemble_pred)
             predicted_ctr = ensemble_pred.mean()
             
             logger.info(f"Ensemble prediction completed - CTR: {predicted_ctr:.4f}")
             
-            return ensemble_pred, True
+            return ensemble_pred
             
         except Exception as e:
             logger.error(f"Best ensemble prediction failed: {e}")
@@ -855,11 +847,14 @@ class CTREnsembleManager:
                 model_name = list(self.base_models.keys())[0]
                 model = self.base_models[model_name]
                 try:
-                    predictions = model.predict_proba(X)
-                    return predictions, False
+                    if hasattr(model, 'predict_proba'):
+                        predictions = model.predict_proba(X)
+                        return ensure_1d_array(predictions)
+                    else:
+                        return np.full(len(X), 0.0191)
                 except Exception as e2:
                     logger.error(f"Individual model fallback failed: {e2}")
-                    return np.full(len(X), 0.0191), False
+                    return np.full(len(X), 0.0191)
             else:
                 logger.error("No models available for prediction")
-                return np.full(len(X), 0.0191), False
+                return np.full(len(X), 0.0191)
