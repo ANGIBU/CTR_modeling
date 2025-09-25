@@ -196,7 +196,7 @@ class CTRFeatureEngineer:
                         self.numerical_features.append(col)
     
     def _safe_preprocessing(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Safe data preprocessing with memory efficiency"""
+        """Safe data preprocessing with memory efficiency and complex data handling"""
         try:
             logger.info("Safe data preprocessing started")
             
@@ -204,10 +204,31 @@ class CTRFeatureEngineer:
             if not self.memory_monitor.check_memory_safety(5.0):
                 self.memory_monitor.force_cleanup()
             
+            # Special handling for complex sequence columns
+            problematic_columns = []
+            for col in X_train.columns:
+                if col in self.numerical_features:
+                    # Check for complex string sequences in "numerical" columns
+                    sample_values = X_train[col].dropna().head(100)
+                    if sample_values.dtype == 'object':
+                        # Check if contains comma-separated sequences
+                        has_sequences = sample_values.astype(str).str.contains(',', na=False).any()
+                        if has_sequences:
+                            logger.warning(f"Complex sequence data detected in {col}, removing from numerical features")
+                            problematic_columns.append(col)
+                            # Remove from numerical features and mark for removal
+                            if col in self.numerical_features:
+                                self.numerical_features.remove(col)
+                            self.removed_columns.append(col)
+            
             # Handle missing values safely for categorical columns
             for col in self.categorical_features:
                 if col in X_train.columns and col in X_test.columns:
                     try:
+                        # Skip problematic columns
+                        if col in problematic_columns:
+                            continue
+                            
                         # Safe categorical conversion
                         X_train[col] = self.data_converter.safe_categorical_conversion(X_train[col])
                         X_test[col] = self.data_converter.safe_categorical_conversion(X_test[col])
@@ -224,13 +245,28 @@ class CTRFeatureEngineer:
                     except Exception as e:
                         logger.warning(f"Categorical preprocessing failed for {col}: {e}")
                         # Fallback to string conversion
-                        X_train[col] = X_train[col].astype(str).fillna('missing')
-                        X_test[col] = X_test[col].astype(str).fillna('missing')
+                        try:
+                            X_train[col] = X_train[col].astype(str).fillna('missing')
+                            X_test[col] = X_test[col].astype(str).fillna('missing')
+                        except:
+                            # If even string conversion fails, mark for removal
+                            problematic_columns.append(col)
+                            logger.warning(f"Marking {col} for removal due to conversion issues")
             
             # Handle missing values for numerical columns
             for col in self.numerical_features:
                 if col in X_train.columns and col in X_test.columns:
                     try:
+                        # Skip problematic columns
+                        if col in problematic_columns:
+                            continue
+                            
+                        # Ensure numeric data type
+                        if X_train[col].dtype == 'object':
+                            # Try to convert to numeric
+                            X_train[col] = pd.to_numeric(X_train[col], errors='coerce')
+                            X_test[col] = pd.to_numeric(X_test[col], errors='coerce')
+                        
                         # Use median for numerical columns
                         median_val = X_train[col].median()
                         if pd.isna(median_val):
@@ -241,8 +277,21 @@ class CTRFeatureEngineer:
                         
                     except Exception as e:
                         logger.warning(f"Numerical preprocessing failed for {col}: {e}")
-                        X_train[col] = X_train[col].fillna(0)
-                        X_test[col] = X_test[col].fillna(0)
+                        try:
+                            X_train[col] = X_train[col].fillna(0)
+                            X_test[col] = X_test[col].fillna(0)
+                        except:
+                            problematic_columns.append(col)
+                            logger.warning(f"Marking {col} for removal due to preprocessing issues")
+            
+            # Remove problematic columns
+            if problematic_columns:
+                columns_to_remove = [col for col in problematic_columns if col in X_train.columns]
+                if columns_to_remove:
+                    logger.warning(f"Removing {len(columns_to_remove)} problematic columns: {columns_to_remove[:5]}...")  # Show first 5
+                    X_train = X_train.drop(columns=columns_to_remove)
+                    X_test = X_test.drop(columns=columns_to_remove)
+                    self.removed_columns.extend(columns_to_remove)
             
             logger.info("Safe data preprocessing completed")
             return X_train, X_test
@@ -252,11 +301,11 @@ class CTRFeatureEngineer:
             return X_train, X_test
     
     def _safe_target_encoding(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Safe target encoding for categorical features"""
+        """Safe target encoding for categorical features with proper data handling"""
         try:
             if self.memory_efficient_mode:
                 # Limit number of columns for memory efficiency
-                categorical_subset = self.categorical_features[:min(20, len(self.categorical_features))]
+                categorical_subset = self.categorical_features[:min(15, len(self.categorical_features))]
             else:
                 categorical_subset = self.categorical_features
             
@@ -267,47 +316,66 @@ class CTRFeatureEngineer:
                     continue
                 
                 try:
-                    # Ensure consistent string categorical data
-                    X_train[col] = self.data_converter.ensure_string_categorical(X_train[col])
-                    X_test[col] = self.data_converter.ensure_string_categorical(X_test[col])
-                    
                     # Check for memory before encoding
                     if not self.memory_monitor.check_memory_safety(2.0):
                         logger.warning(f"Skipping target encoding for {col} due to memory constraints")
                         continue
                     
+                    # Convert to consistent string format for encoding
+                    train_col_str = X_train[col].astype(str).fillna('missing')
+                    test_col_str = X_test[col].astype(str).fillna('missing')
+                    
+                    # Skip if too many unique values (memory constraint)
+                    if train_col_str.nunique() > self.config.MAX_CATEGORICAL_UNIQUE:
+                        logger.warning(f"Skipping {col}: too many unique values ({train_col_str.nunique()})")
+                        continue
+                    
+                    # Create temporary DataFrames for encoding
+                    train_temp_df = pd.DataFrame({col: train_col_str})
+                    test_temp_df = pd.DataFrame({col: test_col_str})
+                    
                     # Target encoding with smoothing
                     encoder = TargetEncoder(smooth='auto', target_type='binary')
                     
-                    # Fit on training data
-                    X_train_encoded = encoder.fit_transform(X_train[[col]], y_train)
-                    X_test_encoded = encoder.transform(X_test[[col]])
+                    # Fit and transform
+                    train_encoded = encoder.fit_transform(train_temp_df, y_train)
+                    test_encoded = encoder.transform(test_temp_df)
                     
-                    # Create feature names
+                    # Create new feature names and add as new columns
                     feature_name = f"{col}_target_enc"
-                    
-                    # Add encoded features
-                    X_train[feature_name] = X_train_encoded.flatten()
-                    X_test[feature_name] = X_test_encoded.flatten()
+                    X_train[feature_name] = train_encoded[col].values
+                    X_test[feature_name] = test_encoded[col].values
                     
                     # Additional frequency-based features
-                    value_counts = X_train[col].value_counts()
+                    value_counts = train_col_str.value_counts()
                     freq_feature = f"{col}_freq"
-                    X_train[freq_feature] = X_train[col].map(value_counts).fillna(0)
-                    X_test[freq_feature] = X_test[col].map(value_counts).fillna(0)
+                    X_train[freq_feature] = train_col_str.map(value_counts).fillna(0)
+                    X_test[freq_feature] = test_col_str.map(value_counts).fillna(0)
                     
-                    # CTR variance feature
-                    ctr_var_feature = f"{col}_ctr_var"
-                    ctr_variance = X_train.groupby(col).apply(lambda x: y_train.iloc[x.index].var()).fillna(0)
-                    X_train[ctr_var_feature] = X_train[col].map(ctr_variance)
-                    X_test[ctr_var_feature] = X_test[col].map(ctr_variance).fillna(0)
+                    # CTR variance feature (safe calculation)
+                    try:
+                        ctr_var_feature = f"{col}_ctr_var"
+                        # Calculate CTR variance by category
+                        category_stats = train_temp_df.assign(target=y_train).groupby(col)['target'].agg(['var', 'count']).fillna(0)
+                        # Only use categories with sufficient samples
+                        category_stats = category_stats[category_stats['count'] >= 5]
+                        ctr_variance_map = category_stats['var'].to_dict()
+                        
+                        X_train[ctr_var_feature] = train_col_str.map(ctr_variance_map).fillna(0)
+                        X_test[ctr_var_feature] = test_col_str.map(ctr_variance_map).fillna(0)
+                        
+                        self.target_encoding_features.extend([feature_name, freq_feature, ctr_var_feature])
+                    except Exception as var_e:
+                        logger.warning(f"CTR variance calculation failed for {col}: {var_e}")
+                        self.target_encoding_features.extend([feature_name, freq_feature])
                     
-                    self.target_encoding_features.extend([feature_name, freq_feature, ctr_var_feature])
                     self.target_encoders[col] = encoder
                     
                     # Memory cleanup after each encoding
                     if len(self.target_encoding_features) % 5 == 0:
                         self.memory_monitor.force_cleanup()
+                    
+                    logger.info(f"Target encoding successful for {col}: {len([f for f in [feature_name, freq_feature, ctr_var_feature] if f in self.target_encoding_features])} features")
                     
                 except Exception as e:
                     logger.warning(f"Target encoding failed for {col}: {e}")
