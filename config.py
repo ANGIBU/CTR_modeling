@@ -32,32 +32,33 @@ class Config:
     SUBMISSION_PATH = DATA_DIR / "sample_submission.csv"
     SUBMISSION_TEMPLATE_PATH = DATA_DIR / "sample_submission.csv"
     
-    # Memory configuration (40GB limit - 60% of 64GB)
-    MAX_MEMORY_GB = 40.0  # Reduced from higher values
-    MEMORY_WARNING_THRESHOLD = 0.75  # 30GB
-    MEMORY_CRITICAL_THRESHOLD = 0.85  # 34GB
-    MEMORY_ABORT_THRESHOLD = 0.95  # 38GB
+    # Memory configuration (35GB limit - adjusted for feature engineering)
+    MAX_MEMORY_GB = 35.0  # Reduced from 40GB for stability
+    MEMORY_WARNING_THRESHOLD = 0.70  # 24.5GB
+    MEMORY_CRITICAL_THRESHOLD = 0.80  # 28GB
+    MEMORY_ABORT_THRESHOLD = 0.90  # 31.5GB
     
-    # Processing configuration optimized for 40GB limit
-    CHUNK_SIZE = 50000  # Reduced from 100000 for memory efficiency
-    BATCH_SIZE_CPU = 8000  # Reduced batch size for CPU processing
-    BATCH_SIZE_GPU = 16000
+    # Processing configuration for memory efficiency
+    CHUNK_SIZE = 40000  # Increased for better processing
+    BATCH_SIZE_CPU = 10000  # Increased batch size
+    BATCH_SIZE_GPU = 20000
     
-    # Data size limits (adjusted for memory efficiency)
-    MAX_TRAIN_SIZE = 8000000  # Reduced from 10M to manage memory better
-    MAX_TEST_SIZE = 1200000   # Reduced accordingly
+    # Data size limits
+    MAX_TRAIN_SIZE = 10704179  # Full dataset
+    MAX_TEST_SIZE = 1527298   # Full dataset
     
     # Sampling configuration for memory management
-    AGGRESSIVE_SAMPLING_THRESHOLD = 0.8  # Start sampling at 80% memory
+    AGGRESSIVE_SAMPLING_THRESHOLD = 0.75  # Start sampling at 75% memory
     MIN_SAMPLE_SIZE = 100000
-    MAX_SAMPLE_SIZE = 5000000  # Reduced max sample size
+    MAX_SAMPLE_SIZE = 8000000  # Increased max sample size
     
     # Feature engineering limits
-    MAX_FEATURES = 500  # Reduced from higher values
-    MAX_CATEGORICAL_UNIQUE = 1000  # Limit unique categories
+    MAX_FEATURES = 600  # Increased for more features
+    MAX_CATEGORICAL_UNIQUE = 5000  # Increased limit for categorical features
+    SEQ_HASH_SIZE = 100000  # Hash size for seq column processing
     
     # Model training configuration
-    CV_FOLDS = 3  # Reduced from 5 for memory efficiency
+    CV_FOLDS = 3
     EARLY_STOPPING_ROUNDS = 50
     RANDOM_STATE = 42
     
@@ -66,51 +67,69 @@ class Config:
     QUICK_TEST_SIZE = 25
     
     # Thread configuration
-    N_JOBS = min(6, os.cpu_count())  # Limit threads to reduce memory overhead
+    N_JOBS = min(8, os.cpu_count())  # Increased thread count
     
-    # Model parameters optimized for memory efficiency
+    # Target encoding configuration
+    TARGET_ENCODING_CHUNKS = 20  # Number of chunks for target encoding
+    MIN_CATEGORY_SAMPLES = 5  # Minimum samples for target encoding
+    SMOOTHING_FACTOR = 100  # Smoothing factor for target encoding
+    
+    # CTR correction parameters
+    TARGET_CTR = 0.0191
+    CTR_CORRECTION_FACTOR = 0.5  # Factor to reduce over-prediction
+    CTR_ALIGNMENT_WEIGHT = 0.3  # Weight for CTR alignment in scoring
+    
+    # Model parameters for memory efficiency and performance
     MODEL_PARAMS = {
         'lightgbm': {
             'objective': 'binary',
             'metric': 'binary_logloss',
             'boosting_type': 'gbdt',
-            'num_leaves': 31,  # Reduced for memory efficiency
-            'learning_rate': 0.1,
+            'num_leaves': 127,  # Increased for better performance
+            'learning_rate': 0.01,  # Reduced for stability
             'feature_fraction': 0.8,
             'bagging_fraction': 0.8,
             'bagging_freq': 5,
             'verbose': -1,
             'random_state': RANDOM_STATE,
             'n_jobs': N_JOBS,
-            'max_depth': 6,  # Reduced depth
-            'min_data_in_leaf': 100,  # Increased for stability
-            'force_col_wise': True,  # Better memory usage
+            'max_depth': 8,  # Increased depth
+            'min_data_in_leaf': 50,  # Reduced for more splits
+            'reg_alpha': 0.1,
+            'reg_lambda': 0.1,
+            'force_col_wise': True,
+            'n_estimators': 1000,  # Increased iterations
         },
         'xgboost': {
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
-            'max_depth': 6,  # Reduced depth
-            'learning_rate': 0.1,
+            'max_depth': 10,  # Increased depth
+            'learning_rate': 0.01,  # Reduced for stability
             'subsample': 0.8,
             'colsample_bytree': 0.8,
             'random_state': RANDOM_STATE,
             'n_jobs': N_JOBS,
-            'tree_method': 'hist',  # Memory efficient method
-            'max_leaves': 31,  # Limit leaves
+            'tree_method': 'hist',
+            'max_leaves': 127,  # Increased leaves
+            'n_estimators': 1000,  # Increased iterations
+            'reg_alpha': 0.1,
+            'reg_lambda': 0.1,
         },
         'logistic': {
-            'max_iter': 1000,
+            'max_iter': 2000,  # Increased iterations
             'random_state': RANDOM_STATE,
             'n_jobs': N_JOBS,
-            'solver': 'lbfgs',  # Memory efficient solver
+            'solver': 'saga',  # Changed solver for large datasets
+            'C': 0.001,  # Increased regularization
+            'class_weight': 'balanced',
         }
     }
     
     # Ensemble configuration
     ENSEMBLE_WEIGHTS = {
-        'lightgbm': 0.4,
+        'lightgbm': 0.45,
         'xgboost': 0.35,
-        'logistic': 0.25
+        'logistic': 0.20
     }
     
     @classmethod
@@ -135,9 +154,9 @@ class Config:
         try:
             memory = psutil.virtual_memory()
             available_gb = memory.available / (1024**3)
-            return min(available_gb, cls.MAX_MEMORY_GB)  # Never exceed our limit
+            return min(available_gb, cls.MAX_MEMORY_GB)
         except:
-            return cls.MAX_MEMORY_GB * 0.8  # Conservative fallback
+            return cls.MAX_MEMORY_GB * 0.8
     
     @classmethod
     def get_memory_usage_percent(cls) -> float:
@@ -146,11 +165,11 @@ class Config:
             memory = psutil.virtual_memory()
             return memory.percent
         except:
-            return 50.0  # Conservative fallback
+            return 50.0
     
     @classmethod
     def should_use_sampling(cls) -> bool:
-        """Check if aggressive sampling should be used"""
+        """Check if sampling should be used"""
         try:
             memory_usage = cls.get_memory_usage_percent() / 100.0
             return memory_usage > cls.AGGRESSIVE_SAMPLING_THRESHOLD
@@ -164,13 +183,13 @@ class Config:
             available_memory = cls.get_available_memory()
             
             if available_memory < 20:
-                return 25000  # Very conservative for low memory
-            elif available_memory < 30:
-                return cls.CHUNK_SIZE  # Use default
+                return 20000
+            elif available_memory < 25:
+                return cls.CHUNK_SIZE
             else:
-                return min(cls.CHUNK_SIZE * 2, 75000)  # Can use larger chunks
+                return min(cls.CHUNK_SIZE * 2, 80000)
         except:
-            return 25000  # Conservative fallback
+            return 20000
     
     @classmethod
     def validate_system_requirements(cls):
@@ -249,8 +268,8 @@ class Config:
     
     @classmethod
     def verify_data_requirements(cls):
-        """Large data requirements validation"""
-        print("=== Large data requirements validation ===")
+        """Data requirements validation"""
+        print("=== Data requirements validation ===")
         
         requirements = {
             'train_file_exists': cls.TRAIN_PATH.exists(),
@@ -263,12 +282,10 @@ class Config:
             'expected_test_size': cls.MAX_TEST_SIZE,
         }
         
-        # Additional validations
-        requirements['train_size_adequate'] = requirements['train_file_size_mb'] > 1000  # > 1GB
-        requirements['test_size_adequate'] = requirements['test_file_size_mb'] > 100    # > 100MB
-        requirements['memory_adequate'] = requirements['memory_available'] >= 20       # >= 20GB minimum
+        requirements['train_size_adequate'] = requirements['train_file_size_mb'] > 1000
+        requirements['test_size_adequate'] = requirements['test_file_size_mb'] > 100
+        requirements['memory_adequate'] = requirements['memory_available'] >= 20
         
-        # Display results
         for key, value in requirements.items():
             status = "✓" if value else "✗"
             print(f"{status} {key}: {value}")
@@ -283,7 +300,7 @@ class Config:
         
         print(f"\nAll requirements met: {'✓' if all_met else '✗'}")
         if all_met:
-            print("Large data processing ready with memory limit!")
+            print("Data processing ready with memory limit!")
         else:
             print("Requirements not met. Check data files and system resources.")
         
@@ -298,6 +315,8 @@ class Config:
             'max_train_size': cls.MAX_TRAIN_SIZE,
             'max_test_size': cls.MAX_TEST_SIZE,
             'memory_limit_gb': cls.MAX_MEMORY_GB,
+            'target_encoding_chunks': cls.TARGET_ENCODING_CHUNKS,
+            'seq_hash_size': cls.SEQ_HASH_SIZE,
             'memory_thresholds': {
                 'warning': cls.MEMORY_WARNING_THRESHOLD,
                 'critical': cls.MEMORY_CRITICAL_THRESHOLD,
@@ -311,16 +330,20 @@ class Config:
             'feature_limits': {
                 'max_features': cls.MAX_FEATURES,
                 'max_categorical_unique': cls.MAX_CATEGORICAL_UNIQUE
+            },
+            'ctr_correction': {
+                'target_ctr': cls.TARGET_CTR,
+                'correction_factor': cls.CTR_CORRECTION_FACTOR,
+                'alignment_weight': cls.CTR_ALIGNMENT_WEIGHT
             }
         }
     
     @classmethod
     def get_processing_config(cls):
-        """Get processing configuration optimized for current system"""
+        """Get processing configuration for current system"""
         available_memory = cls.get_available_memory()
         memory_usage = cls.get_memory_usage_percent()
         
-        # Adjust configuration based on memory status
         config = {
             'chunk_size': cls.get_optimal_chunk_size(),
             'n_jobs': cls.N_JOBS,
@@ -330,16 +353,15 @@ class Config:
             'memory_usage': memory_usage
         }
         
-        # Memory-based adjustments
         if available_memory < 25:
             config.update({
-                'chunk_size': 20000,
+                'chunk_size': 15000,
                 'n_jobs': max(1, cls.N_JOBS // 2),
                 'aggressive_gc': True
             })
-        elif available_memory > 35:
+        elif available_memory > 30:
             config.update({
-                'chunk_size': min(75000, cls.CHUNK_SIZE * 2),
+                'chunk_size': min(80000, cls.CHUNK_SIZE * 2),
                 'n_jobs': cls.N_JOBS,
                 'aggressive_gc': False
             })
@@ -350,28 +372,19 @@ class Config:
 config = Config()
 
 if __name__ == "__main__":
-    # Validation script
     print("CTR Modeling System Configuration Validation")
     print("=" * 50)
     
-    # Setup directories
     Config.setup_directories()
-    
-    # Validate system
     Config.validate_system_requirements()
-    
-    # Validate paths
     Config.validate_paths()
-    
-    # Verify data requirements
     Config.verify_data_requirements()
     
-    # Display memory efficient config
-    print("\n=== Memory Efficient Configuration ===")
+    print("\n=== Memory Configuration ===")
     mem_config = Config.get_memory_efficient_config()
     for key, value in mem_config.items():
         print(f"{key}: {value}")
     
-    print(f"\nMemory limit enforced: {Config.MAX_MEMORY_GB}GB (60% of 64GB system)")
+    print(f"\nMemory limit: {Config.MAX_MEMORY_GB}GB")
     print(f"Current memory usage: {Config.get_memory_usage_percent():.1f}%")
     print(f"Available for processing: {Config.get_available_memory():.1f}GB")
