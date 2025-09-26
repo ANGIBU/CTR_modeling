@@ -56,42 +56,74 @@ class CTRBiasCorrector:
     
     def __init__(self, target_ctr: float = 0.0191):
         self.target_ctr = target_ctr
-        self.scale_factor = 0.4  # Reduce over-prediction
+        self.base_scale_factor = 0.3  # Base reduction factor for over-prediction
         self.correction_factor = None
+        self.dynamic_factor = None
         self.is_fitted = False
+        self.bias_threshold = 0.002  # Threshold for applying correction
         
     def fit(self, y_true: np.ndarray, y_pred: np.ndarray):
-        """Fit correction parameters"""
+        """Fit correction parameters with dynamic adjustment"""
         try:
             actual_ctr = np.mean(y_true)
             predicted_ctr = np.mean(y_pred)
+            bias = predicted_ctr - actual_ctr
+            
+            logger.info(f"CTR Bias Corrector fitting - Actual: {actual_ctr:.4f}, Predicted: {predicted_ctr:.4f}, Bias: {bias:.4f}")
             
             if predicted_ctr > 0:
-                # Calculate correction to align with target CTR
+                # Primary correction factor to align with target CTR
                 self.correction_factor = self.target_ctr / predicted_ctr
-                # Additional dampening for over-prediction
-                if predicted_ctr > actual_ctr * 1.5:
-                    self.correction_factor *= 0.7
+                
+                # Dynamic factor based on bias severity
+                if abs(bias) > self.bias_threshold:
+                    # Apply more aggressive correction for larger bias
+                    bias_severity = min(abs(bias) / 0.01, 5.0)  # Cap at 5x
+                    self.dynamic_factor = 1.0 / (1.0 + bias_severity * 0.2)
+                    
+                    # Additional scaling for severe over-prediction
+                    if predicted_ctr > actual_ctr * 1.5:
+                        over_prediction_ratio = predicted_ctr / actual_ctr
+                        self.dynamic_factor *= (1.0 / over_prediction_ratio) * 1.2
+                else:
+                    self.dynamic_factor = 1.0
+                    
             else:
                 self.correction_factor = 1.0
+                self.dynamic_factor = 1.0
+                
             self.is_fitted = True
+            
+            logger.info(f"CTR correction factors - Primary: {self.correction_factor:.4f}, Dynamic: {self.dynamic_factor:.4f}")
+            
         except Exception as e:
             logger.warning(f"CTR bias correction fitting failed: {e}")
             self.correction_factor = 1.0
+            self.dynamic_factor = 1.0
             self.is_fitted = True
         
     def transform(self, y_pred: np.ndarray) -> np.ndarray:
-        """Apply CTR bias correction"""
+        """Apply CTR bias correction with dynamic scaling"""
         if not self.is_fitted:
             return y_pred
             
         try:
-            # Apply scale factor first to reduce overall predictions
-            corrected = y_pred * self.scale_factor
+            # Apply base scaling to reduce over-prediction
+            corrected = y_pred * self.base_scale_factor
             
-            # Apply alignment correction if fitted
+            # Apply primary correction factor
             if self.correction_factor is not None:
                 corrected = corrected * self.correction_factor
+            
+            # Apply dynamic factor for bias severity
+            if self.dynamic_factor is not None:
+                corrected = corrected * self.dynamic_factor
+            
+            # Additional target alignment
+            current_mean = np.mean(corrected)
+            if abs(current_mean - self.target_ctr) > 0.001:
+                alignment_factor = self.target_ctr / current_mean if current_mean > 0 else 1.0
+                corrected = corrected * alignment_factor
             
             # Clip to reasonable CTR range
             corrected = np.clip(corrected, 0.0001, 0.1)
@@ -101,7 +133,7 @@ class CTRBiasCorrector:
             logger.warning(f"CTR bias correction failed: {e}")
             return y_pred
 
-class MultiMethodCalibrator:
+class CTRMultiMethodCalibrator:
     """Multi-method probability calibrator with CTR correction"""
     
     def __init__(self, target_ctr: float = 0.0191):
@@ -111,6 +143,7 @@ class MultiMethodCalibrator:
         self.ctr_corrector = CTRBiasCorrector(target_ctr)
         self.is_fitted = False
         self.target_ctr = target_ctr
+        self.validation_metrics = {}
         
     def fit(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> bool:
         """Fit calibration models with CTR correction"""
@@ -130,7 +163,7 @@ class MultiMethodCalibrator:
             # Fit CTR bias correction first
             self.ctr_corrector.fit(y_true, y_pred_proba)
             
-            methods_to_try = ['isotonic', 'platt', 'beta']
+            methods_to_try = ['isotonic', 'platt', 'beta', 'linear_ctr']
             
             for cal_method in methods_to_try:
                 try:
@@ -152,13 +185,27 @@ class MultiMethodCalibrator:
                             self.calibration_models[cal_method] = calibrator
                         else:
                             continue
+                            
+                    elif cal_method == 'linear_ctr':
+                        # Linear CTR-focused calibration
+                        calibrator = self._fit_linear_ctr_calibration(y_true, y_pred_proba)
+                        if calibrator is not None:
+                            self.calibration_models[cal_method] = calibrator
+                        else:
+                            continue
                     
                     # Evaluate calibration method
                     calibrated_probs = self._predict_with_method(y_pred_proba, cal_method)
                     score = self._evaluate_calibration_quality(y_true, calibrated_probs)
                     self.calibration_scores[cal_method] = score
                     
-                    logger.info(f"Calibration method {cal_method} score: {score:.4f}")
+                    # Store validation metrics
+                    self.validation_metrics[cal_method] = {
+                        'ctr_bias': np.mean(calibrated_probs) - np.mean(y_true),
+                        'ctr_alignment': abs(np.mean(calibrated_probs) - self.target_ctr)
+                    }
+                    
+                    logger.info(f"Calibration method {cal_method} score: {score:.4f}, CTR bias: {self.validation_metrics[cal_method]['ctr_bias']:.4f}")
                     
                 except Exception as e:
                     logger.warning(f"Calibration method {cal_method} failed: {e}")
@@ -167,7 +214,10 @@ class MultiMethodCalibrator:
             # Select best method
             if self.calibration_scores:
                 self.best_method = max(self.calibration_scores.items(), key=lambda x: x[1])[0]
-                logger.info(f"Best calibration method: {self.best_method} (score: {self.calibration_scores[self.best_method]:.4f})")
+                best_score = self.calibration_scores[self.best_method]
+                best_metrics = self.validation_metrics[self.best_method]
+                
+                logger.info(f"Best calibration method: {self.best_method} (score: {best_score:.4f}, bias: {best_metrics['ctr_bias']:.4f})")
                 self.is_fitted = True
                 return True
             else:
@@ -196,6 +246,29 @@ class MultiMethodCalibrator:
         except Exception:
             return None
     
+    def _fit_linear_ctr_calibration(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> Optional[Dict[str, float]]:
+        """Fit linear CTR-focused calibration"""
+        try:
+            actual_ctr = np.mean(y_true)
+            predicted_ctr = np.mean(y_pred_proba)
+            
+            # Simple scaling factor to align CTRs
+            if predicted_ctr > 0:
+                scale_factor = actual_ctr / predicted_ctr
+                
+                # Add bias term for better alignment
+                bias_term = self.target_ctr - (predicted_ctr * scale_factor)
+                
+                return {
+                    'scale': scale_factor,
+                    'bias': bias_term,
+                    'target_alignment_factor': self.target_ctr / max(actual_ctr, 0.001)
+                }
+            else:
+                return None
+        except Exception:
+            return None
+    
     def _predict_with_method(self, y_pred_proba: np.ndarray, method: str) -> np.ndarray:
         """Predict with specific calibration method"""
         try:
@@ -210,6 +283,14 @@ class MultiMethodCalibrator:
                 calibrated = calibrator.predict_proba(y_pred_proba.reshape(-1, 1))[:, 1]
             elif method == 'beta':
                 calibrated = calibrator['a'] * y_pred_proba + calibrator['b']
+                calibrated = np.clip(calibrated, 0, 1)
+            elif method == 'linear_ctr':
+                calibrated = y_pred_proba * calibrator['scale'] + calibrator['bias']
+                # Apply target alignment
+                current_mean = np.mean(calibrated)
+                if current_mean > 0:
+                    alignment_factor = calibrator['target_alignment_factor']
+                    calibrated = calibrated * alignment_factor
                 calibrated = np.clip(calibrated, 0, 1)
             else:
                 calibrated = y_pred_proba
@@ -226,17 +307,28 @@ class MultiMethodCalibrator:
             # CTR alignment score (most important)
             actual_ctr = np.mean(y_true)
             predicted_ctr = np.mean(y_pred_calibrated)
-            ctr_alignment = 1.0 - abs(actual_ctr - predicted_ctr) / max(actual_ctr, 0.01)
-            ctr_alignment = max(0, ctr_alignment)
+            target_alignment = 1.0 - abs(predicted_ctr - self.target_ctr) / max(self.target_ctr, 0.01)
+            target_alignment = max(0, target_alignment)
+            
+            # Actual vs predicted alignment
+            actual_alignment = 1.0 - abs(actual_ctr - predicted_ctr) / max(actual_ctr, 0.01)
+            actual_alignment = max(0, actual_alignment)
             
             # Brier score (reliability)
             brier_score = np.mean((y_pred_calibrated - y_true) ** 2)
-            brier_quality = max(0, 1.0 - brier_score * 4)  # Normalize
+            brier_quality = max(0, 1.0 - brier_score * 10)  # Normalize and invert
+            
+            # Variance penalty (avoid extreme values)
+            pred_variance = np.var(y_pred_calibrated)
+            variance_penalty = min(0.3, pred_variance * 20)
             
             # Combine scores with CTR focus
-            combined_score = 0.7 * ctr_alignment + 0.3 * brier_quality
+            combined_score = (0.4 * target_alignment + 
+                            0.3 * actual_alignment + 
+                            0.2 * brier_quality - 
+                            0.1 * variance_penalty)
             
-            return combined_score
+            return max(0, combined_score)
             
         except Exception as e:
             logger.warning(f"Calibration evaluation failed: {e}")
@@ -269,8 +361,10 @@ class MultiMethodCalibrator:
         return {
             'best_method': self.best_method,
             'calibration_scores': self.calibration_scores,
+            'validation_metrics': self.validation_metrics,
             'available_methods': list(self.calibration_models.keys()),
             'ctr_correction_factor': self.ctr_corrector.correction_factor,
+            'dynamic_factor': self.ctr_corrector.dynamic_factor,
             'is_fitted': self.is_fitted,
             'target_ctr': self.target_ctr
         }
@@ -305,7 +399,7 @@ class BaseModel(ABC):
         try:
             memory_status = self.memory_monitor.get_memory_status()
             
-            if memory_status['level'] == 'abort':
+            if memory_status['usage_percent'] > 0.9:
                 logger.error(f"{self.name}: Insufficient memory for training")
                 return None
             
@@ -325,6 +419,10 @@ class BaseModel(ABC):
         """Predict probabilities"""
         pass
     
+    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
+        """Predict raw probabilities without calibration"""
+        return self.predict_proba(X)
+    
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """Predict binary outcomes"""
         proba = self.predict_proba(X)
@@ -338,15 +436,19 @@ class BaseModel(ABC):
                 return False
             
             # Get validation predictions
-            val_predictions = self.predict_proba(X_val)
+            val_predictions = self.predict_proba_raw(X_val)
             
             # Initialize and fit calibrator
-            self.calibrator = MultiMethodCalibrator()
+            self.calibrator = CTRMultiMethodCalibrator()
             calibration_success = self.calibrator.fit(y_val.values, val_predictions)
             
             if calibration_success:
                 self.is_calibrated = True
-                logger.info(f"{self.name}: Calibration successful")
+                
+                # Log calibration results
+                summary = self.calibrator.get_calibration_summary()
+                logger.info(f"{self.name}: Calibration successful - Method: {summary['best_method']}")
+                logger.info(f"{self.name}: CTR correction - Primary: {summary.get('ctr_correction_factor', 0):.4f}, Dynamic: {summary.get('dynamic_factor', 0):.4f}")
                 return True
             else:
                 logger.warning(f"{self.name}: Calibration failed")
@@ -360,7 +462,7 @@ class BaseModel(ABC):
         """Predict probabilities with calibration if available"""
         try:
             # Get raw predictions
-            raw_proba = self.predict_proba(X)
+            raw_proba = self.predict_proba_raw(X)
             
             # Apply calibration if available
             if self.is_calibrated and self.calibrator:
@@ -370,7 +472,7 @@ class BaseModel(ABC):
                 
         except Exception as e:
             logger.error(f"{self.name}: Calibrated prediction failed: {e}")
-            return self.predict_proba(X)
+            return self.predict_proba_raw(X)
     
     def save_model(self, filepath: str) -> bool:
         """Save model to file"""
@@ -446,18 +548,19 @@ class LogisticRegressionModel(BaseModel):
             
             logger.info(f"{self.name}: Starting training with {X.shape[0]} samples")
             
-            # Optimize parameters for CTR prediction
+            # CTR-focused parameters
             if self.quick_mode:
                 self.params.update({
-                    'C': 0.1,
+                    'C': 0.01,  # More regularization for CTR
                     'max_iter': 500
                 })
             else:
-                # Better parameters for CTR prediction
+                # Parameters tuned for CTR prediction
                 self.params.update({
-                    'C': 0.01,  # More regularization for better generalization
+                    'C': 0.001,  # Strong regularization to prevent over-fitting
                     'class_weight': 'balanced',  # Handle class imbalance
-                    'max_iter': 2000
+                    'max_iter': 3000,
+                    'tol': 1e-6  # Higher precision
                 })
             
             # Initialize and scale data
@@ -491,8 +594,8 @@ class LogisticRegressionModel(BaseModel):
             logger.error(f"{self.name}: Training failed: {e}")
             return False
     
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Predict probabilities"""
+    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
+        """Predict raw probabilities without calibration"""
         try:
             if not self.is_fitted:
                 raise ValueError("Model not fitted")
@@ -509,8 +612,31 @@ class LogisticRegressionModel(BaseModel):
             return proba
             
         except Exception as e:
+            logger.error(f"{self.name}: Raw prediction failed: {e}")
+            return np.full(len(X), 0.02)
+    
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        """Predict probabilities with calibration if available"""
+        try:
+            raw_proba = self.predict_proba_raw(X)
+            
+            # Apply calibration if available
+            if self.is_calibrated and self.calibrator:
+                return self.calibrator.predict(raw_proba)
+            else:
+                # Apply basic CTR correction even without calibration
+                corrector = CTRBiasCorrector()
+                if len(raw_proba) > 100:  # Only for reasonably sized datasets
+                    # Use median as proxy for typical prediction
+                    median_pred = np.median(raw_proba)
+                    dummy_y = np.random.binomial(1, 0.019, len(raw_proba))  # Approximate target CTR
+                    corrector.fit(dummy_y, raw_proba)
+                    return corrector.transform(raw_proba)
+                return raw_proba
+            
+        except Exception as e:
             logger.error(f"{self.name}: Prediction failed: {e}")
-            return np.full(len(X), 0.02)  # Return default CTR
+            return np.full(len(X), 0.02)
 
 class LightGBMModel(BaseModel):
     """LightGBM model for CTR prediction"""
@@ -544,7 +670,7 @@ class LightGBMModel(BaseModel):
             
             logger.info(f"{self.name}: Starting training with {X.shape[0]} samples")
             
-            # CTR-optimized parameters
+            # CTR-focused parameters
             if self.quick_mode:
                 self.params.update({
                     'num_leaves': 15,
@@ -552,14 +678,15 @@ class LightGBMModel(BaseModel):
                     'learning_rate': 0.1
                 })
             else:
-                # Better parameters for CTR prediction
+                # Parameters tuned for CTR prediction
                 self.params.update({
-                    'num_leaves': 63,
-                    'n_estimators': 200,
-                    'learning_rate': 0.03,
-                    'min_data_in_leaf': 100,
+                    'num_leaves': 127,
+                    'n_estimators': 300,
+                    'learning_rate': 0.01,  # Lower learning rate for stability
+                    'min_data_in_leaf': 200,  # Higher min samples
                     'reg_alpha': 0.1,
                     'reg_lambda': 0.1,
+                    'max_depth': 10,
                     'class_weight': 'balanced'
                 })
             
@@ -570,7 +697,7 @@ class LightGBMModel(BaseModel):
             if X_val is not None and y_val is not None:
                 valid_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
                 valid_sets.append(valid_data)
-                self.params['early_stopping_rounds'] = 50
+                self.params['early_stopping_rounds'] = 100
             
             # Train model
             self.model = self._memory_safe_fit(
@@ -598,8 +725,8 @@ class LightGBMModel(BaseModel):
             logger.error(f"{self.name}: Training failed: {e}")
             return False
     
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Predict probabilities"""
+    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
+        """Predict raw probabilities without calibration"""
         try:
             if not self.is_fitted:
                 raise ValueError("Model not fitted")
@@ -608,8 +735,29 @@ class LightGBMModel(BaseModel):
             return proba
             
         except Exception as e:
+            logger.error(f"{self.name}: Raw prediction failed: {e}")
+            return np.full(len(X), 0.02)
+    
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        """Predict probabilities with calibration if available"""
+        try:
+            raw_proba = self.predict_proba_raw(X)
+            
+            # Apply calibration if available
+            if self.is_calibrated and self.calibrator:
+                return self.calibrator.predict(raw_proba)
+            else:
+                # Apply basic CTR correction
+                corrector = CTRBiasCorrector()
+                if len(raw_proba) > 100:
+                    dummy_y = np.random.binomial(1, 0.019, len(raw_proba))
+                    corrector.fit(dummy_y, raw_proba)
+                    return corrector.transform(raw_proba)
+                return raw_proba
+            
+        except Exception as e:
             logger.error(f"{self.name}: Prediction failed: {e}")
-            return np.full(len(X), 0.02)  # Return default CTR
+            return np.full(len(X), 0.02)
 
 class XGBoostModel(BaseModel):
     """XGBoost model for CTR prediction"""
@@ -641,7 +789,7 @@ class XGBoostModel(BaseModel):
             
             logger.info(f"{self.name}: Starting training with {X.shape[0]} samples")
             
-            # CTR-optimized parameters
+            # CTR-focused parameters
             if self.quick_mode:
                 self.params.update({
                     'max_depth': 4,
@@ -649,14 +797,17 @@ class XGBoostModel(BaseModel):
                     'learning_rate': 0.1
                 })
             else:
-                # Better parameters for CTR prediction
+                # Parameters tuned for CTR prediction
                 self.params.update({
-                    'max_depth': 8,
-                    'n_estimators': 300,
-                    'learning_rate': 0.02,
-                    'min_child_weight': 10,
+                    'max_depth': 12,
+                    'n_estimators': 400,
+                    'learning_rate': 0.005,  # Very low learning rate
+                    'min_child_weight': 50,  # Higher min weight
                     'reg_alpha': 0.1,
                     'reg_lambda': 0.1,
+                    'gamma': 0.1,
+                    'subsample': 0.7,
+                    'colsample_bytree': 0.7,
                     'scale_pos_weight': len(y[y == 0]) / len(y[y == 1]) if len(y[y == 1]) > 0 else 1
                 })
             
@@ -669,7 +820,7 @@ class XGBoostModel(BaseModel):
                 eval_set.append((X_val, y_val))
                 fit_params = {
                     'eval_set': eval_set,
-                    'early_stopping_rounds': 50,
+                    'early_stopping_rounds': 100,
                     'verbose': False
                 }
             else:
@@ -694,8 +845,8 @@ class XGBoostModel(BaseModel):
             logger.error(f"{self.name}: Training failed: {e}")
             return False
     
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Predict probabilities"""
+    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
+        """Predict raw probabilities without calibration"""
         try:
             if not self.is_fitted:
                 raise ValueError("Model not fitted")
@@ -704,8 +855,29 @@ class XGBoostModel(BaseModel):
             return proba
             
         except Exception as e:
+            logger.error(f"{self.name}: Raw prediction failed: {e}")
+            return np.full(len(X), 0.02)
+    
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        """Predict probabilities with calibration if available"""
+        try:
+            raw_proba = self.predict_proba_raw(X)
+            
+            # Apply calibration if available
+            if self.is_calibrated and self.calibrator:
+                return self.calibrator.predict(raw_proba)
+            else:
+                # Apply basic CTR correction
+                corrector = CTRBiasCorrector()
+                if len(raw_proba) > 100:
+                    dummy_y = np.random.binomial(1, 0.019, len(raw_proba))
+                    corrector.fit(dummy_y, raw_proba)
+                    return corrector.transform(raw_proba)
+                return raw_proba
+            
+        except Exception as e:
             logger.error(f"{self.name}: Prediction failed: {e}")
-            return np.full(len(X), 0.02)  # Return default CTR
+            return np.full(len(X), 0.02)
 
 class ModelFactory:
     """Factory for creating CTR prediction models"""
@@ -770,7 +942,7 @@ class CTRModelEvaluator:
                 return {}
             
             # Get predictions
-            y_pred_proba = model.predict_proba_calibrated(X_test)
+            y_pred_proba = model.predict_proba(X_test)
             y_pred = (y_pred_proba >= 0.5).astype(int)
             
             evaluation_results = {}
@@ -812,15 +984,17 @@ class CTRModelEvaluator:
                 'recall': np.sum((y_pred == 1) & (y_test == 1)) / max(np.sum(y_test == 1), 1)
             })
             
-            # Combined score for CTR prediction
+            # Combined score for CTR prediction with bias penalty
             auc_score = evaluation_results.get('auc', 0.5)
             ctr_alignment = max(0, 1 - evaluation_results['target_alignment'] / 0.02)
             logloss_score = max(0, 1 - evaluation_results.get('logloss', 1.0) / 2.0)
+            bias_penalty = min(0.5, abs(evaluation_results['ctr_bias']) * 10)  # Heavy penalty for bias
             
             evaluation_results['combined_score'] = (
-                0.4 * auc_score + 
-                0.4 * ctr_alignment + 
-                0.2 * logloss_score
+                0.3 * auc_score + 
+                0.5 * ctr_alignment + 
+                0.2 * logloss_score - 
+                bias_penalty  # Subtract bias penalty
             )
             
             return evaluation_results
@@ -861,7 +1035,7 @@ class CTRTrainer:
             if quick_mode is not None:
                 self.set_quick_mode(quick_mode)
             
-            logger.info(f"Training {model_name} model")
+            logger.info(f"Training {model_name} model with CTR correction")
             
             # Create model
             model = ModelFactory.create_model(model_name)
@@ -885,10 +1059,16 @@ class CTRTrainer:
             self.trained_models[model_name] = model
             self.model_performance[model_name] = performance
             
+            # Log detailed performance
             logger.info(f"{model_name} training completed successfully")
             logger.info(f"Performance: AUC={performance.get('auc', 0):.3f}, "
                        f"CTR Bias={performance.get('ctr_bias', 0):.4f}, "
                        f"Combined Score={performance.get('combined_score', 0):.3f}")
+            
+            if model.is_calibrated:
+                summary = model.calibrator.get_calibration_summary()
+                logger.info(f"Calibration: Method={summary['best_method']}, "
+                           f"CTR Factor={summary.get('ctr_correction_factor', 0):.3f}")
             
             return model, performance
             

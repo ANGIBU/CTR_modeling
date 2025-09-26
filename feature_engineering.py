@@ -13,6 +13,7 @@ from sklearn.feature_selection import SelectKBest, f_classif
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import joblib
+import hashlib
 from config import Config
 from data_loader import MemoryMonitor
 
@@ -84,6 +85,146 @@ class SafeDataTypeConverter:
             logger.warning(f"String categorical conversion failed: {e}")
             return series
 
+class SeqColumnProcessor:
+    """Sequence column processor with hash-based feature extraction"""
+    
+    def __init__(self, hash_size: int = 100000):
+        self.hash_size = hash_size
+        self.seq_features = {}
+        self.is_fitted = False
+        
+    def process_seq_column(self, seq_series: pd.Series) -> Dict[str, pd.Series]:
+        """Process sequence column into hash-based features"""
+        try:
+            logger.info(f"Processing seq column: {len(seq_series)} rows")
+            
+            features = {}
+            
+            # Convert to string and handle NaN
+            seq_str = seq_series.astype(str).fillna('')
+            
+            # Extract sequence length
+            features['seq_length'] = seq_str.str.len()
+            
+            # Count commas (sequence item count)
+            features['seq_item_count'] = seq_str.str.count(',') + 1
+            features['seq_item_count'] = features['seq_item_count'].where(seq_str != '', 0)
+            
+            # Hash the full sequence
+            def hash_seq(x):
+                if x == '':
+                    return 0
+                return int(hashlib.md5(x.encode()).hexdigest(), 16) % self.hash_size
+            
+            features['seq_hash_full'] = seq_str.apply(hash_seq)
+            
+            # Extract first few items if comma-separated
+            for i in range(3):  # First 3 items
+                item_series = seq_str.str.split(',').str.get(i).fillna('missing')
+                features[f'seq_item_{i}_hash'] = item_series.apply(
+                    lambda x: int(hashlib.md5(str(x).encode()).hexdigest(), 16) % self.hash_size
+                )
+            
+            # Statistical features
+            features['seq_unique_chars'] = seq_str.apply(lambda x: len(set(x)) if x else 0)
+            features['seq_digit_count'] = seq_str.str.count(r'\d')
+            features['seq_alpha_count'] = seq_str.str.count(r'[a-zA-Z]')
+            
+            logger.info(f"Seq column processed: {len(features)} features created")
+            return features
+            
+        except Exception as e:
+            logger.error(f"Seq column processing failed: {e}")
+            return {'seq_length': pd.Series([0] * len(seq_series))}
+
+class ChunkTargetEncoder:
+    """Memory-efficient chunk-based target encoder"""
+    
+    def __init__(self, chunk_size: int = 50000, smoothing: int = 100):
+        self.chunk_size = chunk_size
+        self.smoothing = smoothing
+        self.category_stats = {}
+        self.global_mean = 0.0
+        self.is_fitted = False
+    
+    def fit_chunk_based(self, X: pd.Series, y: pd.Series, column_name: str) -> bool:
+        """Fit target encoder using chunk-based processing"""
+        try:
+            logger.info(f"Chunk-based target encoding for {column_name}: {len(X)} samples")
+            
+            if len(X) != len(y):
+                logger.error(f"Length mismatch: X={len(X)}, y={len(y)}")
+                return False
+            
+            self.global_mean = y.mean()
+            category_counts = {}
+            category_sums = {}
+            
+            # Process in chunks to manage memory
+            for start_idx in range(0, len(X), self.chunk_size):
+                end_idx = min(start_idx + self.chunk_size, len(X))
+                
+                X_chunk = X.iloc[start_idx:end_idx].astype(str)
+                y_chunk = y.iloc[start_idx:end_idx]
+                
+                # Aggregate statistics
+                for cat, target in zip(X_chunk, y_chunk):
+                    if cat not in category_counts:
+                        category_counts[cat] = 0
+                        category_sums[cat] = 0.0
+                    
+                    category_counts[cat] += 1
+                    category_sums[cat] += target
+                
+                # Memory cleanup every 10 chunks
+                if (start_idx // self.chunk_size) % 10 == 0:
+                    gc.collect()
+            
+            # Calculate smoothed means
+            self.category_stats[column_name] = {}
+            for cat in category_counts:
+                count = category_counts[cat]
+                cat_mean = category_sums[cat] / count if count > 0 else self.global_mean
+                
+                # Apply smoothing
+                smoothed_mean = (count * cat_mean + self.smoothing * self.global_mean) / (count + self.smoothing)
+                
+                self.category_stats[column_name][cat] = {
+                    'mean': smoothed_mean,
+                    'count': count
+                }
+            
+            self.is_fitted = True
+            logger.info(f"Target encoding completed: {len(self.category_stats[column_name])} categories")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Chunk-based target encoding failed: {e}")
+            return False
+    
+    def transform(self, X: pd.Series, column_name: str) -> pd.Series:
+        """Transform using fitted statistics"""
+        try:
+            if not self.is_fitted or column_name not in self.category_stats:
+                return pd.Series([self.global_mean] * len(X))
+            
+            X_str = X.astype(str)
+            result = []
+            
+            stats = self.category_stats[column_name]
+            
+            for cat in X_str:
+                if cat in stats:
+                    result.append(stats[cat]['mean'])
+                else:
+                    result.append(self.global_mean)
+            
+            return pd.Series(result, index=X.index)
+            
+        except Exception as e:
+            logger.error(f"Target encoding transform failed: {e}")
+            return pd.Series([self.global_mean] * len(X))
+
 class CTRFeatureEngineer:
     """CTR feature engineering class with memory efficiency and safe data handling"""
     
@@ -91,6 +232,7 @@ class CTRFeatureEngineer:
         self.config = config
         self.memory_monitor = MemoryMonitor()
         self.data_converter = SafeDataTypeConverter()
+        self.seq_processor = SeqColumnProcessor(hash_size=config.SEQ_HASH_SIZE)
         
         # Processing modes
         self.quick_mode = False
@@ -98,6 +240,7 @@ class CTRFeatureEngineer:
         
         # Feature engineering state variables
         self.target_encoders = {}
+        self.chunk_encoders = {}
         self.label_encoders = {}
         self.scalers = {}
         self.feature_stats = {}
@@ -114,6 +257,7 @@ class CTRFeatureEngineer:
         self.binning_features = []
         self.rank_features = []
         self.ratio_features = []
+        self.seq_features = []
         self.removed_columns = []
         self.original_feature_order = []
         self.final_feature_columns = []
@@ -194,6 +338,56 @@ class CTRFeatureEngineer:
                         self.categorical_features.append(col)
                     else:
                         self.numerical_features.append(col)
+    
+    def _process_seq_columns(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Process sequence columns with hash-based features"""
+        try:
+            seq_columns = [col for col in X_train.columns if 'seq' in col.lower()]
+            
+            if not seq_columns:
+                return X_train, X_test
+                
+            logger.info(f"Processing {len(seq_columns)} sequence columns")
+            
+            for seq_col in seq_columns:
+                if not self.memory_monitor.check_memory_safety(2.0):
+                    logger.warning(f"Skipping seq column {seq_col} due to memory constraints")
+                    continue
+                
+                try:
+                    # Process training data
+                    train_seq_features = self.seq_processor.process_seq_column(X_train[seq_col])
+                    
+                    # Process test data
+                    test_seq_features = self.seq_processor.process_seq_column(X_test[seq_col])
+                    
+                    # Add features to dataframes
+                    for feat_name, feat_series in train_seq_features.items():
+                        new_col_name = f"{seq_col}_{feat_name}"
+                        X_train[new_col_name] = feat_series
+                        self.seq_features.append(new_col_name)
+                    
+                    for feat_name, feat_series in test_seq_features.items():
+                        new_col_name = f"{seq_col}_{feat_name}"
+                        X_test[new_col_name] = feat_series
+                    
+                    # Remove original seq column
+                    X_train = X_train.drop(columns=[seq_col])
+                    X_test = X_test.drop(columns=[seq_col])
+                    self.removed_columns.append(seq_col)
+                    
+                    logger.info(f"Seq column {seq_col} processed: {len(train_seq_features)} features created")
+                    
+                except Exception as e:
+                    logger.warning(f"Seq column processing failed for {seq_col}: {e}")
+                    continue
+            
+            logger.info(f"Seq column processing completed: {len(self.seq_features)} features created")
+            return X_train, X_test
+            
+        except Exception as e:
+            logger.error(f"Seq column processing failed: {e}")
+            return X_train, X_test
     
     def _safe_preprocessing(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Safe data preprocessing with memory efficiency and complex data handling"""
@@ -300,16 +494,16 @@ class CTRFeatureEngineer:
             logger.error(f"Safe preprocessing failed: {e}")
             return X_train, X_test
     
-    def _safe_target_encoding(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Safe target encoding for categorical features with proper data handling"""
+    def _chunk_target_encoding(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Memory-efficient chunk-based target encoding"""
         try:
             if self.memory_efficient_mode:
                 # Limit number of columns for memory efficiency
-                categorical_subset = self.categorical_features[:min(15, len(self.categorical_features))]
+                categorical_subset = self.categorical_features[:min(10, len(self.categorical_features))]
             else:
                 categorical_subset = self.categorical_features
             
-            logger.info(f"Target encoding started for {len(categorical_subset)} categorical features")
+            logger.info(f"Chunk-based target encoding started for {len(categorical_subset)} categorical features")
             
             for col in categorical_subset:
                 if col not in X_train.columns or col not in X_test.columns:
@@ -317,106 +511,58 @@ class CTRFeatureEngineer:
                 
                 try:
                     # Check for memory before encoding
-                    if not self.memory_monitor.check_memory_safety(2.0):
+                    if not self.memory_monitor.check_memory_safety(3.0):
                         logger.warning(f"Skipping target encoding for {col} due to memory constraints")
                         continue
                     
-                    # Convert to consistent string format for encoding
-                    train_col_str = X_train[col].astype(str).fillna('missing')
-                    test_col_str = X_test[col].astype(str).fillna('missing')
-                    
-                    # Skip if too many unique values (memory constraint)
-                    if train_col_str.nunique() > self.config.MAX_CATEGORICAL_UNIQUE:
-                        logger.warning(f"Skipping {col}: too many unique values ({train_col_str.nunique()})")
+                    # Skip if too many unique values
+                    if X_train[col].nunique() > self.config.MAX_CATEGORICAL_UNIQUE:
+                        logger.warning(f"Skipping {col}: too many unique values ({X_train[col].nunique()})")
                         continue
                     
-                    # Simple manual target encoding (avoid sklearn TargetEncoder issues)
-                    # Calculate mean target for each category
-                    category_means = {}
-                    category_counts = {}
+                    # Initialize chunk encoder
+                    chunk_encoder = ChunkTargetEncoder(
+                        chunk_size=self.config.get_optimal_chunk_size() // 2,
+                        smoothing=self.config.SMOOTHING_FACTOR
+                    )
                     
-                    # Group by category and calculate mean target and counts
-                    for category in train_col_str.unique():
-                        mask = train_col_str == category
-                        if mask.sum() > 0:  # Ensure we have samples for this category
-                            category_target_values = y_train[mask]
-                            category_means[category] = category_target_values.mean()
-                            category_counts[category] = len(category_target_values)
-                    
-                    # Apply smoothing for categories with few samples
-                    global_mean = y_train.mean()
-                    min_samples = 10  # Minimum samples for reliable estimate
-                    
-                    smoothed_means = {}
-                    for category, mean_val in category_means.items():
-                        count = category_counts[category]
-                        if count < min_samples:
-                            # Apply smoothing: blend with global mean
-                            alpha = count / (count + min_samples)
-                            smoothed_means[category] = alpha * mean_val + (1 - alpha) * global_mean
-                        else:
-                            smoothed_means[category] = mean_val
-                    
-                    # Create new feature names and add as new columns
-                    feature_name = f"{col}_target_enc"
-                    
-                    # Map values to encoded features
-                    X_train[feature_name] = train_col_str.map(smoothed_means).fillna(global_mean)
-                    X_test[feature_name] = test_col_str.map(smoothed_means).fillna(global_mean)
-                    
-                    # Additional frequency-based features
-                    freq_feature = f"{col}_freq"
-                    X_train[freq_feature] = train_col_str.map(category_counts).fillna(0)
-                    X_test[freq_feature] = test_col_str.map(category_counts).fillna(0)
-                    
-                    # CTR variance feature (safe calculation)
-                    try:
-                        ctr_var_feature = f"{col}_ctr_var"
+                    # Fit encoder
+                    if chunk_encoder.fit_chunk_based(X_train[col], y_train, col):
                         
-                        # Calculate variance for each category
-                        category_variances = {}
-                        for category in train_col_str.unique():
-                            mask = train_col_str == category
-                            if mask.sum() > 5:  # Need at least 5 samples for variance
-                                category_target_values = y_train[mask]
-                                category_variances[category] = category_target_values.var()
+                        # Transform training and test data
+                        feature_name = f"{col}_target_enc"
+                        X_train[feature_name] = chunk_encoder.transform(X_train[col], col)
+                        X_test[feature_name] = chunk_encoder.transform(X_test[col], col)
                         
-                        # Fill missing variances with global variance
-                        global_var = y_train.var()
-                        for category in train_col_str.unique():
-                            if category not in category_variances:
-                                category_variances[category] = global_var
+                        # Additional count-based feature
+                        value_counts = X_train[col].astype(str).value_counts()
+                        count_feature = f"{col}_count"
+                        X_train[count_feature] = X_train[col].astype(str).map(value_counts).fillna(0)
+                        X_test[count_feature] = X_test[col].astype(str).map(value_counts).fillna(0)
                         
-                        X_train[ctr_var_feature] = train_col_str.map(category_variances).fillna(global_var)
-                        X_test[ctr_var_feature] = test_col_str.map(category_variances).fillna(global_var)
+                        self.target_encoding_features.extend([feature_name, count_feature])
+                        self.chunk_encoders[col] = chunk_encoder
                         
-                        self.target_encoding_features.extend([feature_name, freq_feature, ctr_var_feature])
-                        created_features = 3
-                    except Exception as var_e:
-                        logger.warning(f"CTR variance calculation failed for {col}: {var_e}")
-                        self.target_encoding_features.extend([feature_name, freq_feature])
-                        created_features = 2
-                    
-                    # Memory cleanup after each encoding
-                    if len(self.target_encoding_features) % 10 == 0:
-                        self.memory_monitor.force_cleanup()
-                    
-                    logger.info(f"Target encoding successful for {col}: {created_features} features created")
+                        logger.info(f"Target encoding successful for {col}: 2 features created")
+                        
+                        # Memory cleanup after each encoding
+                        if len(self.target_encoding_features) % 10 == 0:
+                            self.memory_monitor.force_cleanup()
                     
                 except Exception as e:
                     logger.warning(f"Target encoding failed for {col}: {e}")
                     continue
             
-            logger.info(f"Target encoding completed: {len(self.target_encoding_features)} features created")
+            logger.info(f"Chunk-based target encoding completed: {len(self.target_encoding_features)} features created")
             
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Target encoding features failed: {e}")
+            logger.error(f"Chunk-based target encoding failed: {e}")
             return X_train, X_test
     
     def _create_interaction_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create CTR-optimized interaction features with memory management"""
+        """Create CTR interaction features with memory management"""
         try:
             if self.quick_mode:
                 logger.info("Quick mode: Skipping interaction features")
@@ -428,7 +574,7 @@ class CTRFeatureEngineer:
             important_features = self._select_important_features(X_train, y_train, max_features=8)
             
             interaction_count = 0
-            max_interactions = 10 if self.memory_efficient_mode else 15
+            max_interactions = 8 if self.memory_efficient_mode else 12
             
             for i in range(len(important_features)):
                 for j in range(i + 1, len(important_features)):
@@ -436,7 +582,7 @@ class CTRFeatureEngineer:
                         break
                     
                     # Memory check
-                    if not self.memory_monitor.check_memory_safety(1.5):
+                    if not self.memory_monitor.check_memory_safety(2.0):
                         logger.warning("Stopping interaction feature creation due to memory constraints")
                         break
                     
@@ -448,19 +594,26 @@ class CTRFeatureEngineer:
                         X_train[mult_feature] = X_train[feat1] * X_train[feat2]
                         X_test[mult_feature] = X_test[feat1] * X_test[feat2]
                         
-                        # Addition interaction
+                        # Addition interaction  
                         add_feature = f"{feat1}_plus_{feat2}"
                         X_train[add_feature] = X_train[feat1] + X_train[feat2]
                         X_test[add_feature] = X_test[feat1] + X_test[feat2]
                         
-                        self.interaction_features.extend([mult_feature, add_feature])
-                        interaction_count += 2
+                        # Ratio interaction (safe division)
+                        ratio_feature = f"{feat1}_div_{feat2}"
+                        denominator_train = X_train[feat2].replace(0, 1e-8)
+                        denominator_test = X_test[feat2].replace(0, 1e-8)
+                        X_train[ratio_feature] = X_train[feat1] / denominator_train
+                        X_test[ratio_feature] = X_test[feat1] / denominator_test
+                        
+                        self.interaction_features.extend([mult_feature, add_feature, ratio_feature])
+                        interaction_count += 3
                         
                     except Exception as e:
                         logger.warning(f"Interaction feature creation failed for {feat1} x {feat2}: {e}")
                         continue
                 
-                if not self.memory_monitor.check_memory_safety(1.5):
+                if not self.memory_monitor.check_memory_safety(2.0):
                     break
             
             logger.info(f"Interaction features completed: {len(self.interaction_features)} features created")
@@ -523,7 +676,10 @@ class CTRFeatureEngineer:
             X_train['row_std'] = X_train_num.std(axis=1).fillna(0)
             X_test['row_std'] = X_test_num.std(axis=1).fillna(0)
             
-            self.statistical_features.extend(['row_mean', 'row_std'])
+            X_train['row_skew'] = X_train_num.skew(axis=1).fillna(0)
+            X_test['row_skew'] = X_test_num.skew(axis=1).fillna(0)
+            
+            self.statistical_features.extend(['row_mean', 'row_std', 'row_skew'])
             
             logger.info(f"Statistical features completed: {len(self.statistical_features)} features created")
             return X_train, X_test
@@ -574,8 +730,12 @@ class CTRFeatureEngineer:
             # Memory status before processing
             self.memory_monitor.log_memory_status("Initialization")
             
-            # Phase 1: Data preparation and classification
-            logger.info("Phase 1: Data preparation")
+            # Phase 1: Sequence column processing
+            logger.info("Phase 1: Sequence column processing")
+            X_train, X_test = self._process_seq_columns(X_train, X_test)
+            
+            # Phase 2: Data preparation and classification
+            logger.info("Phase 2: Data preparation")
             
             # Classify columns
             self._classify_columns(X_train)
@@ -583,15 +743,15 @@ class CTRFeatureEngineer:
             # Log feature distribution
             logger.info(f"Data preparation completed - Train: {X_train.shape}, Test: {X_test.shape}")
             
-            # Phase 2: Safe preprocessing
-            logger.info("Phase 2: Safe preprocessing")
+            # Phase 3: Safe preprocessing
+            logger.info("Phase 3: Safe preprocessing")
             X_train, X_test = self._safe_preprocessing(X_train, X_test)
             
-            # Phase 3: Feature engineering based on mode
+            # Phase 4: Feature engineering based on mode
             if self.quick_mode:
                 logger.info("Quick mode: Basic feature engineering only")
                 # Only do essential target encoding for a few features
-                categorical_subset = self.categorical_features[:5]
+                categorical_subset = self.categorical_features[:3]
                 for col in categorical_subset:
                     if col in X_train.columns:
                         try:
@@ -605,17 +765,17 @@ class CTRFeatureEngineer:
                             logger.warning(f"Quick frequency encoding failed for {col}: {e}")
             else:
                 # Full feature engineering
-                logger.info("Phase 3: Target encoding")
-                X_train, X_test = self._safe_target_encoding(X_train, X_test, y_train)
+                logger.info("Phase 4: Chunk-based target encoding")
+                X_train, X_test = self._chunk_target_encoding(X_train, X_test, y_train)
                 
-                logger.info("Phase 4: Interaction features")
+                logger.info("Phase 5: Interaction features")
                 X_train, X_test = self._create_interaction_features(X_train, X_test, y_train)
                 
-                logger.info("Phase 5: Statistical features")
+                logger.info("Phase 6: Statistical features")
                 X_train, X_test = self._create_statistical_features(X_train, X_test)
             
             # Final cleanup and validation
-            logger.info("Phase 6: Final processing")
+            logger.info("Phase 7: Final processing")
             
             # Remove any remaining object columns that couldn't be processed
             for col in list(X_train.columns):
@@ -664,12 +824,17 @@ class CTRFeatureEngineer:
                     'target_encoding': len(self.target_encoding_features),
                     'interaction': len(self.interaction_features),
                     'statistical': len(self.statistical_features),
-                    'frequency': len(self.frequency_features)
+                    'frequency': len(self.frequency_features),
+                    'seq_features': len(self.seq_features)
                 }
             })
             
             logger.info(f"=== CTR Feature engineering completed ===")
             logger.info(f"Final features: {X_train.shape[1]} (created: {self.processing_stats['total_features_generated']})")
+            logger.info(f"Feature breakdown: Target enc: {len(self.target_encoding_features)}, "
+                       f"Interaction: {len(self.interaction_features)}, "
+                       f"Seq: {len(self.seq_features)}, "
+                       f"Statistical: {len(self.statistical_features)}")
             logger.info(f"Processing time: {self.processing_stats['processing_time']:.2f}s")
             self.memory_monitor.log_memory_status("Feature engineering completed")
             
@@ -696,6 +861,7 @@ if __name__ == "__main__":
         'feat_a_2': np.random.choice([1, 2, 3], n_samples),
         'feat_b_1': np.random.randn(n_samples),
         'feat_b_2': np.random.randn(n_samples),
+        'seq': [f"item_{i%10},item_{(i+1)%10},item_{(i+2)%10}" for i in range(n_samples)],
         'clicked': np.random.choice([0, 1], n_samples, p=[0.98, 0.02])
     })
     
