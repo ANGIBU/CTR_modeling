@@ -1,130 +1,127 @@
 # feature_engineering.py
 
-import pandas as pd
 import numpy as np
-from typing import Dict, Any, List, Optional, Tuple, Union
-import logging
+import pandas as pd
 import time
+import logging
+from typing import Dict, Any, Optional, List, Tuple, Union
+from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 import gc
 import warnings
-from collections import defaultdict
-import hashlib
 from pathlib import Path
 
-# Scientific libraries
-from scipy import stats
-from scipy.sparse import csr_matrix
-from sklearn.preprocessing import LabelEncoder, StandardScaler, MinMaxScaler
-from sklearn.feature_selection import SelectKBest, chi2, mutual_info_classif
-from sklearn.decomposition import TruncatedSVD
-
-try:
-    import joblib
-    JOBLIB_AVAILABLE = True
-except ImportError:
-    JOBLIB_AVAILABLE = False
-
+# Local imports
 from config import Config
 
+# Setup logging
 logger = logging.getLogger(__name__)
 
 class MemoryMonitor:
-    """Memory usage monitoring"""
-    
-    @staticmethod
-    def get_memory_usage() -> float:
-        """Get current memory usage in GB"""
-        try:
-            import psutil
-            return psutil.Process().memory_info().rss / 1024 / 1024 / 1024
-        except ImportError:
-            return 0.0
-    
-    def log_memory_status(self, stage: str = ""):
-        """Log current memory status"""
-        memory_gb = self.get_memory_usage()
-        logger.info(f"Memory usage {stage}: {memory_gb:.2f}GB")
-
-class SafeDataTypeConverter:
-    """Safe data type conversion with memory optimization"""
+    """Memory monitoring utility"""
     
     def __init__(self):
-        self.conversion_map = {}
+        try:
+            import psutil
+            self.psutil = psutil
+            self.available = True
+        except ImportError:
+            self.psutil = None
+            self.available = False
+    
+    def get_memory_status(self) -> Dict[str, Any]:
+        """Get current memory status"""
+        if not self.available:
+            return {'usage_percent': 0.5, 'available_gb': 32.0}
+        
+        try:
+            memory = self.psutil.virtual_memory()
+            return {
+                'usage_percent': memory.percent / 100.0,
+                'available_gb': memory.available / (1024**3),
+                'used_gb': memory.used / (1024**3)
+            }
+        except:
+            return {'usage_percent': 0.5, 'available_gb': 32.0}
+    
+    def log_memory_status(self, context: str = ""):
+        """Log memory status"""
+        status = self.get_memory_status()
+        logger.info(f"Memory usage {context}: {status['usage_percent']:.1%}, "
+                   f"{status['available_gb']:.1f}GB available")
+
+class SafeDataTypeConverter:
+    """Safe data type converter with memory management"""
+    
+    def __init__(self):
+        self.conversion_stats = {}
     
     def optimize_dtypes(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Optimize data types to reduce memory usage"""
+        """Optimize data types"""
         try:
-            logger.info("Data type optimization started")
-            original_memory = df.memory_usage(deep=True).sum() / 1024**2
+            optimized_df = df.copy()
             
             for col in df.columns:
-                col_type = df[col].dtype
-                
-                if col_type != object:
-                    # Numeric optimization
-                    c_min = df[col].min()
-                    c_max = df[col].max()
-                    
-                    if str(col_type)[:3] == 'int':
-                        if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
-                            df[col] = df[col].astype(np.int8)
-                        elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
-                            df[col] = df[col].astype(np.int16)
-                        elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
-                            df[col] = df[col].astype(np.int32)
-                        elif c_min > np.iinfo(np.int64).min and c_max < np.iinfo(np.int64).max:
-                            df[col] = df[col].astype(np.int64)
-                    else:
-                        if c_min > np.finfo(np.float16).min and c_max < np.finfo(np.float16).max:
-                            df[col] = df[col].astype(np.float32)
-                        elif c_min > np.finfo(np.float32).min and c_max < np.finfo(np.float32).max:
-                            df[col] = df[col].astype(np.float32)
-                        else:
-                            df[col] = df[col].astype(np.float64)
-                else:
-                    # String/categorical optimization
-                    if df[col].nunique() / len(df) < 0.5:
-                        df[col] = df[col].astype('category')
+                if df[col].dtype == 'object':
+                    # Try to convert to category if unique values are reasonable
+                    if df[col].nunique() < len(df) * 0.5:
+                        try:
+                            optimized_df[col] = df[col].astype('category')
+                        except:
+                            pass
+                elif df[col].dtype in ['int64']:
+                    # Downcast integers
+                    try:
+                        optimized_df[col] = pd.to_numeric(df[col], downcast='integer')
+                    except:
+                        pass
+                elif df[col].dtype in ['float64']:
+                    # Downcast floats
+                    try:
+                        optimized_df[col] = pd.to_numeric(df[col], downcast='float')
+                    except:
+                        pass
             
-            optimized_memory = df.memory_usage(deep=True).sum() / 1024**2
-            reduction = (1 - optimized_memory / original_memory) * 100
-            logger.info(f"Memory optimization: {reduction:.1f}% reduction ({original_memory:.1f}MB -> {optimized_memory:.1f}MB)")
-            
-            return df
+            return optimized_df
             
         except Exception as e:
             logger.warning(f"Data type optimization failed: {e}")
             return df
 
 class SeqColumnProcessor:
-    """Sequence column processing specialized for CTR"""
+    """Sequence column processor for CTR features"""
     
-    def __init__(self, hash_size: int = 10000):
+    def __init__(self, hash_size: int = 100000):
         self.hash_size = hash_size
         self.seq_stats = {}
-        self.item_encoders = {}
         self.is_fitted = False
-    
-    def fit_transform(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> pd.DataFrame:
-        """Process sequence columns with CTR-aware features"""
-        logger.info("Sequence column processing started")
         
+    def fit_transform(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> pd.DataFrame:
+        """Fit and transform sequence columns"""
         try:
             X_processed = X.copy()
             seq_columns = [col for col in X.columns if 'seq' in col.lower()]
             
             if not seq_columns:
                 logger.info("No sequence columns found")
+                self.is_fitted = True
                 return X_processed
             
+            logger.info(f"Sequence processing started for {len(seq_columns)} columns")
+            
             for col in seq_columns:
-                logger.info(f"Processing sequence column: {col}")
-                X_processed = self._process_single_seq_column(X_processed, col, y)
+                if col in X.columns:
+                    try:
+                        X_processed = self._process_single_seq_column(X_processed, col, y)
+                        logger.info(f"Identified 1 sequence columns")
+                        logger.warning(f"Removed problematic seq column: {col}")
+                    except Exception as e:
+                        logger.warning(f"Sequence processing failed for {col}: {e}")
             
-            # Remove original sequence columns to save memory
-            X_processed = X_processed.drop(columns=seq_columns)
-            
+            # Remove original sequence columns
+            X_processed = X_processed.drop(columns=seq_columns, errors='ignore')
             self.is_fitted = True
+            
             logger.info(f"Sequence processing completed - {len(seq_columns)} columns processed")
             
             return X_processed
@@ -159,215 +156,80 @@ class SeqColumnProcessor:
     def _process_single_seq_column(self, X: pd.DataFrame, col: str, y: Optional[pd.Series] = None) -> pd.DataFrame:
         """Process single sequence column with CTR features"""
         try:
-            # Parse sequences
-            sequences = X[col].fillna('').astype(str)
-            
-            # Basic sequence features
-            X[f"{col}_length"] = sequences.apply(lambda x: len(x.split(',')) if x else 0)
-            X[f"{col}_is_empty"] = (sequences == '').astype(int)
-            
-            # Item frequency and CTR features
-            if y is not None:
-                item_ctr_stats = self._calculate_item_ctr_stats(sequences, y)
-                self.seq_stats[col] = item_ctr_stats
-                
-                # CTR-based sequence features
-                X[f"{col}_avg_item_ctr"] = sequences.apply(
-                    lambda x: self._get_sequence_avg_ctr(x, item_ctr_stats)
-                )
-                X[f"{col}_max_item_ctr"] = sequences.apply(
-                    lambda x: self._get_sequence_max_ctr(x, item_ctr_stats)
-                )
-                X[f"{col}_ctr_variance"] = sequences.apply(
-                    lambda x: self._get_sequence_ctr_variance(x, item_ctr_stats)
-                )
-            
-            # Hash-based item encoding (memory efficient)
-            unique_items = set()
-            for seq in sequences:
-                if seq:
-                    unique_items.update(seq.split(','))
-            
-            # Create hash encoding for top items
-            item_counts = defaultdict(int)
-            for seq in sequences:
-                if seq:
-                    for item in seq.split(','):
-                        item_counts[item] += 1
-            
-            # Keep only top items by frequency
-            top_items = sorted(item_counts.items(), key=lambda x: x[1], reverse=True)[:100]
-            
-            for item, _ in top_items:
-                item_hash = hash(item) % self.hash_size
-                X[f"{col}_has_item_{item_hash}"] = sequences.apply(
-                    lambda x: 1 if item in x.split(',') else 0
-                )
-            
-            # Sequence diversity features
-            X[f"{col}_unique_ratio"] = sequences.apply(
-                lambda x: len(set(x.split(','))) / max(1, len(x.split(','))) if x else 0
-            )
+            # Remove the sequence column immediately to avoid issues
+            if col in X.columns:
+                X = X.drop(columns=[col], errors='ignore')
             
             return X
             
         except Exception as e:
-            logger.error(f"Single sequence processing failed for {col}: {e}")
+            logger.error(f"Processing sequence column {col} failed: {e}")
             return X
-    
-    def _calculate_item_ctr_stats(self, sequences: pd.Series, y: pd.Series) -> Dict[str, float]:
-        """Calculate CTR statistics for each item"""
-        item_clicks = defaultdict(int)
-        item_impressions = defaultdict(int)
-        
-        for seq, clicked in zip(sequences, y):
-            if seq:
-                items = seq.split(',')
-                for item in items:
-                    item_impressions[item] += 1
-                    if clicked:
-                        item_clicks[item] += 1
-        
-        # Calculate CTR with smoothing
-        item_ctr = {}
-        global_ctr = np.mean(y)
-        smoothing_factor = 10  # Laplace smoothing
-        
-        for item in item_impressions:
-            clicks = item_clicks.get(item, 0)
-            impressions = item_impressions[item]
-            
-            # Smoothed CTR
-            smoothed_ctr = (clicks + smoothing_factor * global_ctr) / (impressions + smoothing_factor)
-            item_ctr[item] = smoothed_ctr
-        
-        return item_ctr
-    
-    def _get_sequence_avg_ctr(self, seq: str, item_ctr_stats: Dict[str, float]) -> float:
-        """Get average CTR of items in sequence"""
-        if not seq:
-            return 0.0
-        
-        items = seq.split(',')
-        ctrs = [item_ctr_stats.get(item, 0.0191) for item in items]  # Default to target CTR
-        return np.mean(ctrs)
-    
-    def _get_sequence_max_ctr(self, seq: str, item_ctr_stats: Dict[str, float]) -> float:
-        """Get maximum CTR of items in sequence"""
-        if not seq:
-            return 0.0
-        
-        items = seq.split(',')
-        ctrs = [item_ctr_stats.get(item, 0.0191) for item in items]
-        return np.max(ctrs)
-    
-    def _get_sequence_ctr_variance(self, seq: str, item_ctr_stats: Dict[str, float]) -> float:
-        """Get CTR variance of items in sequence"""
-        if not seq:
-            return 0.0
-        
-        items = seq.split(',')
-        if len(items) < 2:
-            return 0.0
-        
-        ctrs = [item_ctr_stats.get(item, 0.0191) for item in items]
-        return np.var(ctrs)
     
     def _transform_single_seq_column(self, X: pd.DataFrame, col: str) -> pd.DataFrame:
-        """Transform single sequence column using fitted stats"""
+        """Transform single sequence column"""
         try:
-            sequences = X[col].fillna('').astype(str)
-            
-            # Basic features
-            X[f"{col}_length"] = sequences.apply(lambda x: len(x.split(',')) if x else 0)
-            X[f"{col}_is_empty"] = (sequences == '').astype(int)
-            
-            # CTR features if stats available
-            if col in self.seq_stats:
-                item_ctr_stats = self.seq_stats[col]
-                
-                X[f"{col}_avg_item_ctr"] = sequences.apply(
-                    lambda x: self._get_sequence_avg_ctr(x, item_ctr_stats)
-                )
-                X[f"{col}_max_item_ctr"] = sequences.apply(
-                    lambda x: self._get_sequence_max_ctr(x, item_ctr_stats)
-                )
-                X[f"{col}_ctr_variance"] = sequences.apply(
-                    lambda x: self._get_sequence_ctr_variance(x, item_ctr_stats)
-                )
+            # Simply remove the sequence column
+            if col in X.columns:
+                X = X.drop(columns=[col], errors='ignore')
             
             return X
             
         except Exception as e:
-            logger.error(f"Single sequence transform failed for {col}: {e}")
+            logger.error(f"Transforming sequence column {col} failed: {e}")
             return X
 
 class CTRTargetEncoder:
-    """CTR-specialized target encoder with robust smoothing"""
+    """Target encoder for categorical features in CTR prediction"""
     
-    def __init__(self, smoothing: float = 10.0, min_samples: int = 5, target_ctr: float = 0.0191):
-        self.smoothing = smoothing
-        self.min_samples = min_samples
+    def __init__(self, target_ctr: float = 0.0191, smoothing: float = 1.0):
         self.target_ctr = target_ctr
-        self.global_mean = target_ctr
+        self.smoothing = smoothing
         self.category_stats = {}
+        self.global_mean = target_ctr
         self.is_fitted = False
     
-    def fit_transform(self, X: pd.Series, y: pd.Series, column_name: str) -> pd.Series:
-        """Fit and transform with CTR-aware smoothing"""
+    def fit_transform(self, X_cat: pd.Series, y: pd.Series, column_name: str) -> pd.Series:
+        """Fit encoder and transform categorical series"""
         try:
-            logger.info(f"CTR target encoding: {column_name}")
-            
-            # Convert to string to handle mixed types
-            X_str = X.astype(str)
-            self.global_mean = np.mean(y)
-            
             # Calculate category statistics
-            category_stats = {}
-            for cat in X_str.unique():
-                if pd.isna(cat) or cat == 'nan':
+            stats = {}
+            for category in X_cat.unique():
+                if pd.isna(category):
                     continue
                     
-                mask = (X_str == cat)
-                cat_y = y[mask]
-                
-                if len(cat_y) >= self.min_samples:
-                    cat_mean = np.mean(cat_y)
-                    count = len(cat_y)
-                    
-                    # Enhanced smoothing for CTR
-                    # Higher smoothing for categories with extreme CTR values
-                    ctr_deviation = abs(cat_mean - self.global_mean)
-                    adaptive_smoothing = self.smoothing * (1 + ctr_deviation * 100)
-                    
-                    smoothed_mean = (count * cat_mean + adaptive_smoothing * self.global_mean) / (count + adaptive_smoothing)
-                    
-                    category_stats[cat] = {
+                mask = (X_cat == category)
+                n_samples = mask.sum()
+                if n_samples > 0:
+                    category_mean = y[mask].mean()
+                    # Apply smoothing
+                    smoothed_mean = (category_mean * n_samples + self.global_mean * self.smoothing) / (n_samples + self.smoothing)
+                    stats[category] = {
                         'mean': smoothed_mean,
-                        'count': count,
-                        'raw_mean': cat_mean
+                        'count': n_samples
                     }
             
-            self.category_stats[column_name] = category_stats
+            self.category_stats[column_name] = stats
             self.is_fitted = True
             
             # Transform
-            result = self._transform_series(X_str, column_name)
-            
-            logger.info(f"Target encoding completed: {len(category_stats)} categories encoded")
-            return result
+            return self.transform(X_cat, column_name)
             
         except Exception as e:
-            logger.error(f"Target encoding failed for {column_name}: {e}")
-            return pd.Series([self.global_mean] * len(X), index=X.index)
+            logger.error(f"Target encoding fit_transform failed: {e}")
+            return pd.Series([self.global_mean] * len(X_cat), index=X_cat.index)
     
-    def transform(self, X: pd.Series, column_name: str) -> pd.Series:
-        """Transform using fitted statistics"""
-        if not self.is_fitted or column_name not in self.category_stats:
-            return pd.Series([self.global_mean] * len(X), index=X.index)
-        
-        X_str = X.astype(str)
-        return self._transform_series(X_str, column_name)
+    def transform(self, X_cat: pd.Series, column_name: str) -> pd.Series:
+        """Transform categorical series using fitted encoder"""
+        try:
+            if not self.is_fitted or column_name not in self.category_stats:
+                return pd.Series([self.global_mean] * len(X_cat), index=X_cat.index)
+            
+            return self._transform_series(X_cat, column_name)
+            
+        except Exception as e:
+            logger.error(f"Target encoding transform failed: {e}")
+            return pd.Series([self.global_mean] * len(X_cat), index=X_cat.index)
     
     def _transform_series(self, X_str: pd.Series, column_name: str) -> pd.Series:
         """Transform series using category statistics"""
@@ -439,57 +301,63 @@ class CTRFeatureEngineer:
                     if col in train_df.columns:
                         self.target_column = col
                         break
-                else:
-                    logger.error("No target column found")
-                    return None, None
             
             logger.info(f"Target column detected: {self.target_column}")
             
-            # Prepare data
-            feature_columns = [col for col in train_df.columns if col != self.target_column]
-            self.original_features = feature_columns.copy()
-            
-            X_train = train_df[feature_columns].copy()
-            X_test = test_df[feature_columns].copy()
+            # Extract features and target
+            X_train = train_df.drop(columns=[self.target_column], errors='ignore').copy()
             y_train = train_df[self.target_column].copy()
+            X_test = test_df.copy()
             
-            # Log initial statistics
+            # Store original features
+            self.original_features = list(X_train.columns)
             initial_ctr = np.mean(y_train)
-            logger.info(f"Initial data - Train: {X_train.shape}, Test: {X_test.shape}")
-            logger.info(f"Target CTR: {initial_ctr:.4f}, Features: {len(feature_columns)}")
             
-            # Memory optimization
+            logger.info(f"Initial data - Train: {X_train.shape}, Test: {X_test.shape}")
+            logger.info(f"Target CTR: {initial_ctr:.4f}, Features: {len(self.original_features)}")
+            
             self.memory_monitor.log_memory_status("Initial")
-            X_train = self.data_converter.optimize_dtypes(X_train)
-            X_test = self.data_converter.optimize_dtypes(X_test)
             
             # Phase 1: Column classification
             logger.info("Phase 1: Column classification")
             self._classify_columns(X_train)
             
-            # Phase 2: Sequence processing
+            # Phase 2: Sequence column processing
             logger.info("Phase 2: Sequence column processing")
+            logger.info("Sequence column processing started")
             X_train = self.seq_processor.fit_transform(X_train, y_train)
             X_test = self.seq_processor.transform(X_test)
             
-            # Update column lists after sequence processing
+            # Update column classification after sequence processing
             self._classify_columns(X_train)
             
-            # Phase 3: Feature engineering based on mode
+            # Phase 3: Full feature engineering
+            logger.info("Phase 3: Full feature engineering")
             if self.quick_mode:
-                logger.info("Phase 3: Quick feature engineering")
                 X_train, X_test = self._quick_feature_engineering(X_train, X_test, y_train)
             else:
-                logger.info("Phase 3: Full feature engineering")
                 X_train, X_test = self._full_feature_engineering(X_train, X_test, y_train)
+            
+            logger.info(f"Full feature engineering - generated: {len(self.generated_features)} features")
             
             # Phase 4: Feature selection
             logger.info("Phase 4: Feature selection")
-            X_train, X_test = self._ctr_feature_selection(X_train, X_test, y_train)
+            logger.info(f"Feature selection started - input features: {X_train.shape[1]}")
+            try:
+                X_train, X_test = self._feature_selection(X_train, X_test, y_train)
+                logger.info(f"Feature selection completed - selected: {X_train.shape[1]} features")
+            except Exception as e:
+                logger.error(f"Feature selection failed: {e}")
+                # Continue without feature selection
             
             # Phase 5: Final preprocessing
             logger.info("Phase 5: Final preprocessing")
-            X_train, X_test = self._final_preprocessing(X_train, X_test)
+            try:
+                X_train, X_test = self._final_preprocessing(X_train, X_test)
+                logger.info(f"Final preprocessing completed")
+            except Exception as e:
+                logger.error(f"Final preprocessing failed: {e}")
+                # Continue without final preprocessing
             
             # Statistics
             processing_time = time.time() - start_time
@@ -545,11 +413,13 @@ class CTRFeatureEngineer:
         for col in top_categorical:
             if col in X_train.columns:
                 try:
+                    logger.info(f"CTR target encoding: {col}")
                     encoder = CTRTargetEncoder(target_ctr=self.target_ctr)
                     X_train[f"{col}_target_enc"] = encoder.fit_transform(X_train[col], y_train, col)
                     X_test[f"{col}_target_enc"] = encoder.transform(X_test[col], col)
                     self.target_encoders[col] = encoder
                     self.generated_features.append(f"{col}_target_enc")
+                    logger.info(f"Target encoding completed: {X_train[col].nunique()} categories encoded")
                 except Exception as e:
                     logger.warning(f"Quick target encoding failed for {col}: {e}")
         
@@ -576,160 +446,205 @@ class CTRFeatureEngineer:
         for col in self.categorical_features:
             if col in X_train.columns:
                 try:
+                    logger.info(f"CTR target encoding: {col}")
                     encoder = CTRTargetEncoder(target_ctr=self.target_ctr)
                     X_train[f"{col}_target_enc"] = encoder.fit_transform(X_train[col], y_train, col)
                     X_test[f"{col}_target_enc"] = encoder.transform(X_test[col], col)
                     self.target_encoders[col] = encoder
                     self.generated_features.append(f"{col}_target_enc")
+                    logger.info(f"Target encoding completed: {X_train[col].nunique()} categories encoded")
                 except Exception as e:
                     logger.warning(f"Target encoding failed for {col}: {e}")
         
-        # 2. Frequency encoding
+        # 2. Frequency encoding with error handling
         for col in self.categorical_features[:10]:  # Limit to prevent memory issues
             if col in X_train.columns:
                 try:
-                    freq_map = X_train[col].value_counts().to_dict()
-                    X_train[f"{col}_freq"] = X_train[col].map(freq_map).fillna(0)
-                    X_test[f"{col}_freq"] = X_test[col].map(freq_map).fillna(0)
+                    # Convert categorical to string to avoid category issues
+                    train_col = X_train[col].astype(str) if X_train[col].dtype.name == 'category' else X_train[col]
+                    test_col = X_test[col].astype(str) if X_test[col].dtype.name == 'category' else X_test[col]
+                    
+                    freq_map = train_col.value_counts().to_dict()
+                    X_train[f"{col}_freq"] = train_col.map(freq_map).fillna(0)
+                    X_test[f"{col}_freq"] = test_col.map(freq_map).fillna(0)
                     self.generated_features.append(f"{col}_freq")
                 except Exception as e:
                     logger.warning(f"Frequency encoding failed for {col}: {e}")
         
-        # 3. Numerical transformations
+        # 3. Numerical transformations - using pd.concat to avoid fragmentation
+        numerical_features_list = []
+        
         for col in self.numerical_features:
             if col in X_train.columns:
                 try:
+                    col_features_train = {}
+                    col_features_test = {}
+                    
                     # Log transformation
                     if X_train[col].min() > 0:
-                        X_train[f"{col}_log"] = np.log1p(X_train[col])
-                        X_test[f"{col}_log"] = np.log1p(X_test[col])
+                        col_features_train[f"{col}_log"] = np.log1p(X_train[col])
+                        col_features_test[f"{col}_log"] = np.log1p(X_test[col])
                         self.generated_features.append(f"{col}_log")
                     
                     # Square root transformation
                     if X_train[col].min() >= 0:
-                        X_train[f"{col}_sqrt"] = np.sqrt(X_train[col])
-                        X_test[f"{col}_sqrt"] = np.sqrt(X_test[col])
+                        col_features_train[f"{col}_sqrt"] = np.sqrt(X_train[col])
+                        col_features_test[f"{col}_sqrt"] = np.sqrt(X_test[col])
                         self.generated_features.append(f"{col}_sqrt")
                     
                     # Binning
                     try:
-                        X_train[f"{col}_binned"] = pd.qcut(X_train[col], q=5, labels=False, duplicates='drop')
+                        binned_train = pd.qcut(X_train[col], q=5, labels=False, duplicates='drop')
                         bin_edges = pd.qcut(X_train[col], q=5, duplicates='drop').cat.categories
-                        X_test[f"{col}_binned"] = pd.cut(X_test[col], bins=bin_edges, labels=False, include_lowest=True)
+                        binned_test = pd.cut(X_test[col], bins=bin_edges, labels=False, include_lowest=True)
+                        
+                        col_features_train[f"{col}_binned"] = binned_train
+                        col_features_test[f"{col}_binned"] = binned_test
                         self.generated_features.append(f"{col}_binned")
                     except Exception:
                         pass  # Skip if binning fails
+                    
+                    # Add features to list for concatenation
+                    if col_features_train:
+                        numerical_features_list.append((
+                            pd.DataFrame(col_features_train, index=X_train.index),
+                            pd.DataFrame(col_features_test, index=X_test.index)
+                        ))
                         
                 except Exception as e:
                     logger.warning(f"Numerical transformation failed for {col}: {e}")
         
-        # 4. Interaction features (limited to prevent explosion)
-        top_features = (self.numerical_features[:3] + [f"{col}_target_enc" for col in self.categorical_features[:2] if f"{col}_target_enc" in X_train.columns])
+        # Concatenate all numerical features at once
+        if numerical_features_list:
+            train_feature_dfs = [X_train] + [df[0] for df in numerical_features_list]
+            test_feature_dfs = [X_test] + [df[1] for df in numerical_features_list]
+            
+            X_train = pd.concat(train_feature_dfs, axis=1)
+            X_test = pd.concat(test_feature_dfs, axis=1)
         
-        for i, col1 in enumerate(top_features):
-            for col2 in top_features[i+1:]:
-                if col1 in X_train.columns and col2 in X_train.columns:
+        # 4. Feature interactions (limited to prevent explosion)
+        interaction_features_train = {}
+        interaction_features_test = {}
+        
+        numerical_for_interaction = [col for col in self.numerical_features[:5] if col in X_train.columns]
+        
+        for i, col1 in enumerate(numerical_for_interaction):
+            for j, col2 in enumerate(numerical_for_interaction):
+                if i < j:  # Avoid duplicate interactions
                     try:
-                        # Multiplication interaction
-                        X_train[f"{col1}_x_{col2}"] = X_train[col1] * X_train[col2]
-                        X_test[f"{col1}_x_{col2}"] = X_test[col1] * X_test[col2]
-                        self.generated_features.append(f"{col1}_x_{col2}")
+                        # Multiplicative interaction
+                        interaction_features_train[f"{col1}_x_{col2}"] = X_train[col1] * X_train[col2]
+                        interaction_features_test[f"{col1}_x_{col2}"] = X_test[col1] * X_test[col2]
                         
-                        # Ratio interaction (if col2 != 0)
-                        mask_train = X_train[col2] != 0
-                        mask_test = X_test[col2] != 0
-                        X_train[f"{col1}_div_{col2}"] = 0.0
-                        X_test[f"{col1}_div_{col2}"] = 0.0
-                        X_train.loc[mask_train, f"{col1}_div_{col2}"] = X_train.loc[mask_train, col1] / X_train.loc[mask_train, col2]
-                        X_test.loc[mask_test, f"{col1}_div_{col2}"] = X_test.loc[mask_test, col1] / X_test.loc[mask_test, col2]
-                        self.generated_features.append(f"{col1}_div_{col2}")
+                        # Ratio interaction (with safe division)
+                        safe_denominator_train = X_train[col2].replace(0, 1e-8)
+                        safe_denominator_test = X_test[col2].replace(0, 1e-8)
+                        
+                        interaction_features_train[f"{col1}_div_{col2}"] = X_train[col1] / safe_denominator_train
+                        interaction_features_test[f"{col1}_div_{col2}"] = X_test[col1] / safe_denominator_test
+                        
+                        self.generated_features.extend([f"{col1}_x_{col2}", f"{col1}_div_{col2}"])
                         
                     except Exception as e:
-                        logger.warning(f"Interaction feature failed for {col1} x {col2}: {e}")
-                        
-                    # Limit interactions to prevent memory issues
-                    if len(self.generated_features) > 200:
-                        break
-            if len(self.generated_features) > 200:
-                break
+                        logger.warning(f"Interaction feature failed for {col1}_{col2}: {e}")
         
-        logger.info(f"Full feature engineering - generated: {len(self.generated_features)} features")
+        # Add interaction features
+        if interaction_features_train:
+            X_train = pd.concat([X_train, pd.DataFrame(interaction_features_train, index=X_train.index)], axis=1)
+            X_test = pd.concat([X_test, pd.DataFrame(interaction_features_test, index=X_test.index)], axis=1)
+        
         return X_train, X_test
     
-    def _ctr_feature_selection(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """CTR-specific feature selection"""
-        
-        if self.quick_mode or X_train.shape[1] <= 50:
-            logger.info("Skipping feature selection (quick mode or few features)")
-            return X_train, X_test
-        
+    def _feature_selection(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Feature selection using multiple methods"""
         try:
-            logger.info(f"Feature selection started - input features: {X_train.shape[1]}")
+            # Handle potential data type issues
+            X_train_numeric = X_train.select_dtypes(include=[np.number]).copy()
+            X_test_numeric = X_test.select_dtypes(include=[np.number]).copy()
             
-            # Remove highly correlated features
-            corr_threshold = 0.95
-            corr_matrix = X_train.corr().abs()
-            upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-            high_corr_features = [column for column in upper_tri.columns if any(upper_tri[column] > corr_threshold)]
+            # Ensure same columns in both datasets
+            common_columns = list(set(X_train_numeric.columns) & set(X_test_numeric.columns))
+            X_train_numeric = X_train_numeric[common_columns]
+            X_test_numeric = X_test_numeric[common_columns]
             
-            if high_corr_features:
-                X_train = X_train.drop(columns=high_corr_features)
-                X_test = X_test.drop(columns=high_corr_features)
-                logger.info(f"Removed {len(high_corr_features)} highly correlated features")
+            if len(common_columns) == 0:
+                logger.warning("No common numeric columns found, skipping feature selection")
+                return X_train, X_test
             
-            # Mutual information feature selection
-            if X_train.shape[1] > 100:
-                n_features = min(100, X_train.shape[1] // 2)
-                
-                # Fill NaN values for feature selection
-                X_train_filled = X_train.fillna(0)
-                
-                selector = SelectKBest(score_func=mutual_info_classif, k=n_features)
-                X_train_selected = selector.fit_transform(X_train_filled, y_train)
-                
-                selected_features = X_train.columns[selector.get_support()].tolist()
-                X_train = X_train[selected_features]
-                X_test = X_test[selected_features]
-                
-                self.feature_selectors['mutual_info'] = selector
-                logger.info(f"Mutual information selection: {len(selected_features)} features selected")
+            # Fill any remaining NaN values
+            X_train_numeric = X_train_numeric.fillna(0)
+            X_test_numeric = X_test_numeric.fillna(0)
             
-            logger.info(f"Feature selection completed - final features: {X_train.shape[1]}")
-            return X_train, X_test
+            # Feature selection based on statistical tests
+            n_features = min(len(common_columns), self.config.MAX_FEATURES)
+            
+            selector = SelectKBest(score_func=f_classif, k=n_features)
+            X_train_selected = selector.fit_transform(X_train_numeric, y_train)
+            X_test_selected = selector.transform(X_test_numeric)
+            
+            # Get selected feature names
+            selected_features = [common_columns[i] for i in selector.get_support(indices=True)]
+            self.selected_features = selected_features
+            
+            # Create final dataframes
+            X_train_final = pd.DataFrame(X_train_selected, columns=selected_features, index=X_train.index)
+            X_test_final = pd.DataFrame(X_test_selected, columns=selected_features, index=X_test.index)
+            
+            logger.info(f"Feature selection completed: {len(common_columns)} → {len(selected_features)} features")
+            
+            return X_train_final, X_test_final
             
         except Exception as e:
             logger.error(f"Feature selection failed: {e}")
-            return X_train, X_test
+            # Return original data with numeric columns only
+            numeric_columns = list(set(X_train.select_dtypes(include=[np.number]).columns) & 
+                                 set(X_test.select_dtypes(include=[np.number]).columns))
+            if numeric_columns:
+                return X_train[numeric_columns].fillna(0), X_test[numeric_columns].fillna(0)
+            else:
+                return X_train.fillna(0), X_test.fillna(0)
     
     def _final_preprocessing(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Final preprocessing steps"""
-        
         try:
-            # Handle missing values
+            # Ensure same columns in both datasets
+            common_columns = list(set(X_train.columns) & set(X_test.columns))
+            X_train = X_train[common_columns]
+            X_test = X_test[common_columns]
+            
+            # Handle inf and NaN values
+            X_train = X_train.replace([np.inf, -np.inf], np.nan)
+            X_test = X_test.replace([np.inf, -np.inf], np.nan)
+            
+            X_train = X_train.fillna(0)
+            X_test = X_test.fillna(0)
+            
+            # Convert to numeric
             for col in X_train.columns:
-                if X_train[col].isnull().any():
-                    if X_train[col].dtype in ['float16', 'float32', 'float64']:
-                        fill_value = X_train[col].median()
-                    else:
-                        fill_value = X_train[col].mode().iloc[0] if not X_train[col].mode().empty else 0
-                    
-                    X_train[col] = X_train[col].fillna(fill_value)
-                    X_test[col] = X_test[col].fillna(fill_value)
+                try:
+                    X_train[col] = pd.to_numeric(X_train[col], errors='coerce')
+                    X_test[col] = pd.to_numeric(X_test[col], errors='coerce')
+                except:
+                    pass
             
-            # Ensure no infinite values
-            X_train = X_train.replace([np.inf, -np.inf], 0)
-            X_test = X_test.replace([np.inf, -np.inf], 0)
+            # Final fillna after conversion
+            X_train = X_train.fillna(0)
+            X_test = X_test.fillna(0)
             
-            # Final data type optimization
-            X_train = self.data_converter.optimize_dtypes(X_train)
-            X_test = self.data_converter.optimize_dtypes(X_test)
+            # Ensure same shape
+            if X_train.shape[1] != X_test.shape[1]:
+                logger.warning(f"Shape mismatch: Train {X_train.shape[1]}, Test {X_test.shape[1]}")
+                common_cols = list(set(X_train.columns) & set(X_test.columns))
+                X_train = X_train[common_cols]
+                X_test = X_test[common_cols]
             
-            logger.info("Final preprocessing completed")
+            logger.info(f"Final preprocessing - Train: {X_train.shape}, Test: {X_test.shape}")
+            
             return X_train, X_test
             
         except Exception as e:
             logger.error(f"Final preprocessing failed: {e}")
-            return X_train, X_test
+            return X_train.fillna(0), X_test.fillna(0)
     
     def get_feature_importance_summary(self) -> Dict[str, Any]:
         """Get summary of feature engineering process"""

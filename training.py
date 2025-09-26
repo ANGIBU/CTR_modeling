@@ -1,240 +1,284 @@
 # training.py
 
-import pandas as pd
 import numpy as np
-from typing import Dict, Any, List, Optional, Tuple, Union
-import logging
+import pandas as pd
 import time
-import gc
-import warnings
-from pathlib import Path
-import pickle
-
-# Core ML libraries
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import StratifiedKFold, cross_val_score
-from sklearn.metrics import roc_auc_score, average_precision_score, classification_report
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.utils.class_weight import compute_class_weight
+import logging
+from typing import Dict, Any, Optional, List, Tuple
 from sklearn.preprocessing import StandardScaler
-from imblearn.over_sampling import SMOTE, ADASYN
-from imblearn.under_sampling import RandomUnderSampler
-from imblearn.combine import SMOTEENN, SMOTETomek
+from sklearn.calibration import CalibratedClassifierCV, IsotonicRegression
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score, log_loss
+import gc
 
-# Gradient boosting libraries
+# CTR-specific imports
+from config import Config
+
+# Setup logging
+logger = logging.getLogger(__name__)
+
+# Conditional imports
 try:
     import lightgbm as lgb
     LIGHTGBM_AVAILABLE = True
 except ImportError:
     LIGHTGBM_AVAILABLE = False
-    
+    logger.warning("LightGBM not available")
+
 try:
     import xgboost as xgb
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
-
-try:
-    import optuna
-    OPTUNA_AVAILABLE = True
-except ImportError:
-    OPTUNA_AVAILABLE = False
-
-try:
-    import joblib
-    JOBLIB_AVAILABLE = True
-except ImportError:
-    JOBLIB_AVAILABLE = False
-
-from config import Config
-
-logger = logging.getLogger(__name__)
+    logger.warning("XGBoost not available")
 
 class CTRClassBalancer:
-    """CTR specialized class balancing with multiple strategies"""
+    """Class balancer for CTR prediction with multiple strategies"""
     
     def __init__(self, target_ctr: float = 0.0191, strategy: str = "hybrid"):
         self.target_ctr = target_ctr
         self.strategy = strategy
-        self.balancer = None
         self.applied_method = None
+        self.balance_ratio = None
         
     def fit_transform(self, X: pd.DataFrame, y: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
         """Apply class balancing strategy"""
-        logger.info(f"Class balancing started - strategy: {self.strategy}")
-        
         try:
-            # Calculate current class distribution
-            class_counts = y.value_counts()
-            current_ctr = class_counts.get(1, 0) / len(y)
-            logger.info(f"Current CTR: {current_ctr:.4f}, Target CTR: {self.target_ctr:.4f}")
+            current_ctr = np.mean(y)
+            positive_count = np.sum(y == 1)
+            negative_count = np.sum(y == 0)
             
-            X_balanced, y_balanced = X.copy(), y.copy()
+            logger.info(f"Original CTR: {current_ctr:.4f}, Positive: {positive_count}, Negative: {negative_count}")
             
-            if self.strategy == "hybrid":
-                # Hybrid approach: SMOTE + undersampling
-                try:
-                    # Calculate target ratio for SMOTE
-                    minority_count = class_counts.get(1, 0)
-                    majority_count = class_counts.get(0, 0)
-                    
-                    # Target: achieve 5% positive samples (reasonable for CTR)
-                    target_ratio = 0.05 / 0.95
-                    
-                    # Step 1: SMOTE with limited oversampling
-                    if minority_count > 10:
-                        smote = SMOTE(
-                            sampling_strategy=min(target_ratio, minority_count / majority_count * 3),
-                            random_state=42,
-                            k_neighbors=min(5, minority_count - 1)
-                        )
-                        X_resampled, y_resampled = smote.fit_resample(X_balanced, y_balanced)
-                        logger.info(f"SMOTE applied - samples: {len(X_resampled)}")
-                        
-                        # Step 2: Moderate undersampling
-                        undersampler = RandomUnderSampler(
-                            sampling_strategy=0.08,  # 8% positive samples
-                            random_state=42
-                        )
-                        X_balanced, y_balanced = undersampler.fit_resample(X_resampled, y_resampled)
-                        self.applied_method = "SMOTE + UnderSampling"
-                    else:
-                        # Too few positive samples, only use class weights
-                        self.applied_method = "ClassWeight_Only"
-                        
-                except Exception as e:
-                    logger.warning(f"Hybrid balancing failed: {e}, using class weights only")
-                    self.applied_method = "ClassWeight_Only"
-                    
-            elif self.strategy == "smote_tomek":
-                # SMOTE + Tomek cleaning
-                try:
-                    minority_count = class_counts.get(1, 0)
-                    if minority_count > 10:
-                        smote_tomek = SMOTETomek(
-                            sampling_strategy=0.1,
-                            random_state=42,
-                            smote=SMOTE(k_neighbors=min(5, minority_count - 1))
-                        )
-                        X_balanced, y_balanced = smote_tomek.fit_resample(X_balanced, y_balanced)
-                        self.applied_method = "SMOTE_Tomek"
-                    else:
-                        self.applied_method = "ClassWeight_Only"
-                except Exception as e:
-                    logger.warning(f"SMOTE-Tomek failed: {e}")
-                    self.applied_method = "ClassWeight_Only"
-                    
-            elif self.strategy == "adasyn":
-                # Adaptive synthetic sampling
-                try:
-                    minority_count = class_counts.get(1, 0)
-                    if minority_count > 10:
-                        adasyn = ADASYN(
-                            sampling_strategy=0.08,
-                            random_state=42,
-                            n_neighbors=min(5, minority_count - 1)
-                        )
-                        X_balanced, y_balanced = adasyn.fit_resample(X_balanced, y_balanced)
-                        self.applied_method = "ADASYN"
-                    else:
-                        self.applied_method = "ClassWeight_Only"
-                except Exception as e:
-                    logger.warning(f"ADASYN failed: {e}")
-                    self.applied_method = "ClassWeight_Only"
-                    
+            if self.strategy == "none" or current_ctr >= 0.8 * self.target_ctr:
+                self.applied_method = "none"
+                return X.copy(), y.copy()
+            
+            elif self.strategy == "undersample":
+                return self._undersample(X, y, current_ctr)
+            
+            elif self.strategy == "oversample":
+                return self._oversample(X, y, current_ctr)
+            
+            elif self.strategy == "hybrid":
+                return self._hybrid_balance(X, y, current_ctr)
+            
             else:
-                self.applied_method = "ClassWeight_Only"
+                self.applied_method = "none"
+                return X.copy(), y.copy()
+                
+        except Exception as e:
+            logger.error(f"Class balancing failed: {e}")
+            self.applied_method = "failed"
+            return X.copy(), y.copy()
+    
+    def _undersample(self, X: pd.DataFrame, y: pd.Series, current_ctr: float) -> Tuple[pd.DataFrame, pd.Series]:
+        """Undersample negative class"""
+        try:
+            positive_indices = y[y == 1].index
+            negative_indices = y[y == 0].index
             
-            # Log final distribution
-            final_counts = y_balanced.value_counts()
-            final_ctr = final_counts.get(1, 0) / len(y_balanced)
-            logger.info(f"Balancing completed - method: {self.applied_method}")
-            logger.info(f"Final CTR: {final_ctr:.4f}, samples: {len(X_balanced)}")
+            target_negative_count = int(len(positive_indices) / self.target_ctr - len(positive_indices))
+            target_negative_count = min(target_negative_count, len(negative_indices))
             
+            sampled_negative_indices = np.random.choice(
+                negative_indices, size=target_negative_count, replace=False
+            )
+            
+            balanced_indices = np.concatenate([positive_indices, sampled_negative_indices])
+            X_balanced = X.loc[balanced_indices].copy()
+            y_balanced = y.loc[balanced_indices].copy()
+            
+            self.applied_method = "undersample"
+            self.balance_ratio = len(positive_indices) / len(balanced_indices)
+            
+            logger.info(f"Undersampling: {len(X)} -> {len(X_balanced)} samples")
             return X_balanced, y_balanced
             
         except Exception as e:
-            logger.error(f"Class balancing failed: {e}")
-            return X, y
+            logger.error(f"Undersampling failed: {e}")
+            self.applied_method = "failed"
+            return X.copy(), y.copy()
+    
+    def _oversample(self, X: pd.DataFrame, y: pd.Series, current_ctr: float) -> Tuple[pd.DataFrame, pd.Series]:
+        """Oversample positive class"""
+        try:
+            positive_indices = y[y == 1].index
+            negative_indices = y[y == 0].index
+            
+            target_positive_count = int(len(negative_indices) * self.target_ctr / (1 - self.target_ctr))
+            oversample_count = target_positive_count - len(positive_indices)
+            
+            if oversample_count > 0:
+                oversampled_indices = np.random.choice(
+                    positive_indices, size=oversample_count, replace=True
+                )
+                
+                balanced_indices = np.concatenate([
+                    positive_indices, negative_indices, oversampled_indices
+                ])
+                
+                X_balanced = X.loc[balanced_indices].copy()
+                y_balanced = y.loc[balanced_indices].copy()
+            else:
+                X_balanced = X.copy()
+                y_balanced = y.copy()
+            
+            self.applied_method = "oversample"
+            self.balance_ratio = len(positive_indices) / len(X_balanced)
+            
+            logger.info(f"Oversampling: {len(X)} -> {len(X_balanced)} samples")
+            return X_balanced, y_balanced
+            
+        except Exception as e:
+            logger.error(f"Oversampling failed: {e}")
+            self.applied_method = "failed"
+            return X.copy(), y.copy()
+    
+    def _hybrid_balance(self, X: pd.DataFrame, y: pd.Series, current_ctr: float) -> Tuple[pd.DataFrame, pd.Series]:
+        """Hybrid balancing strategy"""
+        try:
+            positive_indices = y[y == 1].index
+            negative_indices = y[y == 0].index
+            
+            # Moderate undersampling + light oversampling
+            target_negative_reduction = 0.3
+            target_positive_increase = 1.5
+            
+            # Undersample negatives
+            new_negative_count = int(len(negative_indices) * (1 - target_negative_reduction))
+            sampled_negative_indices = np.random.choice(
+                negative_indices, size=new_negative_count, replace=False
+            )
+            
+            # Oversample positives
+            oversample_count = int(len(positive_indices) * target_positive_increase) - len(positive_indices)
+            oversampled_positive_indices = np.random.choice(
+                positive_indices, size=oversample_count, replace=True
+            )
+            
+            balanced_indices = np.concatenate([
+                positive_indices, sampled_negative_indices, oversampled_positive_indices
+            ])
+            
+            X_balanced = X.loc[balanced_indices].copy()
+            y_balanced = y.loc[balanced_indices].copy()
+            
+            self.applied_method = "hybrid"
+            self.balance_ratio = (len(positive_indices) + oversample_count) / len(X_balanced)
+            
+            logger.info(f"Hybrid balancing: {len(X)} -> {len(X_balanced)} samples")
+            return X_balanced, y_balanced
+            
+        except Exception as e:
+            logger.error(f"Hybrid balancing failed: {e}")
+            self.applied_method = "failed"
+            return X.copy(), y.copy()
 
 class CTRCalibrator:
-    """CTR probability calibration specialist"""
+    """CTR-specific calibration for probability outputs"""
     
     def __init__(self, target_ctr: float = 0.0191, method: str = "isotonic"):
         self.target_ctr = target_ctr
         self.method = method
         self.calibrator = None
         self.is_fitted = False
+        self.beta_params = [1.0, 1.0]
+        self.temperature = 1.0
+        self.linear_params = [1.0, 0.0]  # slope, intercept
         
     def fit(self, y_true: np.ndarray, y_pred: np.ndarray):
-        """Fit calibration model"""
+        """Fit calibration"""
         try:
-            from sklearn.calibration import CalibratedClassifierCV, calibration_curve
-            from sklearn.isotonic import IsotonicRegression
-            
-            logger.info(f"CTR calibration fitting - method: {self.method}")
-            
             if self.method == "isotonic":
                 self.calibrator = IsotonicRegression(out_of_bounds='clip')
                 self.calibrator.fit(y_pred, y_true)
+                
             elif self.method == "platt":
-                # Platt scaling (sigmoid)
-                from sklearn.linear_model import LogisticRegression
                 self.calibrator = LogisticRegression()
                 self.calibrator.fit(y_pred.reshape(-1, 1), y_true)
+                
             elif self.method == "beta":
-                # Beta calibration for imbalanced data
                 self._fit_beta_calibration(y_true, y_pred)
-            else:
-                # Temperature scaling
+                
+            elif self.method == "temperature":
                 self._fit_temperature_scaling(y_true, y_pred)
                 
+            elif self.method == "linear":
+                self._fit_linear_calibration(y_true, y_pred)
+            
             self.is_fitted = True
-            
-            # Validate calibration quality
-            calibrated_pred = self.transform(y_pred)
-            predicted_ctr = np.mean(calibrated_pred)
-            actual_ctr = np.mean(y_true)
-            
-            logger.info(f"Calibration completed - Predicted CTR: {predicted_ctr:.4f}, Actual CTR: {actual_ctr:.4f}")
+            logger.info(f"CTR calibration fitted: {self.method}")
             
         except Exception as e:
             logger.error(f"Calibration fitting failed: {e}")
             self.is_fitted = False
     
     def transform(self, y_pred: np.ndarray) -> np.ndarray:
-        """Transform predictions using calibration"""
+        """Apply calibration"""
+        if not self.is_fitted:
+            return np.clip(y_pred, 0.001, 0.999)
+        
         try:
-            if not self.is_fitted:
-                return np.clip(y_pred, 0.001, 0.999)
-                
             if self.method == "isotonic":
-                return np.clip(self.calibrator.predict(y_pred), 0.001, 0.999)
+                return np.clip(self.calibrator.transform(y_pred), 0.001, 0.999)
+                
             elif self.method == "platt":
                 return np.clip(self.calibrator.predict_proba(y_pred.reshape(-1, 1))[:, 1], 0.001, 0.999)
+                
             elif self.method == "beta":
                 return self._transform_beta_calibration(y_pred)
-            else:
+                
+            elif self.method == "temperature":
                 return self._transform_temperature_scaling(y_pred)
+                
+            elif self.method == "linear":
+                return self._transform_linear_calibration(y_pred)
+            
+            else:
+                return np.clip(y_pred, 0.001, 0.999)
                 
         except Exception as e:
             logger.error(f"Calibration transform failed: {e}")
             return np.clip(y_pred, 0.001, 0.999)
     
+    def _fit_linear_calibration(self, y_true: np.ndarray, y_pred: np.ndarray):
+        """Fit linear calibration"""
+        try:
+            from sklearn.linear_model import LinearRegression
+            model = LinearRegression()
+            model.fit(y_pred.reshape(-1, 1), y_true)
+            self.linear_params = [model.coef_[0], model.intercept_]
+        except Exception as e:
+            logger.warning(f"Linear calibration fitting failed: {e}")
+            self.linear_params = [1.0, 0.0]
+    
+    def _transform_linear_calibration(self, y_pred: np.ndarray) -> np.ndarray:
+        """Transform using linear calibration"""
+        try:
+            slope, intercept = self.linear_params
+            return np.clip(slope * y_pred + intercept, 0.001, 0.999)
+        except:
+            return np.clip(y_pred, 0.001, 0.999)
+    
     def _fit_beta_calibration(self, y_true: np.ndarray, y_pred: np.ndarray):
-        """Fit beta calibration for imbalanced data"""
+        """Fit beta calibration"""
         try:
             from scipy.optimize import minimize
             
-            def beta_nll(params, y_true, y_pred):
+            def beta_loss(params, y_true, y_pred):
                 a, b = params
+                if a <= 0 or b <= 0:
+                    return 1e6
+                
                 eps = 1e-15
-                y_pred_cal = np.clip(y_pred ** (1/a) * (1-y_pred) ** (1/b), eps, 1-eps)
+                y_pred_cal = y_pred ** (1/a) * (1-y_pred) ** (1/b)
+                y_pred_cal = np.clip(y_pred_cal, eps, 1-eps)
+                
                 return -np.sum(y_true * np.log(y_pred_cal) + (1-y_true) * np.log(1-y_pred_cal))
             
-            result = minimize(beta_nll, [1.0, 1.0], args=(y_true, y_pred), 
-                            bounds=[(0.1, 10.0), (0.1, 10.0)], method='L-BFGS-B')
+            result = minimize(beta_loss, [1.0, 1.0], args=(y_true, y_pred), 
+                            bounds=[(0.1, 10), (0.1, 10)])
             self.beta_params = result.x
             
         except Exception as e:
@@ -314,13 +358,18 @@ class CTRTrainer:
     
     def train_model(self, model_name: str, X_train: pd.DataFrame, y_train: pd.Series,
                    X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None,
-                   balance_strategy: str = "hybrid", calibration_method: str = "isotonic") -> Dict[str, Any]:
+                   balance_strategy: str = "hybrid", calibration_method: str = "isotonic",
+                   quick_mode: Optional[bool] = None) -> Dict[str, Any]:
         """Train CTR model with balancing and calibration"""
         
         logger.info(f"Training {model_name} with CTR optimization")
         start_time = time.time()
         
         try:
+            # Handle quick mode
+            if quick_mode is not None:
+                logger.info(f"Quick mode: {'ON' if quick_mode else 'OFF'}")
+            
             # Step 1: Class balancing
             logger.info(f"Step 1: Class balancing - strategy: {balance_strategy}")
             balancer = CTRClassBalancer(self.target_ctr, balance_strategy)
@@ -347,17 +396,17 @@ class CTRTrainer:
             
             # Step 3: Model training with CTR-optimized parameters
             logger.info(f"Step 2: Model training")
-            model = self._create_model(model_name, y_train_balanced)
+            model = self._create_model(model_name, y_train_balanced, quick_mode=quick_mode)
             
             # Train the model
             if model_name in ['lightgbm', 'xgboost'] and X_val_scaled is not None and y_val is not None:
                 # Use validation set for early stopping
                 model = self._train_boosting_model(model_name, model, X_train_scaled, y_train_balanced,
-                                                 X_val_scaled, y_val)
+                                                 X_val_scaled, y_val, quick_mode=quick_mode)
             else:
                 # Standard training
                 model.fit(X_train_scaled, y_train_balanced)
-            
+     
             self.models[model_name] = model
             
             # Step 4: Model calibration
@@ -389,7 +438,8 @@ class CTRTrainer:
                 'calibration_method': calibration_method,
                 'training_samples': len(X_train_balanced),
                 'final_ctr': np.mean(y_train_balanced),
-                'feature_count': X_train_scaled.shape[1]
+                'feature_count': X_train_scaled.shape[1],
+                'quick_mode': quick_mode or False
             }
             
             self.training_history[model_name] = training_summary
@@ -403,180 +453,178 @@ class CTRTrainer:
             logger.error(f"{model_name} training failed: {e}")
             return {'model_name': model_name, 'error': str(e), 'training_time': 0}
     
-    def _create_model(self, model_name: str, y_train: pd.Series):
+    def _create_model(self, model_name: str, y_train: pd.Series, quick_mode: Optional[bool] = None):
         """Create model with CTR-optimized parameters"""
         
         # Calculate class weights
         classes = np.unique(y_train)
-        class_weights = compute_class_weight('balanced', classes=classes, y=y_train)
-        class_weight_dict = dict(zip(classes, class_weights))
+        pos_count = np.sum(y_train == 1)
+        neg_count = np.sum(y_train == 0)
+        
+        # Adjust parameters based on quick mode
+        is_quick = quick_mode or False
         
         if model_name == 'logistic':
-            return LogisticRegression(
-                class_weight=class_weight_dict,
-                max_iter=1000,
-                solver='liblinear',
-                random_state=42,
-                penalty='l2',
-                C=0.1  # Stronger regularization for stability
-            )
+            class_weight = {0: 1.0, 1: min(neg_count/pos_count, 10.0)} if pos_count > 0 else 'balanced'
             
+            params = {
+                'C': 0.1 if is_quick else 1.0,
+                'class_weight': class_weight,
+                'random_state': 42,
+                'max_iter': 100 if is_quick else 1000,
+                'solver': 'liblinear'
+            }
+            return LogisticRegression(**params)
+        
         elif model_name == 'lightgbm' and LIGHTGBM_AVAILABLE:
-            # LightGBM parameters optimized for CTR prediction
-            pos_weight = class_weights[1] / class_weights[0] if len(class_weights) > 1 else 1.0
+            scale_pos_weight = neg_count / pos_count if pos_count > 0 else 1.0
             
-            return lgb.LGBMClassifier(
-                objective='binary',
-                boosting_type='gbdt',
-                num_leaves=31,
-                learning_rate=0.05,
-                feature_fraction=0.8,
-                bagging_fraction=0.8,
-                bagging_freq=5,
-                reg_alpha=0.1,
-                reg_lambda=0.1,
-                min_child_samples=20,
-                min_split_gain=0.1,
-                scale_pos_weight=pos_weight,
-                n_estimators=500,
-                random_state=42,
-                verbose=-1,
-                is_unbalance=True
-            )
-            
+            params = {
+                'objective': 'binary',
+                'metric': 'binary_logloss',
+                'boosting_type': 'gbdt',
+                'num_leaves': 15 if is_quick else 31,
+                'learning_rate': 0.1 if is_quick else 0.05,
+                'feature_fraction': 0.8,
+                'bagging_fraction': 0.8,
+                'bagging_freq': 5,
+                'scale_pos_weight': min(scale_pos_weight, 10.0),
+                'random_state': 42,
+                'n_jobs': -1,
+                'verbosity': -1
+            }
+            return lgb.LGBMClassifier(**params)
+        
         elif model_name == 'xgboost' and XGBOOST_AVAILABLE:
-            # XGBoost parameters optimized for CTR prediction
-            pos_weight = class_weights[1] / class_weights[0] if len(class_weights) > 1 else 1.0
+            scale_pos_weight = neg_count / pos_count if pos_count > 0 else 1.0
             
-            return xgb.XGBClassifier(
-                objective='binary:logistic',
-                max_depth=6,
-                learning_rate=0.05,
-                n_estimators=500,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                reg_alpha=0.1,
-                reg_lambda=0.1,
-                min_child_weight=5,
-                scale_pos_weight=pos_weight,
-                random_state=42,
-                eval_metric='logloss',
-                use_label_encoder=False
-            )
+            params = {
+                'objective': 'binary:logistic',
+                'eval_metric': 'logloss',
+                'max_depth': 3 if is_quick else 6,
+                'learning_rate': 0.1 if is_quick else 0.05,
+                'n_estimators': 50 if is_quick else 100,
+                'subsample': 0.8,
+                'colsample_bytree': 0.8,
+                'scale_pos_weight': min(scale_pos_weight, 10.0),
+                'random_state': 42,
+                'n_jobs': -1
+            }
+            return xgb.XGBClassifier(**params)
         
         else:
             raise ValueError(f"Unknown model: {model_name}")
     
     def _train_boosting_model(self, model_name: str, model, X_train: pd.DataFrame, y_train: pd.Series,
-                            X_val: pd.DataFrame, y_val: pd.Series):
+                            X_val: pd.DataFrame, y_val: pd.Series, quick_mode: Optional[bool] = None):
         """Train boosting models with early stopping"""
+        
+        is_quick = quick_mode or False
+        early_stopping_rounds = 10 if is_quick else 20
         
         if model_name == 'lightgbm':
             model.fit(
                 X_train, y_train,
                 eval_set=[(X_val, y_val)],
-                eval_names=['validation'],
-                eval_metric='logloss',
-                early_stopping_rounds=50,
-                verbose=0
+                eval_metric='binary_logloss',
+                callbacks=[lgb.early_stopping(early_stopping_rounds), lgb.log_evaluation(0)]
             )
+        
         elif model_name == 'xgboost':
             model.fit(
                 X_train, y_train,
                 eval_set=[(X_val, y_val)],
-                early_stopping_rounds=50,
                 verbose=False
             )
         
         return model
     
     def _extract_feature_importance(self, model_name: str, model, feature_names: List[str]):
-        """Extract and store feature importance"""
+        """Extract feature importance"""
         try:
             if hasattr(model, 'feature_importances_'):
-                importances = model.feature_importances_
+                importance_dict = dict(zip(feature_names, model.feature_importances_))
             elif hasattr(model, 'coef_'):
-                importances = np.abs(model.coef_[0])
+                importance_dict = dict(zip(feature_names, np.abs(model.coef_[0])))
             else:
-                importances = np.zeros(len(feature_names))
+                importance_dict = {}
             
-            # Create feature importance dictionary
-            importance_dict = dict(zip(feature_names, importances))
             # Sort by importance
-            importance_dict = dict(sorted(importance_dict.items(), key=lambda x: x[1], reverse=True))
+            sorted_importance = dict(sorted(importance_dict.items(), key=lambda x: x[1], reverse=True))
+            self.feature_importances[model_name] = sorted_importance
             
-            self.feature_importances[model_name] = importance_dict
-            
-            # Log top 10 features
-            top_features = list(importance_dict.keys())[:10]
-            logger.info(f"{model_name} top features: {', '.join(top_features[:5])}")
+            logger.info(f"Feature importance extracted for {model_name}: {len(sorted_importance)} features")
             
         except Exception as e:
             logger.warning(f"Feature importance extraction failed for {model_name}: {e}")
             self.feature_importances[model_name] = {}
     
     def predict(self, model_name: str, X: pd.DataFrame) -> np.ndarray:
-        """Predict with calibration"""
+        """Make predictions with calibration"""
         try:
             if model_name not in self.models:
                 raise ValueError(f"Model {model_name} not trained")
             
-            model = self.models[model_name]
-            scaler = self.scalers.get(model_name)
-            calibrator = self.calibrators.get(model_name)
-            
             # Scale features
-            if scaler:
-                X_scaled = pd.DataFrame(scaler.transform(X), columns=X.columns, index=X.index)
-            else:
-                X_scaled = X
+            X_scaled = pd.DataFrame(
+                self.scalers[model_name].transform(X),
+                columns=X.columns,
+                index=X.index
+            )
             
-            # Get raw predictions
+            # Get predictions
+            model = self.models[model_name]
             if hasattr(model, 'predict_proba'):
-                raw_pred = model.predict_proba(X_scaled)[:, 1]
+                y_pred = model.predict_proba(X_scaled)[:, 1]
             else:
-                raw_pred = model.predict(X_scaled)
+                y_pred = model.predict(X_scaled)
             
             # Apply calibration
-            if calibrator and calibrator.is_fitted:
-                calibrated_pred = calibrator.transform(raw_pred)
-            else:
-                calibrated_pred = np.clip(raw_pred, 0.001, 0.999)
+            if model_name in self.calibrators:
+                y_pred = self.calibrators[model_name].transform(y_pred)
             
-            # Final CTR adjustment to target
-            predicted_ctr = np.mean(calibrated_pred)
-            if abs(predicted_ctr - self.target_ctr) > self.ctr_tolerance:
-                # Apply linear adjustment
-                adjustment_factor = self.target_ctr / predicted_ctr
-                calibrated_pred = np.clip(calibrated_pred * adjustment_factor, 0.001, 0.999)
-            
-            return calibrated_pred
+            return np.clip(y_pred, 0.001, 0.999)
             
         except Exception as e:
             logger.error(f"Prediction failed for {model_name}: {e}")
             return np.full(len(X), self.target_ctr)
     
+    def predict_batch(self, model_name: str, X: pd.DataFrame, batch_size: int = 10000) -> np.ndarray:
+        """Make predictions in batches"""
+        try:
+            predictions = []
+            
+            for i in range(0, len(X), batch_size):
+                batch = X.iloc[i:i + batch_size]
+                pred_batch = self.predict(model_name, batch)
+                predictions.extend(pred_batch)
+                
+                # Memory cleanup
+                if i % (batch_size * 10) == 0:
+                    gc.collect()
+            
+            return np.array(predictions)
+            
+        except Exception as e:
+            logger.error(f"Batch prediction failed for {model_name}: {e}")
+            return np.full(len(X), self.target_ctr)
+    
     def save_model(self, model_name: str, filepath: str):
         """Save trained model"""
         try:
-            if model_name not in self.models:
-                raise ValueError(f"Model {model_name} not trained")
+            import pickle
             
             model_data = {
-                'model': self.models[model_name],
+                'model': self.models.get(model_name),
                 'scaler': self.scalers.get(model_name),
                 'calibrator': self.calibrators.get(model_name),
                 'class_balancer': self.class_balancers.get(model_name),
                 'feature_importance': self.feature_importances.get(model_name, {}),
-                'training_history': self.training_history.get(model_name, {}),
-                'config': self.config
+                'training_history': self.training_history.get(model_name, {})
             }
             
-            if JOBLIB_AVAILABLE:
-                joblib.dump(model_data, filepath)
-            else:
-                with open(filepath, 'wb') as f:
-                    pickle.dump(model_data, f)
+            with open(filepath, 'wb') as f:
+                pickle.dump(model_data, f)
             
             logger.info(f"Model {model_name} saved to {filepath}")
             
@@ -586,13 +634,12 @@ class CTRTrainer:
     def load_model(self, model_name: str, filepath: str):
         """Load trained model"""
         try:
-            if JOBLIB_AVAILABLE:
-                model_data = joblib.load(filepath)
-            else:
-                with open(filepath, 'rb') as f:
-                    model_data = pickle.load(f)
+            import pickle
             
-            self.models[model_name] = model_data['model']
+            with open(filepath, 'rb') as f:
+                model_data = pickle.load(f)
+            
+            self.models[model_name] = model_data.get('model')
             self.scalers[model_name] = model_data.get('scaler')
             self.calibrators[model_name] = model_data.get('calibrator')
             self.class_balancers[model_name] = model_data.get('class_balancer')
