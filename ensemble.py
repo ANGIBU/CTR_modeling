@@ -8,10 +8,13 @@ import time
 import gc
 from abc import ABC, abstractmethod
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.model_selection import StratifiedKFold
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import roc_auc_score, average_precision_score, log_loss
+from sklearn.preprocessing import StandardScaler
+from scipy.optimize import minimize, differential_evolution
+from scipy.stats import spearmanr
 import warnings
 from pathlib import Path
 import pickle
@@ -27,15 +30,19 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 class CTRMetrics:
-    """CTR metrics calculation for ensemble evaluation"""
+    """CTR-focused metrics calculation with bias correction"""
     
     def __init__(self, target_ctr: float = 0.0191):
         self.target_ctr = target_ctr
-        self.ap_weight = 0.6
-        self.auc_weight = 0.4
+        self.ctr_tolerance = 0.002
+        
+        # Weights optimized for CTR prediction quality
+        self.auc_weight = 0.3
+        self.ap_weight = 0.4
+        self.ctr_quality_weight = 0.3
     
-    def combined_score(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """Calculate combined score with proper CTR bias penalty"""
+    def combined_score(self, y_true: np.ndarray, y_pred_proba: np.ndarray, penalize_ctr_bias: bool = True) -> float:
+        """Calculate combined score with CTR bias penalty"""
         try:
             if len(y_true) == 0 or len(y_pred_proba) == 0:
                 return 0.0
@@ -66,795 +73,713 @@ class CTRMetrics:
             # Base combined score
             base_score = (auc_score * self.auc_weight) + (ap_score * self.ap_weight)
             
-            # CTR bias penalty
+            if not penalize_ctr_bias:
+                return float(np.clip(base_score, 0.0, 1.0))
+            
+            # CTR quality assessment
             predicted_ctr = np.mean(y_pred_proba)
             actual_ctr = np.mean(y_true)
             ctr_bias = abs(predicted_ctr - actual_ctr)
             
-            # Apply penalty for large CTR bias
-            if ctr_bias > 0.005:
-                bias_penalty = min(0.5, ctr_bias * 10)
-                penalized_score = base_score * (1.0 - bias_penalty)
+            # CTR quality score
+            if ctr_bias <= self.ctr_tolerance:
+                ctr_quality_score = 1.0 - (ctr_bias / self.ctr_tolerance) * 0.2
             else:
-                penalized_score = base_score
+                # Heavy penalty for large CTR bias
+                excess_bias = ctr_bias - self.ctr_tolerance
+                ctr_quality_score = max(0.1, 0.8 - excess_bias * 20)
             
-            return float(np.clip(penalized_score, 0.0, 1.0))
+            # Combined score with CTR quality
+            final_score = base_score * (1 - self.ctr_quality_weight) + ctr_quality_score * self.ctr_quality_weight
+            
+            return float(np.clip(final_score, 0.0, 1.0))
             
         except Exception as e:
             logger.error(f"Combined score calculation failed: {e}")
             return 0.0
     
-    def ctr_score(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
-        """CTR-focused score"""
+    def ctr_quality_score(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> Tuple[float, Dict[str, float]]:
+        """Detailed CTR quality assessment"""
         try:
-            base_score = self.combined_score(y_true, y_pred_proba)
-            
             y_true = np.asarray(y_true).flatten()
             y_pred_proba = np.asarray(y_pred_proba).flatten()
             
             predicted_ctr = np.mean(y_pred_proba)
             actual_ctr = np.mean(y_true)
             ctr_bias = abs(predicted_ctr - actual_ctr)
+            ctr_relative_error = ctr_bias / max(actual_ctr, 1e-8)
             
-            # CTR alignment bonus/penalty
-            if ctr_bias <= 0.002:
-                bonus = min(0.1, (0.002 - ctr_bias) * 50)
-                return base_score * (1.0 + bonus)
+            # CTR alignment with target
+            target_alignment = abs(actual_ctr - self.target_ctr)
+            target_prediction_alignment = abs(predicted_ctr - self.target_ctr)
+            
+            # Quality metrics
+            metrics = {
+                'predicted_ctr': predicted_ctr,
+                'actual_ctr': actual_ctr,
+                'ctr_bias': ctr_bias,
+                'ctr_relative_error': ctr_relative_error,
+                'target_alignment': target_alignment,
+                'target_prediction_alignment': target_prediction_alignment,
+                'within_tolerance': ctr_bias <= self.ctr_tolerance
+            }
+            
+            # Overall quality score
+            if ctr_bias <= self.ctr_tolerance:
+                quality_score = 1.0 - (ctr_bias / self.ctr_tolerance) * 0.3
             else:
-                penalty = min(0.3, ctr_bias * 20)
-                return base_score * (1.0 - penalty)
+                excess_bias = ctr_bias - self.ctr_tolerance
+                quality_score = max(0.0, 0.7 - excess_bias * 15)
+            
+            return quality_score, metrics
+            
+        except Exception as e:
+            logger.error(f"CTR quality calculation failed: {e}")
+            return 0.0, {}
+
+class CTRCalibrationEnsemble:
+    """Specialized ensemble for CTR calibration"""
+    
+    def __init__(self, target_ctr: float = 0.0191, calibration_method: str = "isotonic"):
+        self.target_ctr = target_ctr
+        self.calibration_method = calibration_method
+        self.calibrators = {}
+        self.is_fitted = False
+        self.base_predictions = {}
+        
+    def fit(self, base_predictions: Dict[str, np.ndarray], y_true: np.ndarray):
+        """Fit calibration for each base model"""
+        logger.info("CTR calibration ensemble fitting started")
+        
+        try:
+            y_true = np.asarray(y_true).flatten()
+            
+            for model_name, pred in base_predictions.items():
+                pred_1d = np.asarray(pred).flatten()
+                
+                if len(pred_1d) != len(y_true):
+                    logger.warning(f"Length mismatch for {model_name}, skipping")
+                    continue
+                
+                # Fit calibrator
+                calibrator = self._create_calibrator(pred_1d, y_true)
+                self.calibrators[model_name] = calibrator
+                
+                logger.info(f"Calibrator fitted for {model_name}")
+            
+            self.is_fitted = True
+            logger.info("CTR calibration ensemble fitting completed")
+            
+        except Exception as e:
+            logger.error(f"Calibration ensemble fitting failed: {e}")
+            self.is_fitted = False
+    
+    def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        """Apply calibration to base predictions"""
+        if not self.is_fitted:
+            return base_predictions
+        
+        calibrated_predictions = {}
+        
+        for model_name, pred in base_predictions.items():
+            if model_name in self.calibrators:
+                try:
+                    pred_1d = np.asarray(pred).flatten()
+                    calibrated = self._apply_calibration(model_name, pred_1d)
+                    calibrated_predictions[model_name] = calibrated
+                except Exception as e:
+                    logger.warning(f"Calibration failed for {model_name}: {e}")
+                    calibrated_predictions[model_name] = pred
+            else:
+                calibrated_predictions[model_name] = pred
+        
+        return calibrated_predictions
+    
+    def _create_calibrator(self, pred: np.ndarray, y_true: np.ndarray) -> Dict[str, Any]:
+        """Create calibrator for specific predictions"""
+        try:
+            from sklearn.isotonic import IsotonicRegression
+            
+            # Calculate current bias
+            predicted_ctr = np.mean(pred)
+            actual_ctr = np.mean(y_true)
+            bias = predicted_ctr - actual_ctr
+            
+            calibrator = {
+                'method': self.calibration_method,
+                'bias': bias,
+                'predicted_ctr': predicted_ctr,
+                'actual_ctr': actual_ctr
+            }
+            
+            if self.calibration_method == 'isotonic':
+                iso_reg = IsotonicRegression(out_of_bounds='clip')
+                iso_reg.fit(pred, y_true)
+                calibrator['model'] = iso_reg
+            elif self.calibration_method == 'platt':
+                # Platt scaling
+                platt_model = LogisticRegression()
+                platt_model.fit(pred.reshape(-1, 1), y_true)
+                calibrator['model'] = platt_model
+            elif self.calibration_method == 'linear_bias':
+                # Simple linear bias correction
+                if predicted_ctr > 0:
+                    calibrator['correction_factor'] = actual_ctr / predicted_ctr
+                else:
+                    calibrator['correction_factor'] = 1.0
+            else:
+                # Temperature scaling
+                calibrator['temperature'] = self._fit_temperature(pred, y_true)
+            
+            return calibrator
+            
+        except Exception as e:
+            logger.error(f"Calibrator creation failed: {e}")
+            return {'method': 'none'}
+    
+    def _apply_calibration(self, model_name: str, pred: np.ndarray) -> np.ndarray:
+        """Apply calibration to predictions"""
+        try:
+            calibrator = self.calibrators[model_name]
+            method = calibrator.get('method', 'none')
+            
+            if method == 'isotonic':
+                return np.clip(calibrator['model'].predict(pred), 0.001, 0.999)
+            elif method == 'platt':
+                return np.clip(calibrator['model'].predict_proba(pred.reshape(-1, 1))[:, 1], 0.001, 0.999)
+            elif method == 'linear_bias':
+                factor = calibrator['correction_factor']
+                return np.clip(pred * factor, 0.001, 0.999)
+            elif method == 'temperature':
+                temp = calibrator['temperature']
+                logits = np.log(pred / (1 - pred))
+                calibrated_logits = logits / temp
+                return np.clip(1 / (1 + np.exp(-calibrated_logits)), 0.001, 0.999)
+            else:
+                return pred
                 
         except Exception as e:
-            logger.error(f"CTR score calculation failed: {e}")
-            return 0.0
-
-def ensure_1d_array(arr) -> np.ndarray:
-    """Ensure array is 1D"""
-    try:
-        arr = np.asarray(arr)
-        if arr.ndim > 1:
-            if arr.shape[1] == 1:
-                return arr.flatten()
-            elif arr.shape[1] == 2:
-                return arr[:, 1]  # Take positive class probabilities
-            else:
-                return arr.flatten()
-        return arr
-    except Exception:
-        return np.array([])
-
-class BaseEnsemble(ABC):
-    """Base ensemble class"""
+            logger.error(f"Calibration application failed for {model_name}: {e}")
+            return pred
     
-    def __init__(self, name: str = "BaseEnsemble"):
-        self.name = name
-        self.base_models = {}
-        self.is_fitted = False
+    def _fit_temperature(self, pred: np.ndarray, y_true: np.ndarray) -> float:
+        """Fit temperature scaling parameter"""
+        try:
+            from scipy.optimize import minimize_scalar
+            
+            def temperature_loss(T):
+                eps = 1e-15
+                logits = np.log(pred / (1 - pred))
+                calibrated_logits = logits / T
+                calibrated_pred = 1 / (1 + np.exp(-calibrated_logits))
+                calibrated_pred = np.clip(calibrated_pred, eps, 1 - eps)
+                return -np.sum(y_true * np.log(calibrated_pred) + (1 - y_true) * np.log(1 - calibrated_pred))
+            
+            result = minimize_scalar(temperature_loss, bounds=(0.1, 5.0), method='bounded')
+            return result.x
+            
+        except Exception:
+            return 1.0
+
+class CTROptimizedEnsemble:
+    """CTR-optimized ensemble with bias-aware weighting"""
+    
+    def __init__(self, target_ctr: float = 0.0191, optimization_method: str = "ctr_focused"):
+        self.target_ctr = target_ctr
+        self.optimization_method = optimization_method
         self.weights = {}
         self.performance_scores = {}
-        self.diversity_scores = {}
-        self.final_weights = {}
-        self.metrics_calculator = CTRMetrics()
-        
-    @abstractmethod
-    def fit(self, X: pd.DataFrame, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
-        """Fit ensemble"""
-        pass
+        self.ctr_metrics = CTRMetrics(target_ctr)
+        self.calibration_ensemble = CTRCalibrationEnsemble(target_ctr)
+        self.is_fitted = False
     
-    @abstractmethod
-    def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """Predict probabilities"""
-        pass
-    
-    def add_base_model(self, name: str, model):
-        """Add base model"""
-        self.base_models[name] = model
-        logger.info(f"Base model added to {self.name}: {name}")
-
-class CTRStackingEnsemble(BaseEnsemble):
-    """CTR stacking ensemble with corrected scoring"""
-    
-    def __init__(self, cv_folds: int = 3, meta_learner_types: Optional[List[str]] = None):
-        super().__init__("CTRStacking")
-        self.cv_folds = cv_folds
-        self.meta_learner_types = meta_learner_types or ['logistic']
-        self.meta_learners = {}
-        self.oof_predictions = {}
-        self.meta_features = None
-        
-    def fit(self, X: pd.DataFrame, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
-        """Fit stacking ensemble with corrected metric calculation"""
-        logger.info(f"{self.name} ensemble training started")
+    def fit(self, base_predictions: Dict[str, np.ndarray], y_true: np.ndarray):
+        """Fit ensemble with CTR-focused optimization"""
+        logger.info(f"CTR-optimized ensemble fitting - method: {self.optimization_method}")
         
         try:
-            if len(self.base_models) < 2:
-                logger.warning("Stacking requires at least 2 base models, falling back to simple average")
-                self.weights = {name: 1.0 / len(base_predictions) for name in base_predictions.keys()}
-                self.is_fitted = True
-                return
+            y_true = np.asarray(y_true).flatten()
             
-            # Generate out-of-fold predictions with proper shape handling
-            logger.info("Generating out-of-fold predictions")
-            self.oof_predictions = {}
+            # Step 1: Fit calibration ensemble
+            self.calibration_ensemble.fit(base_predictions, y_true)
             
-            for name, pred in base_predictions.items():
-                pred_1d = ensure_1d_array(pred)
-                if len(pred_1d) == len(y):
-                    self.oof_predictions[name] = pred_1d
-                else:
-                    logger.warning(f"Prediction length mismatch for {name}, using zeros")
-                    self.oof_predictions[name] = np.zeros(len(y))
+            # Step 2: Get calibrated predictions
+            calibrated_predictions = self.calibration_ensemble.predict_proba(base_predictions)
             
-            # Calculate performance weights with corrected scoring
-            logger.info("Calculating performance-based weights")
-            performance_weights = self._calculate_performance_weights(y)
-            
-            self.weights = performance_weights
-            
-            # Train meta-learner if we have enough data
-            if len(y) > 50:
-                logger.info("Training meta learners")
-                try:
-                    meta_features = np.column_stack([self.oof_predictions[name] for name in self.base_models.keys()])
+            # Step 3: Calculate individual model performance
+            for model_name, pred in calibrated_predictions.items():
+                pred_1d = np.asarray(pred).flatten()
+                if len(pred_1d) == len(y_true):
+                    combined_score = self.ctr_metrics.combined_score(y_true, pred_1d)
+                    ctr_quality, ctr_details = self.ctr_metrics.ctr_quality_score(y_true, pred_1d)
                     
-                    meta_learner = LogisticRegression(
-                        max_iter=1000, 
-                        random_state=42,
-                        C=1.0,
-                        class_weight='balanced'
-                    )
-                    meta_learner.fit(meta_features, y)
-                    self.meta_learners['logistic'] = meta_learner
-                    logger.info("Meta learner trained: logistic")
-                except Exception as e:
-                    logger.warning(f"Meta learner training failed: {e}")
+                    self.performance_scores[model_name] = {
+                        'combined_score': combined_score,
+                        'ctr_quality': ctr_quality,
+                        'ctr_details': ctr_details
+                    }
+            
+            # Step 4: Optimize ensemble weights
+            self.weights = self._optimize_weights(calibrated_predictions, y_true)
             
             self.is_fitted = True
-            logger.info(f"{self.name} ensemble training completed")
+            
+            # Log results
+            for model_name, perf in self.performance_scores.items():
+                logger.info(f"{model_name}: Combined={perf['combined_score']:.4f}, CTR Quality={perf['ctr_quality']:.4f}")
+            
+            logger.info(f"Final weights: {self.weights}")
+            logger.info("CTR-optimized ensemble fitting completed")
             
         except Exception as e:
-            logger.error(f"{self.name} ensemble training failed: {e}")
-            self.weights = {name: 1.0 / len(base_predictions) for name in base_predictions.keys()}
-            self.is_fitted = True
-    
-    def _calculate_performance_weights(self, y: pd.Series) -> Dict[str, float]:
-        """Calculate performance-based weights with proper metric calculation"""
-        weights = {}
-        total_score = 0.0
-        
-        y_array = np.asarray(y).flatten()
-        
-        for name, pred in self.oof_predictions.items():
-            try:
-                pred_1d = ensure_1d_array(pred)
-                combined_score = self.metrics_calculator.combined_score(y_array, pred_1d)
-                
-                weights[name] = max(combined_score, 0.1)
-                total_score += weights[name]
-                
-                logger.info(f"Performance weight for {name}: {weights[name]:.4f} (combined score: {combined_score:.4f})")
-                
-            except Exception as e:
-                logger.warning(f"Performance calculation failed for {name}: {e}")
-                weights[name] = 0.1
-                total_score += 0.1
-        
-        # Normalize weights
-        if total_score > 0:
-            weights = {name: weight / total_score for name, weight in weights.items()}
-        else:
-            weights = {name: 1.0 / len(self.oof_predictions) for name in self.oof_predictions.keys()}
-        
-        logger.info(f"Final performance weights: {weights}")
-        return weights
+            logger.error(f"CTR ensemble fitting failed: {e}")
+            self.is_fitted = False
     
     def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """Predict probabilities using stacking ensemble"""
+        """Predict with optimized weights"""
+        if not self.is_fitted:
+            logger.warning("Ensemble not fitted, using equal weights")
+            clean_preds = [np.asarray(pred).flatten() for pred in base_predictions.values()]
+            return np.mean(clean_preds, axis=0) if clean_preds else np.array([self.target_ctr])
+        
         try:
-            if not self.is_fitted:
-                raise ValueError("Ensemble not fitted")
+            # Apply calibration
+            calibrated_predictions = self.calibration_ensemble.predict_proba(base_predictions)
             
-            # Ensure all predictions are 1D
-            clean_predictions = {}
-            for name, pred in base_predictions.items():
-                clean_predictions[name] = ensure_1d_array(pred)
+            # Apply weights
+            weighted_sum = np.zeros(len(list(calibrated_predictions.values())[0]))
+            total_weight = 0
             
-            # Try meta-learner first if available and we have enough models
-            if 'logistic' in self.meta_learners and len(clean_predictions) >= 2:
-                try:
-                    meta_features = np.column_stack([clean_predictions[name] for name in self.base_models.keys() if name in clean_predictions])
-                    pred = self.meta_learners['logistic'].predict_proba(meta_features)[:, 1]
-                    return ensure_1d_array(pred)
-                except Exception as e:
-                    logger.warning(f"Meta-learner prediction failed: {e}")
-            
-            # Fallback to weighted average
-            return self._weighted_average_prediction(clean_predictions)
-            
-        except Exception as e:
-            logger.error(f"Stacking ensemble prediction failed: {e}")
-            return self._simple_average_prediction(base_predictions)
-    
-    def _weighted_average_prediction(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """Weighted average prediction"""
-        try:
-            if not base_predictions:
-                return np.array([])
-                
-            # Get first prediction to determine length
-            first_pred = next(iter(base_predictions.values()))
-            weighted_pred = np.zeros(len(first_pred))
-            total_weight = 0.0
-            
-            for name, pred in base_predictions.items():
-                if name in self.weights:
-                    weight = self.weights[name]
-                    pred_1d = ensure_1d_array(pred)
-                    if len(pred_1d) == len(weighted_pred):
-                        weighted_pred += weight * pred_1d
-                        total_weight += weight
+            for model_name, pred in calibrated_predictions.items():
+                if model_name in self.weights:
+                    weight = self.weights[model_name]
+                    pred_1d = np.asarray(pred).flatten()
+                    weighted_sum += weight * pred_1d
+                    total_weight += weight
             
             if total_weight > 0:
-                return weighted_pred / total_weight
+                final_prediction = weighted_sum / total_weight
             else:
-                return self._simple_average_prediction(base_predictions)
+                # Fallback to equal weights
+                clean_preds = [np.asarray(pred).flatten() for pred in calibrated_predictions.values()]
+                final_prediction = np.mean(clean_preds, axis=0) if clean_preds else np.array([self.target_ctr])
+            
+            # Final CTR adjustment
+            predicted_ctr = np.mean(final_prediction)
+            if abs(predicted_ctr - self.target_ctr) > 0.005:
+                # Apply final adjustment to match target CTR better
+                adjustment_factor = self.target_ctr / predicted_ctr if predicted_ctr > 0 else 1.0
+                # Apply gentle adjustment
+                adjustment_factor = 1.0 + 0.3 * (adjustment_factor - 1.0)
+                final_prediction = np.clip(final_prediction * adjustment_factor, 0.001, 0.999)
+            
+            return final_prediction
+            
         except Exception as e:
-            logger.error(f"Weighted average failed: {e}")
-            return self._simple_average_prediction(base_predictions)
+            logger.error(f"Ensemble prediction failed: {e}")
+            return np.full(len(list(base_predictions.values())[0]), self.target_ctr)
     
-    def _simple_average_prediction(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """Simple average prediction"""
+    def _optimize_weights(self, calibrated_predictions: Dict[str, np.ndarray], y_true: np.ndarray) -> Dict[str, float]:
+        """Optimize ensemble weights for CTR quality"""
+        
+        model_names = list(calibrated_predictions.keys())
+        predictions_matrix = np.column_stack([
+            np.asarray(calibrated_predictions[name]).flatten() for name in model_names
+        ])
+        
+        if self.optimization_method == "ctr_focused":
+            return self._ctr_focused_optimization(predictions_matrix, y_true, model_names)
+        elif self.optimization_method == "differential_evolution":
+            return self._differential_evolution_optimization(predictions_matrix, y_true, model_names)
+        else:
+            return self._grid_search_optimization(predictions_matrix, y_true, model_names)
+    
+    def _ctr_focused_optimization(self, predictions_matrix: np.ndarray, y_true: np.ndarray, model_names: List[str]) -> Dict[str, float]:
+        """CTR-focused weight optimization"""
+        
+        def objective(weights):
+            weights = np.array(weights)
+            weights = np.abs(weights)  # Ensure non-negative
+            if np.sum(weights) == 0:
+                return 1.0  # Bad score
+            
+            weights = weights / np.sum(weights)  # Normalize
+            
+            # Calculate ensemble prediction
+            ensemble_pred = np.dot(predictions_matrix, weights)
+            
+            # CTR quality is primary objective
+            ctr_quality, _ = self.ctr_metrics.ctr_quality_score(y_true, ensemble_pred)
+            combined_score = self.ctr_metrics.combined_score(y_true, ensemble_pred)
+            
+            # Weighted objective (CTR quality is more important)
+            objective_score = 0.7 * ctr_quality + 0.3 * combined_score
+            
+            return -objective_score  # Minimize negative
+        
+        # Initial weights based on individual performance
+        initial_weights = []
+        for name in model_names:
+            perf = self.performance_scores.get(name, {'ctr_quality': 0.1})
+            initial_weights.append(max(0.1, perf['ctr_quality']))
+        
+        initial_weights = np.array(initial_weights)
+        initial_weights = initial_weights / np.sum(initial_weights)
+        
+        # Optimization
         try:
-            if not base_predictions:
-                return np.array([])
+            from scipy.optimize import minimize
             
-            # Ensure all predictions are 1D and same length
-            clean_preds = []
-            for name, pred in base_predictions.items():
-                pred_1d = ensure_1d_array(pred)
-                clean_preds.append(pred_1d)
+            constraints = [{'type': 'eq', 'fun': lambda w: np.sum(w) - 1}]
+            bounds = [(0, 1) for _ in model_names]
             
-            # Check all predictions have same length
-            if len(set(len(p) for p in clean_preds)) == 1:
-                return np.mean(clean_preds, axis=0)
+            result = minimize(
+                objective,
+                initial_weights,
+                method='SLSQP',
+                bounds=bounds,
+                constraints=constraints,
+                options={'maxiter': 100}
+            )
+            
+            if result.success:
+                weights = np.abs(result.x)
+                weights = weights / np.sum(weights)
             else:
-                # Use first prediction as reference
-                return clean_preds[0] if clean_preds else np.array([0.0191])
+                weights = initial_weights
                 
         except Exception as e:
-            logger.error(f"Simple average failed: {e}")
-            # Return default CTR
-            first_pred = next(iter(base_predictions.values()))
-            return np.full(len(ensure_1d_array(first_pred)), 0.0191)
-
-class CTRDynamicEnsemble(BaseEnsemble):
-    """CTR dynamic ensemble with strategy selection"""
-    
-    def __init__(self):
-        super().__init__("CTRDynamic")
-        self.strategies = ['simple_average', 'performance_weighted', 'ctr_corrected']
-        self.strategy_weights = {}
-        self.best_strategy = 'simple_average'
-        self.performance_history = {}
+            logger.warning(f"Optimization failed: {e}, using performance-based weights")
+            weights = initial_weights
         
-    def fit(self, X: pd.DataFrame, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
-        """Fit dynamic ensemble with corrected strategy evaluation"""
-        logger.info(f"{self.name} ensemble training started")
+        return dict(zip(model_names, weights))
+    
+    def _differential_evolution_optimization(self, predictions_matrix: np.ndarray, y_true: np.ndarray, model_names: List[str]) -> Dict[str, float]:
+        """Differential evolution optimization"""
+        
+        def objective(weights):
+            weights = np.abs(weights)
+            if np.sum(weights) == 0:
+                return 1.0
+            
+            weights = weights / np.sum(weights)
+            ensemble_pred = np.dot(predictions_matrix, weights)
+            
+            ctr_quality, _ = self.ctr_metrics.ctr_quality_score(y_true, ensemble_pred)
+            combined_score = self.ctr_metrics.combined_score(y_true, ensemble_pred)
+            
+            return -(0.8 * ctr_quality + 0.2 * combined_score)
         
         try:
-            logger.info("Initializing performance tracking")
-            self.performance_history = {}
+            bounds = [(0, 1) for _ in model_names]
+            result = differential_evolution(objective, bounds, seed=42, maxiter=50)
             
-            # Ensure all predictions are 1D
-            clean_predictions = {}
-            y_array = np.asarray(y).flatten()
+            if result.success:
+                weights = np.abs(result.x)
+                weights = weights / np.sum(weights)
+            else:
+                weights = np.ones(len(model_names)) / len(model_names)
+                
+        except Exception as e:
+            logger.warning(f"Differential evolution failed: {e}")
+            weights = np.ones(len(model_names)) / len(model_names)
+        
+        return dict(zip(model_names, weights))
+    
+    def _grid_search_optimization(self, predictions_matrix: np.ndarray, y_true: np.ndarray, model_names: List[str]) -> Dict[str, float]:
+        """Grid search optimization"""
+        
+        best_weights = None
+        best_score = -1
+        
+        # Simple grid search for 2-3 models
+        if len(model_names) <= 3:
+            weight_options = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
             
-            for name, pred in base_predictions.items():
-                clean_predictions[name] = ensure_1d_array(pred)
+            if len(model_names) == 2:
+                for w1 in weight_options:
+                    w2 = 1 - w1
+                    weights = np.array([w1, w2])
+                    
+                    ensemble_pred = np.dot(predictions_matrix, weights)
+                    ctr_quality, _ = self.ctr_metrics.ctr_quality_score(y_true, ensemble_pred)
+                    combined_score = self.ctr_metrics.combined_score(y_true, ensemble_pred)
+                    
+                    score = 0.7 * ctr_quality + 0.3 * combined_score
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_weights = weights
             
-            # Calculate weights for different strategies
-            logger.info("Calculating multi-strategy weights")
-            self._calculate_strategy_weights(y_array, clean_predictions)
-            
-            # Select best strategy using corrected scoring
-            logger.info("Selecting optimal strategy")
-            best_score = -1
-            
-            for strategy in self.strategies:
-                try:
-                    pred = self._apply_strategy(strategy, clean_predictions)
-                    if len(pred) > 0 and len(y_array) > 0:
-                        score = self.metrics_calculator.combined_score(y_array, pred)
+            elif len(model_names) == 3:
+                for w1 in weight_options:
+                    for w2 in weight_options:
+                        if w1 + w2 >= 1:
+                            continue
+                        w3 = 1 - w1 - w2
+                        weights = np.array([w1, w2, w3])
                         
-                        logger.info(f"Strategy {strategy}: Combined Score {score:.4f}")
+                        ensemble_pred = np.dot(predictions_matrix, weights)
+                        ctr_quality, _ = self.ctr_metrics.ctr_quality_score(y_true, ensemble_pred)
+                        combined_score = self.ctr_metrics.combined_score(y_true, ensemble_pred)
+                        
+                        score = 0.7 * ctr_quality + 0.3 * combined_score
                         
                         if score > best_score:
                             best_score = score
-                            self.best_strategy = strategy
-                            
-                except Exception as e:
-                    logger.warning(f"Strategy evaluation failed for {strategy}: {e}")
-                    continue
-            
-            logger.info(f"Best strategy selected: {self.best_strategy} (Score: {best_score:.4f})")
-            
-            self.is_fitted = True
-            logger.info(f"{self.name} ensemble training completed")
-            
-        except Exception as e:
-            logger.error(f"{self.name} ensemble training failed: {e}")
-            self.best_strategy = 'simple_average'
-            self.is_fitted = True
-    
-    def _calculate_strategy_weights(self, y: np.ndarray, base_predictions: Dict[str, np.ndarray]):
-        """Calculate weights for different strategies"""
-        self.strategy_weights = {
-            'simple_average': {name: 1.0 / len(base_predictions) for name in base_predictions.keys()},
-            'performance_weighted': self._calculate_performance_weights(y, base_predictions),
-            'ctr_corrected': self._calculate_ctr_corrected_weights(y, base_predictions)
-        }
-    
-    def _calculate_performance_weights(self, y: np.ndarray, base_predictions: Dict[str, np.ndarray]) -> Dict[str, float]:
-        """Calculate performance-based weights"""
-        weights = {}
-        total_score = 0.0
+                            best_weights = weights
         
-        for name, pred in base_predictions.items():
-            try:
-                pred_1d = ensure_1d_array(pred)
-                score = self.metrics_calculator.combined_score(y, pred_1d)
-                weights[name] = max(score, 0.1)
-                total_score += weights[name]
-                
-            except Exception as e:
-                logger.warning(f"Performance weight calculation failed for {name}: {e}")
-                weights[name] = 0.1
-                total_score += 0.1
+        if best_weights is None:
+            # Fallback to equal weights
+            best_weights = np.ones(len(model_names)) / len(model_names)
         
-        # Normalize
-        if total_score > 0:
-            weights = {name: weight / total_score for name, weight in weights.items()}
-        else:
-            weights = {name: 1.0 / len(base_predictions) for name in base_predictions.keys()}
-        
-        return weights
-    
-    def _calculate_ctr_corrected_weights(self, y: np.ndarray, base_predictions: Dict[str, np.ndarray]) -> Dict[str, float]:
-        """Calculate CTR-corrected weights"""
-        weights = {}
-        total_score = 0.0
-        actual_ctr = np.mean(y)
-        
-        for name, pred in base_predictions.items():
-            try:
-                pred_1d = ensure_1d_array(pred)
-                base_score = self.metrics_calculator.combined_score(y, pred_1d)
-                
-                # CTR alignment bonus/penalty
-                predicted_ctr = np.mean(pred_1d)
-                ctr_bias = abs(predicted_ctr - actual_ctr)
-                
-                if ctr_bias <= 0.002:
-                    ctr_bonus = min(0.2, (0.002 - ctr_bias) * 100)
-                    score = base_score * (1.0 + ctr_bonus)
-                else:
-                    ctr_penalty = min(0.5, ctr_bias * 25)
-                    score = base_score * (1.0 - ctr_penalty)
-                
-                weights[name] = max(score, 0.05)
-                total_score += weights[name]
-                
-            except Exception as e:
-                logger.warning(f"CTR corrected weight calculation failed for {name}: {e}")
-                weights[name] = 0.05
-                total_score += 0.05
-        
-        # Normalize
-        if total_score > 0:
-            weights = {name: weight / total_score for name, weight in weights.items()}
-        else:
-            weights = {name: 1.0 / len(base_predictions) for name in base_predictions.keys()}
-        
-        return weights
-    
-    def _apply_strategy(self, strategy: str, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """Apply specified strategy"""
-        try:
-            if not base_predictions:
-                return np.array([])
-            
-            if strategy == 'simple_average':
-                clean_preds = [ensure_1d_array(pred) for pred in base_predictions.values()]
-                if len(set(len(p) for p in clean_preds)) == 1:
-                    return np.mean(clean_preds, axis=0)
-                else:
-                    return clean_preds[0]
-                    
-            elif strategy in ['performance_weighted', 'ctr_corrected']:
-                weights = self.strategy_weights.get(strategy, {})
-                
-                # Get first prediction to determine length
-                first_pred = next(iter(base_predictions.values()))
-                weighted_pred = np.zeros(len(ensure_1d_array(first_pred)))
-                total_weight = 0.0
-                
-                for name, pred in base_predictions.items():
-                    if name in weights:
-                        weight = weights[name]
-                        pred_1d = ensure_1d_array(pred)
-                        if len(pred_1d) == len(weighted_pred):
-                            weighted_pred += weight * pred_1d
-                            total_weight += weight
-                
-                if total_weight > 0:
-                    return weighted_pred / total_weight
-                else:
-                    clean_preds = [ensure_1d_array(pred) for pred in base_predictions.values()]
-                    return np.mean(clean_preds, axis=0)
-            else:
-                clean_preds = [ensure_1d_array(pred) for pred in base_predictions.values()]
-                return np.mean(clean_preds, axis=0)
-                
-        except Exception as e:
-            logger.error(f"Strategy application failed for {strategy}: {e}")
-            clean_preds = [ensure_1d_array(pred) for pred in base_predictions.values()]
-            return np.mean(clean_preds, axis=0) if clean_preds else np.array([0.0191])
-    
-    def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """Predict probabilities using best strategy"""
-        try:
-            if not self.is_fitted:
-                raise ValueError("Ensemble not fitted")
-            
-            # Ensure all predictions are 1D
-            clean_predictions = {}
-            for name, pred in base_predictions.items():
-                clean_predictions[name] = ensure_1d_array(pred)
-            
-            return self._apply_strategy(self.best_strategy, clean_predictions)
-            
-        except Exception as e:
-            logger.error(f"Dynamic ensemble prediction failed: {e}")
-            clean_preds = [ensure_1d_array(pred) for pred in base_predictions.values()]
-            return np.mean(clean_preds, axis=0) if clean_preds else np.array([0.0191])
-
-class CTRMainEnsemble(BaseEnsemble):
-    """CTR main ensemble with weighted combination"""
-    
-    def __init__(self, target_combined_score: float = 0.34):
-        super().__init__("CTRMain")
-        self.target_combined_score = target_combined_score
-        self.sub_ensembles = {}
-        self.ensemble_weights = {}
-        self.final_prediction = None
-        
-    def fit(self, X: pd.DataFrame, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
-        """Fit main ensemble with corrected evaluation"""
-        logger.info(f"{self.name} ensemble training started - execution guaranteed")
-        
-        try:
-            # Ensure all predictions are 1D
-            clean_predictions = {}
-            y_array = np.asarray(y).flatten()
-            
-            for name, pred in base_predictions.items():
-                clean_predictions[name] = ensure_1d_array(pred)
-            
-            # Create sub-ensembles
-            logger.info("Stage 1: Creating sub-ensembles")
-            
-            # Create stacking ensemble
-            try:
-                stacking_ensemble = CTRStackingEnsemble(cv_folds=3)
-                for name, model in self.base_models.items():
-                    stacking_ensemble.add_base_model(name, model)
-                stacking_ensemble.fit(X, y, clean_predictions)
-                self.sub_ensembles['stacking'] = stacking_ensemble
-                logger.info("Stacking ensemble created successfully")
-            except Exception as e:
-                logger.warning(f"Stacking ensemble creation failed: {e}")
-            
-            # Create dynamic ensemble
-            try:
-                dynamic_ensemble = CTRDynamicEnsemble()
-                for name, model in self.base_models.items():
-                    dynamic_ensemble.add_base_model(name, model)
-                dynamic_ensemble.fit(X, y, clean_predictions)
-                self.sub_ensembles['dynamic'] = dynamic_ensemble
-                logger.info("Dynamic ensemble created successfully")
-            except Exception as e:
-                logger.warning(f"Dynamic ensemble creation failed: {e}")
-            
-            # Evaluate sub-ensembles with corrected scoring
-            logger.info("Stage 2: Evaluating sub-ensembles")
-            ensemble_scores = {}
-            
-            for ensemble_name, ensemble in self.sub_ensembles.items():
-                try:
-                    pred = ensemble.predict_proba(clean_predictions)
-                    pred_1d = ensure_1d_array(pred)
-                    combined_score = self.metrics_calculator.combined_score(y_array, pred_1d)
-                    ctr_score = self.metrics_calculator.ctr_score(y_array, pred_1d)
-                    
-                    ensemble_scores[ensemble_name] = {
-                        'combined_score': combined_score,
-                        'ctr_score': ctr_score
-                    }
-                    
-                    logger.info(f"{ensemble_name} ensemble - Combined: {combined_score:.4f}, CTR: {ctr_score:.4f}")
-                    
-                except Exception as e:
-                    logger.warning(f"{ensemble_name} ensemble evaluation failed: {e}")
-                    ensemble_scores[ensemble_name] = {
-                        'combined_score': 0.1,
-                        'ctr_score': 0.1
-                    }
-            
-            # Calculate ensemble weights
-            logger.info("Stage 3: Calculating ensemble weights")
-            total_score = sum(scores['combined_score'] for scores in ensemble_scores.values())
-            
-            if total_score > 0:
-                for ensemble_name, scores in ensemble_scores.items():
-                    self.ensemble_weights[ensemble_name] = scores['combined_score'] / total_score
-            else:
-                n_ensembles = len(self.sub_ensembles)
-                if n_ensembles > 0:
-                    self.ensemble_weights = {name: 1.0 / n_ensembles for name in self.sub_ensembles.keys()}
-                else:
-                    self.final_prediction = np.mean([ensure_1d_array(pred) for pred in clean_predictions.values()], axis=0)
-            
-            # Calculate final ensemble prediction
-            if self.sub_ensembles:
-                ensemble_predictions = {}
-                for ensemble_name, ensemble in self.sub_ensembles.items():
-                    try:
-                        pred = ensemble.predict_proba(clean_predictions)
-                        ensemble_predictions[ensemble_name] = ensure_1d_array(pred)
-                    except Exception as e:
-                        logger.warning(f"Final prediction failed for {ensemble_name}: {e}")
-                
-                if ensemble_predictions:
-                    self.final_prediction = self._calculate_final_ensemble_prediction(ensemble_predictions)
-                else:
-                    self.final_prediction = np.mean([ensure_1d_array(pred) for pred in clean_predictions.values()], axis=0)
-            
-            self.is_fitted = True
-            
-            logger.info(f"{self.name} ensemble training completed - execution guaranteed")
-            
-        except Exception as e:
-            logger.error(f"{self.name} ensemble training failed: {e}")
-            # Emergency fallback
-            try:
-                clean_predictions = {name: ensure_1d_array(pred) for name, pred in base_predictions.items()}
-                self.final_prediction = np.mean([pred for pred in clean_predictions.values()], axis=0)
-            except:
-                self.final_prediction = np.array([0.0191])
-            self.is_fitted = True
-    
-    def _calculate_final_ensemble_prediction(self, ensemble_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """Calculate final ensemble prediction using weighted combination"""
-        try:
-            if not ensemble_predictions:
-                return np.array([])
-            
-            # Get first prediction to determine length
-            first_pred = next(iter(ensemble_predictions.values()))
-            weighted_pred = np.zeros(len(first_pred))
-            total_weight = 0.0
-            
-            for ensemble_name, pred in ensemble_predictions.items():
-                if ensemble_name in self.ensemble_weights:
-                    weight = self.ensemble_weights[ensemble_name]
-                    pred_1d = ensure_1d_array(pred)
-                    if len(pred_1d) == len(weighted_pred):
-                        weighted_pred += weight * pred_1d
-                        total_weight += weight
-            
-            if total_weight > 0:
-                return weighted_pred / total_weight
-            else:
-                return np.mean([ensure_1d_array(pred) for pred in ensemble_predictions.values()], axis=0)
-                
-        except Exception as e:
-            logger.error(f"Final ensemble prediction calculation failed: {e}")
-            return np.mean([ensure_1d_array(pred) for pred in ensemble_predictions.values()], axis=0)
-    
-    def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """Predict probabilities using main ensemble"""
-        try:
-            if not self.is_fitted:
-                raise ValueError("Ensemble not fitted")
-            
-            # Ensure all predictions are 1D
-            clean_predictions = {}
-            for name, pred in base_predictions.items():
-                clean_predictions[name] = ensure_1d_array(pred)
-            
-            if len(self.sub_ensembles) == 0:
-                return self._simple_weighted_average(clean_predictions)
-            
-            # Get predictions from sub-ensembles
-            ensemble_predictions = {}
-            
-            for ensemble_name, ensemble in self.sub_ensembles.items():
-                try:
-                    pred = ensemble.predict_proba(clean_predictions)
-                    ensemble_predictions[ensemble_name] = ensure_1d_array(pred)
-                except Exception as e:
-                    logger.warning(f"Sub-ensemble prediction failed ({ensemble_name}): {e}")
-            
-            if ensemble_predictions:
-                return self._calculate_final_ensemble_prediction(ensemble_predictions)
-            else:
-                return self._simple_weighted_average(clean_predictions)
-            
-        except Exception as e:
-            logger.error(f"Main ensemble prediction failed: {e}")
-            return self._simple_weighted_average(base_predictions)
-    
-    def _simple_weighted_average(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """Simple weighted average of base predictions"""
-        try:
-            if not base_predictions:
-                return np.array([])
-            clean_preds = [ensure_1d_array(pred) for pred in base_predictions.values()]
-            return np.mean(clean_preds, axis=0)
-        except Exception as e:
-            logger.error(f"Simple weighted average failed: {e}")
-            first_pred = next(iter(base_predictions.values()))
-            return np.full(len(ensure_1d_array(first_pred)), 0.0191)
+        return dict(zip(model_names, best_weights))
 
 class CTREnsembleManager:
-    """CTR ensemble manager with corrected metric calculation"""
+    """Main CTR ensemble management system"""
     
-    def __init__(self, config: Config = Config):
+    def __init__(self, config: Config = Config()):
         self.config = config
-        self.base_models = {}
+        self.target_ctr = 0.0191
+        
+        # Ensemble components
         self.ensembles = {}
-        self.best_ensemble = None
+        self.base_models = {}
         self.final_ensemble = None
-        self.ensemble_results = {}
-        self.metrics_calculator = CTRMetrics()
-        self.target_combined_score = getattr(config, 'TARGET_COMBINED_SCORE', 0.34)
         
-        self.ensemble_types = ['main_ensemble']
+        # Performance tracking
+        self.performance_history = {}
+        self.best_ensemble = None
+        self.best_score = 0.0
         
-    def add_base_model(self, name: str, model):
-        """Add base model to ensemble manager"""
-        self.base_models[name] = model
-        logger.info(f"Base model added to ensemble manager: {name}")
+        logger.info("CTR Ensemble Manager initialized")
     
-    def train_all_ensembles(self, X: pd.DataFrame, y: pd.Series):
-        """Train all ensembles with corrected scoring"""
-        logger.info("All ensemble training started - execution guaranteed")
+    def add_base_model(self, name: str, model, predictions: np.ndarray = None):
+        """Add base model to ensemble"""
+        self.base_models[name] = {
+            'model': model,
+            'predictions': predictions
+        }
+        logger.info(f"Base model added: {name}")
+    
+    def create_ensembles(self, base_predictions: Dict[str, np.ndarray], y_true: np.ndarray) -> Dict[str, Any]:
+        """Create multiple ensemble strategies"""
+        logger.info("Creating ensemble strategies")
+        
+        ensemble_results = {}
         
         try:
-            # Get base model predictions with proper error handling
-            logger.info("Generating base model predictions")
-            base_predictions = {}
+            # 1. CTR-Optimized Ensemble (Primary)
+            ctr_ensemble = CTROptimizedEnsemble(
+                target_ctr=self.target_ctr,
+                optimization_method="ctr_focused"
+            )
+            ctr_ensemble.fit(base_predictions, y_true)
+            self.ensembles['ctr_optimized'] = ctr_ensemble
             
-            for name, model in self.base_models.items():
-                try:
-                    if hasattr(model, 'predict_proba'):
-                        pred = model.predict_proba(X)
-                        pred_1d = ensure_1d_array(pred)
-                    else:
-                        pred_1d = np.full(len(X), 0.0191)
-                        
-                    base_predictions[name] = pred_1d
-                    pred_ctr = np.mean(pred_1d)
-                    actual_ctr = np.mean(y)
-                    logger.info(f"{name} model prediction completed - CTR: {pred_ctr:.4f} (actual: {actual_ctr:.4f})")
-                except Exception as e:
-                    logger.error(f"{name} model prediction failed: {e}")
-                    base_predictions[name] = np.full(len(X), 0.0191)
+            # Evaluate
+            ctr_pred = ctr_ensemble.predict_proba(base_predictions)
+            ctr_metrics = CTRMetrics(self.target_ctr)
+            ctr_score = ctr_metrics.combined_score(y_true, ctr_pred)
+            ctr_quality, ctr_details = ctr_metrics.ctr_quality_score(y_true, ctr_pred)
             
-            # Create and train main ensemble
-            logger.info("Creating main ensemble")
-            main_ensemble = CTRMainEnsemble(target_combined_score=self.target_combined_score)
+            ensemble_results['ctr_optimized'] = {
+                'combined_score': ctr_score,
+                'ctr_quality': ctr_quality,
+                'ctr_details': ctr_details,
+                'predicted_ctr': np.mean(ctr_pred),
+                'actual_ctr': np.mean(y_true)
+            }
             
-            for name, model in self.base_models.items():
-                main_ensemble.add_base_model(name, model)
+            # 2. Differential Evolution Ensemble
+            try:
+                de_ensemble = CTROptimizedEnsemble(
+                    target_ctr=self.target_ctr,
+                    optimization_method="differential_evolution"
+                )
+                de_ensemble.fit(base_predictions, y_true)
+                self.ensembles['differential_evolution'] = de_ensemble
+                
+                de_pred = de_ensemble.predict_proba(base_predictions)
+                de_score = ctr_metrics.combined_score(y_true, de_pred)
+                de_quality, de_details = ctr_metrics.ctr_quality_score(y_true, de_pred)
+                
+                ensemble_results['differential_evolution'] = {
+                    'combined_score': de_score,
+                    'ctr_quality': de_quality,
+                    'ctr_details': de_details,
+                    'predicted_ctr': np.mean(de_pred),
+                    'actual_ctr': np.mean(y_true)
+                }
+                
+            except Exception as e:
+                logger.warning(f"Differential evolution ensemble failed: {e}")
             
-            logger.info("Ensemble created: main_ensemble")
+            # 3. Grid Search Ensemble
+            try:
+                grid_ensemble = CTROptimizedEnsemble(
+                    target_ctr=self.target_ctr,
+                    optimization_method="grid_search"
+                )
+                grid_ensemble.fit(base_predictions, y_true)
+                self.ensembles['grid_search'] = grid_ensemble
+                
+                grid_pred = grid_ensemble.predict_proba(base_predictions)
+                grid_score = ctr_metrics.combined_score(y_true, grid_pred)
+                grid_quality, grid_details = ctr_metrics.ctr_quality_score(y_true, grid_pred)
+                
+                ensemble_results['grid_search'] = {
+                    'combined_score': grid_score,
+                    'ctr_quality': grid_quality,
+                    'ctr_details': grid_details,
+                    'predicted_ctr': np.mean(grid_pred),
+                    'actual_ctr': np.mean(y_true)
+                }
+                
+            except Exception as e:
+                logger.warning(f"Grid search ensemble failed: {e}")
             
-            # Train main ensemble
-            logger.info("main_ensemble ensemble training started - execution guaranteed")
-            start_time = time.time()
+            # Select best ensemble based on CTR quality
+            best_ensemble_name = max(ensemble_results.keys(), 
+                                   key=lambda x: 0.7 * ensemble_results[x]['ctr_quality'] + 0.3 * ensemble_results[x]['combined_score'])
             
-            main_ensemble.fit(X, y, base_predictions)
+            self.final_ensemble = self.ensembles[best_ensemble_name]
+            self.best_ensemble = best_ensemble_name
+            self.best_score = ensemble_results[best_ensemble_name]['combined_score']
             
-            training_time = time.time() - start_time
-            self.ensembles['main_ensemble'] = main_ensemble
-            self.final_ensemble = main_ensemble
+            logger.info(f"Best ensemble: {best_ensemble_name}")
+            logger.info(f"Best combined score: {self.best_score:.4f}")
+            logger.info(f"Best CTR quality: {ensemble_results[best_ensemble_name]['ctr_quality']:.4f}")
             
-            logger.info(f"main_ensemble ensemble training completed ({training_time:.2f}s)")
-            logger.info("All ensemble training completed - execution guaranteed")
+            return ensemble_results
             
         except Exception as e:
-            logger.error(f"Ensemble training failed: {e}")
-            # Create fallback ensemble
-            main_ensemble = CTRMainEnsemble()
-            if base_predictions:
-                clean_preds = [ensure_1d_array(pred) for pred in base_predictions.values()]
-                main_ensemble.final_prediction = np.mean(clean_preds, axis=0)
-            else:
-                main_ensemble.final_prediction = np.array([0.0191])
-            main_ensemble.is_fitted = True
-            self.ensembles['main_ensemble'] = main_ensemble
-            self.final_ensemble = main_ensemble
+            logger.error(f"Ensemble creation failed: {e}")
+            return {}
     
-    def predict_with_best_ensemble(self, X: pd.DataFrame) -> np.ndarray:
-        """Predict using best ensemble with success indicator"""
-        logger.info("Best ensemble prediction started")
+    def predict(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
+        """Generate final ensemble prediction"""
+        if self.final_ensemble is None:
+            logger.warning("No ensemble fitted, using equal weights")
+            clean_preds = [np.asarray(pred).flatten() for pred in base_predictions.values()]
+            return np.mean(clean_preds, axis=0) if clean_preds else np.array([self.target_ctr])
         
         try:
-            # Check if any ensemble is available and fitted
-            available_ensemble = None
-            for ensemble_type, ensemble in self.ensembles.items():
-                if ensemble.is_fitted:
-                    available_ensemble = ensemble
-                    self.best_ensemble = ensemble
-                    logger.info(f"Using {ensemble_type} ensemble for prediction")
-                    break
+            return self.final_ensemble.predict_proba(base_predictions)
+        except Exception as e:
+            logger.error(f"Ensemble prediction failed: {e}")
+            clean_preds = [np.asarray(pred).flatten() for pred in base_predictions.values()]
+            return np.mean(clean_preds, axis=0) if clean_preds else np.array([self.target_ctr])
+    
+    def get_ensemble_summary(self) -> Dict[str, Any]:
+        """Get ensemble performance summary"""
+        return {
+            'best_ensemble': self.best_ensemble,
+            'best_score': self.best_score,
+            'available_ensembles': list(self.ensembles.keys()),
+            'base_models': list(self.base_models.keys()),
+            'target_ctr': self.target_ctr
+        }
+    
+    def save_ensemble(self, filepath: str):
+        """Save ensemble system"""
+        try:
+            ensemble_data = {
+                'ensembles': self.ensembles,
+                'final_ensemble': self.final_ensemble,
+                'best_ensemble': self.best_ensemble,
+                'best_score': self.best_score,
+                'target_ctr': self.target_ctr,
+                'config': self.config
+            }
             
-            if available_ensemble is None:
-                logger.warning("No fitted ensemble available, using individual model")
-                if len(self.base_models) > 0:
-                    model_name = list(self.base_models.keys())[0]
-                    model = self.base_models[model_name]
-                    if hasattr(model, 'predict_proba'):
-                        predictions = model.predict_proba(X)
-                        predictions = ensure_1d_array(predictions)
-                    else:
-                        predictions = np.full(len(X), 0.0191)
-                    logger.info(f"Using individual model: {model_name}")
-                    return predictions
-                else:
-                    logger.warning("No models available, using default predictions")
-                    return np.full(len(X), 0.0191)
+            if JOBLIB_AVAILABLE:
+                joblib.dump(ensemble_data, filepath)
+            else:
+                with open(filepath, 'wb') as f:
+                    pickle.dump(ensemble_data, f)
             
-            # Get base predictions
-            base_predictions = {}
-            for name, model in self.base_models.items():
-                try:
-                    if hasattr(model, 'predict_proba'):
-                        pred = model.predict_proba(X)
-                        base_predictions[name] = ensure_1d_array(pred)
-                    else:
-                        base_predictions[name] = np.full(len(X), 0.0191)
-                except Exception as e:
-                    logger.error(f"{name} model prediction failed: {e}")
-                    base_predictions[name] = np.full(len(X), 0.0191)
-            
-            # Get ensemble prediction
-            ensemble_pred = available_ensemble.predict_proba(base_predictions)
-            ensemble_pred = ensure_1d_array(ensemble_pred)
-            predicted_ctr = ensemble_pred.mean()
-            
-            logger.info(f"Ensemble prediction completed - CTR: {predicted_ctr:.4f}")
-            
-            return ensemble_pred
+            logger.info(f"Ensemble saved to {filepath}")
             
         except Exception as e:
-            logger.error(f"Best ensemble prediction failed: {e}")
-            
-            # Fallback to individual model
-            if len(self.base_models) > 0:
-                logger.info("Falling back to individual model")
-                model_name = list(self.base_models.keys())[0]
-                model = self.base_models[model_name]
-                try:
-                    if hasattr(model, 'predict_proba'):
-                        predictions = model.predict_proba(X)
-                        return ensure_1d_array(predictions)
-                    else:
-                        return np.full(len(X), 0.0191)
-                except Exception as e2:
-                    logger.error(f"Individual model fallback failed: {e2}")
-                    return np.full(len(X), 0.0191)
+            logger.error(f"Failed to save ensemble: {e}")
+    
+    def load_ensemble(self, filepath: str):
+        """Load ensemble system"""
+        try:
+            if JOBLIB_AVAILABLE:
+                ensemble_data = joblib.load(filepath)
             else:
-                logger.error("No models available for prediction")
-                return np.full(len(X), 0.0191)
+                with open(filepath, 'rb') as f:
+                    ensemble_data = pickle.load(f)
+            
+            self.ensembles = ensemble_data.get('ensembles', {})
+            self.final_ensemble = ensemble_data.get('final_ensemble')
+            self.best_ensemble = ensemble_data.get('best_ensemble')
+            self.best_score = ensemble_data.get('best_score', 0.0)
+            self.target_ctr = ensemble_data.get('target_ctr', 0.0191)
+            
+            logger.info(f"Ensemble loaded from {filepath}")
+            
+        except Exception as e:
+            logger.error(f"Failed to load ensemble: {e}")
+
+# Test function
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    
+    print("CTR Ensemble Test")
+    print("=" * 40)
+    
+    # Create sample data
+    np.random.seed(42)
+    n_samples = 1000
+    
+    # Generate target with CTR-like distribution
+    y_true = np.random.choice([0, 1], n_samples, p=[0.98, 0.02])
+    
+    # Generate mock base model predictions
+    base_predictions = {
+        'model_1': np.random.beta(1, 50, n_samples),  # Low CTR predictions
+        'model_2': np.random.beta(2, 80, n_samples),  # Very low CTR predictions  
+        'model_3': np.random.beta(1.5, 60, n_samples)  # Low CTR predictions
+    }
+    
+    # Add some correlation with target
+    for name in base_predictions:
+        # Make positive samples slightly higher
+        positive_mask = y_true == 1
+        base_predictions[name][positive_mask] *= 2
+        base_predictions[name] = np.clip(base_predictions[name], 0.001, 0.999)
+    
+    print(f"Sample data: {n_samples} samples, CTR: {np.mean(y_true):.4f}")
+    for name, pred in base_predictions.items():
+        print(f"{name}: predicted CTR = {np.mean(pred):.4f}")
+    
+    # Test ensemble manager
+    ensemble_manager = CTREnsembleManager()
+    
+    # Create ensembles
+    results = ensemble_manager.create_ensembles(base_predictions, y_true)
+    
+    print("\nEnsemble Results:")
+    for name, result in results.items():
+        print(f"{name}:")
+        print(f"  Combined Score: {result['combined_score']:.4f}")
+        print(f"  CTR Quality: {result['ctr_quality']:.4f}")
+        print(f"  Predicted CTR: {result['predicted_ctr']:.4f}")
+        print(f"  CTR Bias: {abs(result['predicted_ctr'] - result['actual_ctr']):.4f}")
+    
+    # Test final prediction
+    final_pred = ensemble_manager.predict(base_predictions)
+    final_ctr = np.mean(final_pred)
+    
+    print(f"\nFinal Ensemble:")
+    print(f"Predicted CTR: {final_ctr:.4f}")
+    print(f"CTR Bias: {abs(final_ctr - np.mean(y_true)):.4f}")
+    
+    # Get summary
+    summary = ensemble_manager.get_ensemble_summary()
+    print(f"\nSummary: {summary}")
+    
+    print("\nCTR Ensemble test completed!")
