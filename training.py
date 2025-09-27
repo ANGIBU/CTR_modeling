@@ -701,12 +701,12 @@ if __name__ == "__main__":
             balance_strategy="hybrid", calibration_method="isotonic"
         )
         print(f"Training summary: {summary}")
-        676
+        
         # Test prediction
         pred = trainer.predict(model_name, X_test)
         predicted_ctr = np.mean(pred)
-        actual_ctr = np.mean(y_test)6
+        actual_ctr = np.mean(y_test)
         
         print(f"Predicted CTR: {predicted_ctr:.4f}, Actual CTR: {actual_ctr:.4f}")
     
-    print("\nCTR Trainer test completed!")66
+    print("\nCTR Trainer test completed!")
