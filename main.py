@@ -12,6 +12,16 @@ import gc
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 
+# Create essential directories first
+def ensure_directories():
+    """Ensure essential directories exist before logging setup"""
+    directories = ['data', 'models', 'logs', 'output', 'results']
+    for directory in directories:
+        os.makedirs(directory, exist_ok=True)
+
+# Ensure directories exist before logging setup
+ensure_directories()
+
 # Safe imports with availability checking
 try:
     import psutil
@@ -32,7 +42,7 @@ except ImportError as e:
     print(f"Essential package import failed: {e}")
     sys.exit(1)
 
-# Configure logging
+# Configure logging after directory creation
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -83,8 +93,8 @@ def validate_environment() -> bool:
         python_version = sys.version
         logger.info(f"Python version: {python_version}")
         
-        # Create directories
-        directories = ['data', 'models', 'logs', 'results']
+        # Ensure directories exist (redundant but safe)
+        directories = ['data', 'models', 'logs', 'output', 'results']
         for directory in directories:
             os.makedirs(directory, exist_ok=True)
             logger.info(f"Directory prepared: {directory}")
@@ -103,21 +113,42 @@ def validate_environment() -> bool:
         test_size = test_path.stat().st_size / (1024**2) if test_exists else 0
         submission_size = submission_path.stat().st_size / (1024**2) if submission_exists else 0
         
-        logger.info(f"train file: {train_exists} ({train_size:.1f}MB)")
-        logger.info(f"test file: {test_exists} ({test_size:.1f}MB)")
-        logger.info(f"submission file: {submission_exists} ({submission_size:.1f}MB)")
+        logger.info(f"Train data: {'EXISTS' if train_exists else 'MISSING'} ({train_size:.1f}MB)")
+        logger.info(f"Test data: {'EXISTS' if test_exists else 'MISSING'} ({test_size:.1f}MB)")
+        logger.info(f"Submission template: {'EXISTS' if submission_exists else 'MISSING'} ({submission_size:.1f}MB)")
         
-        # Memory check
+        # Memory information
         if PSUTIL_AVAILABLE:
-            vm = psutil.virtual_memory()
-            total_memory = vm.total / (1024**3)
-            available_memory = vm.available / (1024**3)
-            memory_percent = vm.percent
-            
-            logger.info(f"System memory: {total_memory:.1f}GB (available: {available_memory:.1f}GB)")
-            logger.info(f"Memory usage: {memory_percent:.1f}%")
+            memory = psutil.virtual_memory()
+            available_gb = memory.available / (1024**3)
+            total_gb = memory.total / (1024**3)
+            logger.info(f"Memory status: {available_gb:.1f}GB available / {total_gb:.1f}GB total")
         
-        logger.info("=== Environment validation completed ===")
+        # GPU information
+        if TORCH_AVAILABLE and torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            current_device = torch.cuda.current_device()
+            gpu_name = torch.cuda.get_device_name(current_device)
+            gpu_memory = torch.cuda.get_device_properties(current_device).total_memory / (1024**3)
+            logger.info(f"GPU available: {gpu_count} devices")
+            logger.info(f"Current GPU: {gpu_name} ({gpu_memory:.1f}GB)")
+        else:
+            logger.info("GPU: Not available (CPU mode)")
+        
+        # Check essential files existence
+        if not train_exists:
+            logger.error("Training data missing: data/train.parquet")
+            return False
+        
+        if not test_exists:
+            logger.error("Test data missing: data/test.parquet")
+            return False
+        
+        if not submission_exists:
+            logger.error("Submission template missing: data/sample_submission.csv")
+            return False
+        
+        logger.info("=== Environment validation completed successfully ===")
         return True
         
     except Exception as e:
@@ -125,157 +156,139 @@ def validate_environment() -> bool:
         return False
 
 def safe_train_test_split(X, y, test_size=0.3, random_state=42):
-    """Safe train test split with class imbalance handling"""
+    """Safe train-test split with memory optimization"""
+    from sklearn.model_selection import train_test_split
+    
     try:
-        from sklearn.model_selection import train_test_split
+        logger.info(f"Performing train-test split: test_size={test_size}")
         
-        # Check if we have enough samples for stratification
-        unique_classes, class_counts = np.unique(y, return_counts=True)
-        min_class_count = min(class_counts)
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=test_size, random_state=random_state, stratify=y
+        )
         
-        # If any class has too few samples, don't stratify
-        if min_class_count < 2 or len(y) < 10:
-            logger.warning(f"Small dataset ({len(y)} samples) or class imbalance detected. Using simple split.")
-            X_train, X_val, y_train, y_val = train_test_split(
-                X, y, test_size=test_size, random_state=random_state
-            )
-        else:
-            # Safe stratified split
-            X_train, X_val, y_train, y_val = train_test_split(
-                X, y, test_size=test_size, random_state=random_state, stratify=y
-            )
-        
-        # Ensure validation set has both classes
-        val_unique_classes = np.unique(y_val)
-        if len(val_unique_classes) < 2:
-            logger.warning("Validation set has only one class. Adjusting split.")
-            # Manually ensure both classes in validation
-            positive_indices = np.where(y == 1)[0]
-            negative_indices = np.where(y == 0)[0]
-            
-            if len(positive_indices) >= 1 and len(negative_indices) >= 1:
-                # Take at least one positive and one negative for validation
-                val_pos_idx = np.random.choice(positive_indices, size=min(1, len(positive_indices)), replace=False)
-                val_neg_idx = np.random.choice(negative_indices, size=min(2, len(negative_indices)), replace=False)
-                val_indices = np.concatenate([val_pos_idx, val_neg_idx])
-                train_indices = np.setdiff1d(np.arange(len(y)), val_indices)
-                
-                X_train = X.iloc[train_indices]
-                X_val = X.iloc[val_indices]
-                y_train = y.iloc[train_indices]
-                y_val = y.iloc[val_indices]
-            else:
-                # Fallback to simple split
-                X_train, X_val, y_train, y_val = train_test_split(
-                    X, y, test_size=test_size, random_state=random_state
-                )
-        
+        logger.info(f"Split completed - Train: {X_train.shape}, Validation: {X_val.shape}")
         return X_train, X_val, y_train, y_val
         
     except Exception as e:
-        logger.error(f"Train test split failed: {e}")
-        # Return original data as fallback
-        split_point = int(len(X) * (1 - test_size))
-        return X.iloc[:split_point], X.iloc[split_point:], y.iloc[:split_point], y.iloc[split_point:]
+        logger.error(f"Train-test split failed: {e}")
+        raise
 
-def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[str, Any]]:
-    """Execute complete CTR modeling pipeline"""
+def reproduce_score_validation() -> bool:
+    """Reproduce target score validation"""
     try:
-        start_time = time.time()
+        logger.info("=== Score reproduction validation started ===")
         
-        logger.info("=== Pipeline execution started ===")
+        # Import required modules
+        from config import Config
+        from data_loader import CTRDataLoader
+        from feature_engineering import FeatureEngineer
+        from training import CTRTrainer
+        from inference import CTRPredictor
+        from evaluation import CTRMetricsEvaluator
         
-        if quick_mode:
-            logger.info("QUICK MODE: Running with 50 samples for rapid testing")
+        config = Config()
+        config.setup_directories()
         
-        # Initial memory cleanup
-        force_memory_cleanup()
-        
-        # Import modules only when needed
-        logger.info("Essential module import started")
-        
-        # Try to import modules progressively
-        try:
-            from config import Config
-            logger.info("Basic module import successful")
-        except ImportError as e:
-            logger.error(f"Config import failed: {e}")
-            return None
-        
-        # GPU detection and optimization
-        gpu_optimization = False
-        if TORCH_AVAILABLE and torch.cuda.is_available():
-            gpu_name = torch.cuda.get_device_name(0)
-            logger.info(f"GPU detection: {gpu_name}")
-            
-            if "4060 Ti" in gpu_name:
-                gpu_optimization = True
-                logger.info("RTX 4060 Ti optimization: True")
-                
-                # Enable mixed precision for RTX 4060 Ti
-                torch.backends.cudnn.benchmark = True
-                if hasattr(torch.backends.cudnn, 'allow_tf32'):
-                    torch.backends.cudnn.allow_tf32 = True
-                logger.info("Mixed Precision enabled")
-        
-        # Import remaining modules
-        try:
-            from data_loader import LargeDataLoader
-            from feature_engineering import CTRFeatureEngineer
-            from training import CTRTrainer
-            from ensemble import CTREnsembleManager
-            logger.info("All modules import completed")
-        except ImportError as e:
-            logger.error(f"Module import failed: {e}")
-            return None
-        
-        # Phase 1: Data Loading
-        logger.info("1. Data loading phase")
-        data_loader = LargeDataLoader(config)
-        logger.info("Large data loader initialization completed")
-        
-        if quick_mode:
-            data_loader.set_quick_mode(True)
-            logger.info("Large data loader set to quick mode (50 samples)")
-        
-        # Check memory before loading
-        if PSUTIL_AVAILABLE:
-            vm = psutil.virtual_memory()
-            available_memory = vm.available / (1024**3)
-            logger.info(f"Pre-loading memory status: available {available_memory:.1f}GB")
-        
-        # Load data
-        if quick_mode:
-            logger.info("Quick mode: Loading sample data (50 samples)")
-            train_df, test_df = data_loader.load_quick_sample_data()
-        else:
-            logger.info("Full mode: Loading complete dataset")
-            train_df, test_df = data_loader.load_large_data_optimized()
+        # Load data with quick mode for validation
+        data_loader = CTRDataLoader(config)
+        train_df = data_loader.load_train_data(sample_rows=1000)  # Quick validation
+        test_df = data_loader.load_test_data(sample_rows=500)
         
         if train_df is None or test_df is None:
             logger.error("Data loading failed")
-            return None
+            return False
         
-        logger.info(f"Data loading completed - train: {train_df.shape}, test: {test_df.shape}")
+        # Feature engineering
+        feature_engineer = FeatureEngineer(config)
+        X_train, feature_names = feature_engineer.engineer_features(train_df, is_training=True)
         
-        # Phase 2: Feature Engineering
-        logger.info("2. Feature engineering phase")
-        feature_engineer = CTRFeatureEngineer(config)
+        # Get target
+        target_column = data_loader.get_detected_target_column()
+        y_train = train_df[target_column]
         
+        # Train simple model for validation
+        trainer = CTRTrainer(config)
+        trainer.set_quick_mode(True)
+        
+        # Simple logistic regression for validation
+        from sklearn.linear_model import LogisticRegression
+        model = LogisticRegression(random_state=42, max_iter=100)
+        model.fit(X_train, y_train)
+        
+        # Make predictions
+        predictions = model.predict_proba(X_train)[:, 1]
+        
+        # Evaluate
+        evaluator = CTRMetricsEvaluator()
+        metrics = evaluator.calculate_metrics(y_train, predictions)
+        
+        logger.info(f"Validation metrics: {metrics}")
+        logger.info("=== Score reproduction validation completed ===")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Score reproduction validation failed: {e}")
+        return False
+
+def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[str, Any]]:
+    """Execute complete CTR modeling pipeline"""
+    
+    try:
+        logger.info("=== Final pipeline execution started ===")
+        start_time = time.time()
+        
+        # Import required modules
+        from data_loader import CTRDataLoader
+        from feature_engineering import FeatureEngineer
+        from training import CTRTrainer
+        from ensemble import CTREnsembleManager
+        from inference import CTRPredictor
+        from evaluation import CTRMetricsEvaluator
+        
+        # Initialize components
+        data_loader = CTRDataLoader(config)
+        feature_engineer = FeatureEngineer(config)
+        
+        logger.info("=== Data loading phase ===")
+        
+        # Load training data
         if quick_mode:
-            feature_engineer.set_quick_mode(True)
-            logger.info("Quick mode: Basic feature engineering only")
+            train_df = data_loader.load_train_data(sample_rows=50)
+            logger.info("Quick mode: Using 50 samples for training")
+        else:
+            train_df = data_loader.load_train_data()
+            logger.info("Full mode: Loading complete training dataset")
         
-        X_train, X_test = feature_engineer.engineer_features(train_df, test_df)
-        
-        if X_train is None or X_test is None:
-            logger.error("Feature engineering failed")
+        if train_df is None:
+            logger.error("Training data loading failed")
             return None
         
-        logger.info(f"Feature engineering completed - Features: {X_train.shape[1]}")
+        logger.info(f"Training data loaded: {train_df.shape}")
         
-        # Phase 3: Model Training
-        logger.info("3. Model training phase")
+        # Load test data for inference
+        if quick_mode:
+            test_df = data_loader.load_test_data(sample_rows=25)
+        else:
+            test_df = data_loader.load_test_data()
+        
+        if test_df is None:
+            logger.error("Test data loading failed")
+            return None
+        
+        logger.info(f"Test data loaded: {test_df.shape}")
+        
+        logger.info("=== Feature engineering phase ===")
+        
+        # Feature engineering for training data
+        X_train, feature_names = feature_engineer.engineer_features(train_df, is_training=True)
+        logger.info(f"Training features engineered: {X_train.shape}, {len(feature_names)} features")
+        
+        # Feature engineering for test data
+        X_test, _ = feature_engineer.engineer_features(test_df, is_training=False)
+        logger.info(f"Test features engineered: {X_test.shape}")
+        
+        logger.info("=== Model training phase ===")
         
         # Initialize trainer
         trainer = CTRTrainer(config)
@@ -329,149 +342,99 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                     X_train=X_train_split,
                     y_train=y_train_split,
                     X_val=X_val_split,
-                    y_val=y_val_split,
-                    quick_mode=quick_mode
+                    y_val=y_val_split
                 )
                 
                 if model is not None:
                     trained_models[model_name] = model
                     model_performances[model_name] = performance
+                    logger.info(f"{model_name} training completed successfully")
                     
-                    # Add to ensemble - Fixed parameter order
-                    ensemble_manager.add_base_model(model_name, model)
-                    
-                    logger.info(f"{model_name} model training completed successfully")
+                    if performance:
+                        logger.info(f"{model_name} performance: {performance}")
                 else:
-                    logger.error(f"{model_name} model training failed")
+                    logger.warning(f"{model_name} training failed")
                     
             except Exception as e:
-                logger.error(f"{model_name} model training error: {e}")
+                logger.error(f"{model_name} training error: {e}")
                 continue
         
-        if not trained_models:
-            logger.error("No models were successfully trained")
-            return None
+        logger.info(f"Model training completed. Successful models: {list(trained_models.keys())}")
         
-        # Phase 4: Ensemble Preparation
-        logger.info("4. Ensemble preparation")
-        
-        ensemble_enabled = len(trained_models) > 1
+        # Ensemble training
+        ensemble_model = None
         ensemble_used = False
         
-        if quick_mode:
-            logger.info("Quick mode: Skipping ensemble for speed")
-            ensemble_enabled = False
-        elif ensemble_enabled:
+        if len(trained_models) > 1 and not quick_mode:
+            logger.info("=== Ensemble training phase ===")
             try:
-                # Prepare ensemble
-                ensemble_manager.train_all_ensembles(X_val_split, y_val_split)
-                ensemble_used = True
-                logger.info("Ensemble preparation completed")
+                ensemble_model = ensemble_manager.create_ensemble(
+                    trained_models, X_val_split, y_val_split
+                )
+                if ensemble_model:
+                    ensemble_used = True
+                    logger.info("Ensemble model created successfully")
+                else:
+                    logger.warning("Ensemble creation failed")
             except Exception as e:
-                logger.warning(f"Ensemble preparation failed: {e}")
-                ensemble_used = False
+                logger.error(f"Ensemble training failed: {e}")
         
-        # Phase 5: Generate Submission
-        logger.info("5. Submission file generation")
+        logger.info("=== Inference phase ===")
         
-        # Memory cleanup before submission
-        force_memory_cleanup()
+        # Initialize predictor
+        predictor = CTRPredictor(config)
         
-        logger.info("Submission file generation started")
-        logger.info(f"Test data size: {len(X_test)} rows")
-        
-        # Generate predictions
-        if ensemble_used and ensemble_manager.final_ensemble and ensemble_manager.final_ensemble.is_fitted:
-            logger.info("Using ensemble for prediction")
-            # Get base model predictions
-            base_predictions = {}
-            for name, model in trained_models.items():
-                try:
-                    pred = model.predict_proba(X_test)
-                    base_predictions[name] = pred
-                except Exception as e:
-                    logger.warning(f"Prediction failed for {name}: {e}")
-                    base_predictions[name] = np.full(len(X_test), 0.0191)
-            
-            # Ensemble prediction
-            try:
-                predictions = ensemble_manager.final_ensemble.predict_proba(base_predictions)
-            except Exception as e:
-                logger.warning(f"Ensemble prediction failed: {e}")
-                predictions = np.mean(list(base_predictions.values()), axis=0)
-        else:
-            # Use single best model
+        # Select best model for inference
+        if ensemble_used and ensemble_model:
+            final_model = ensemble_model
+            model_type = 'ensemble'
+            logger.info("Using ensemble model for final predictions")
+        elif trained_models:
+            # Use the first successfully trained model
             best_model_name = list(trained_models.keys())[0]
-            logger.info(f"Using single model: {best_model_name}")
-            best_model = trained_models[best_model_name]
-            try:
-                predictions = best_model.predict_proba(X_test)
-            except Exception as e:
-                logger.error(f"Single model prediction failed: {e}")
-                predictions = np.full(len(X_test), 0.0191)
+            final_model = trained_models[best_model_name]
+            model_type = best_model_name
+            logger.info(f"Using {best_model_name} model for final predictions")
+        else:
+            logger.error("No trained models available for inference")
+            return None
         
-        # Load sample submission to get proper ID format
+        # Make predictions
         try:
-            sample_submission = pd.read_csv('data/sample_submission.csv')
-            if len(sample_submission) != len(predictions):
-                logger.warning(f"Sample submission length ({len(sample_submission)}) != predictions length ({len(predictions)})")
-                # Generate IDs in same format as sample
-                submission_df = pd.DataFrame({
-                    'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
-                    'clicked': predictions
-                })
-            else:
-                # Use IDs from sample submission
-                submission_df = pd.DataFrame({
-                    'ID': sample_submission['ID'].values,
-                    'clicked': predictions
-                })
-        except Exception as e:
-            logger.warning(f"Could not load sample submission: {e}")
-            # Fallback: generate IDs in expected format
+            predictions = predictor.predict(final_model, X_test, model_type=model_type)
+            logger.info(f"Predictions generated: {len(predictions)} samples")
+            
+            # Save predictions
             submission_df = pd.DataFrame({
-                'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
+                'ID': test_df.index if hasattr(test_df, 'index') else range(len(predictions)),
                 'clicked': predictions
             })
+            
+            submission_path = 'submission.csv'
+            submission_df.to_csv(submission_path, index=False)
+            logger.info(f"Submission saved: {submission_path}")
+            
+        except Exception as e:
+            logger.error(f"Prediction generation failed: {e}")
+            predictions = None
         
-        submission_path = 'submission.csv'
-        submission_df.to_csv(submission_path, index=False)
-        logger.info(f"Submission file saved: {submission_path}")
-        logger.info(f"Submission statistics: mean={predictions.mean():.4f}, std={predictions.std():.4f}")
-        
-        # Phase 6: Final Results
-        logger.info("=== Pipeline completed ===")
-        
+        # Calculate execution time
         execution_time = time.time() - start_time
         
+        # Prepare results
         results = {
-            'quick_mode': quick_mode,
-            'execution_time': execution_time,
-            'successful_models': len(trained_models),
-            'ensemble_enabled': ensemble_enabled,
+            'successful_models': list(trained_models.keys()),
+            'model_performances': model_performances,
+            'ensemble_enabled': len(trained_models) > 1,
             'ensemble_used': ensemble_used,
-            'calibration_applied': False,
-            'submission_file': submission_path,
-            'submission_rows': len(predictions),
-            'model_performances': model_performances
+            'calibration_applied': False,  # Not implemented in this version
+            'execution_time': execution_time,
+            'quick_mode': quick_mode,
+            'predictions_generated': predictions is not None,
+            'submission_saved': predictions is not None
         }
         
-        logger.info(f"Mode: {'QUICK (50 samples)' if quick_mode else 'FULL dataset'}")
-        logger.info(f"Execution time: {execution_time:.2f}s")
-        logger.info(f"Successful models: {len(trained_models)}")
-        logger.info(f"Ensemble activated: {'Yes' if ensemble_enabled else 'No'}")
-        logger.info(f"Ensemble actually used: {'Yes' if ensemble_used else 'No'}")
-        logger.info(f"Submission file: {len(predictions)} rows")
-        
-        # Final memory status
-        if PSUTIL_AVAILABLE:
-            vm = psutil.virtual_memory()
-            available_memory = vm.available / (1024**3)
-            logger.info(f"Final memory status: available {available_memory:.1f}GB")
-        
-        # Final cleanup
-        force_memory_cleanup()
-        
+        logger.info("=== Final pipeline execution completed ===")
         return results
         
     except Exception as e:
@@ -479,108 +442,47 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.error(f"Detailed error: {traceback.format_exc()}")
         return None
 
-def run_performance_analysis(results: Dict[str, Any]) -> bool:
+def run_performance_analysis(pipeline_results: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Run performance analysis on trained models"""
     try:
-        logger.info("=== Performance Analysis Started ===")
+        logger.info("=== Performance analysis started ===")
         
-        # Import modules with config
-        try:
-            from config import Config
-            from analysis import CTRPerformanceAnalyzer
-            from visualization import CTRVisualizationEngine
-        except ImportError as e:
-            logger.error(f"Failed to import analysis modules: {e}")
-            return False
+        if not pipeline_results.get('successful_models'):
+            logger.warning("No successful models for performance analysis")
+            return None
         
-        # Initialize analyzers with config
-        try:
-            config = Config()
-            analyzer = CTRPerformanceAnalyzer(config)
-            visualizer = CTRVisualizationEngine()
-        except Exception as e:
-            logger.error(f"Failed to initialize analyzers: {e}")
-            return False
+        # Create basic performance summary
+        analysis_results = {
+            'model_count': len(pipeline_results['successful_models']),
+            'ensemble_used': pipeline_results.get('ensemble_used', False),
+            'execution_time': pipeline_results.get('execution_time', 0),
+            'analysis_timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+        }
         
-        # Check for models to analyze
-        if not results.get('model_performances'):
-            logger.warning("No model performances to analyze")
-            return False
+        # Save summary
+        summary_path = 'output/performance_summary.json'
+        os.makedirs('output', exist_ok=True)
         
-        model_count = len(results['model_performances'])
-        logger.info(f"Analyzing {model_count} trained models")
+        import json
+        with open(summary_path, 'w') as f:
+            json.dump(analysis_results, f, indent=2)
         
-        # Create dummy analysis data for models
-        analysis_results = {}
-        for model_name, performance in results['model_performances'].items():
-            logger.info(f"Analyzing model: {model_name}")
-            
-            try:
-                # Create dummy y_true and y_pred for analysis
-                # Using small sample for quick mode
-                n_samples = 50 if results.get('quick_mode', False) else 1000
-                y_true_dummy = np.random.binomial(1, 0.02, n_samples)
-                y_pred_dummy = np.random.uniform(0.001, 0.1, n_samples)
-                
-                # Run analysis with dummy data
-                analysis_result = analyzer.full_performance_analysis(
-                    y_true_dummy, y_pred_dummy, model_name, quick_mode=results.get('quick_mode', False)
-                )
-                
-                # Store results
-                analysis_results[model_name] = analysis_result
-                
-                # Save analysis report
-                report_path = f"results/analysis_report_{model_name}.json"
-                analyzer.save_analysis_report(analysis_result, report_path)
-                
-            except Exception as e:
-                logger.warning(f"Analysis failed for {model_name}: {e}")
-                continue
-        
-        # Create summary CSV
-        try:
-            analyzer.create_summary_csv(analysis_results)
-        except Exception as e:
-            logger.warning(f"Summary CSV creation failed: {e}")
-        
-        # Generate visualizations
-        try:
-            visualizer.generate_all_visualizations(analysis_results)
-        except Exception as e:
-            logger.warning(f"Visualization generation failed: {e}")
-        
-        logger.info("=== Performance Analysis Completed ===")
-        return True
+        logger.info(f"Performance analysis completed: {summary_path}")
+        return analysis_results
         
     except Exception as e:
         logger.error(f"Performance analysis failed: {e}")
-        return False
-
-def reproduce_score_validation() -> bool:
-    """Validate score reproduction capability"""
-    try:
-        logger.info("=== Score reproduction validation started ===")
-        
-        # Implementation placeholder for score validation
-        logger.info("=== Score reproduction validation completed ===")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Score reproduction failed: {e}")
-        logger.error(f"Detailed error: {traceback.format_exc()}")
-        return False
+        return None
 
 def main():
-    """Main execution function with argument parsing"""
-    global cleanup_required
+    """Main execution function"""
     
-    # Set up signal handlers
+    # Setup signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="CTR modeling system")
+    # Setup argument parser
+    parser = argparse.ArgumentParser(description="CTR Modeling System")
     parser.add_argument("--mode", choices=["train", "inference", "reproduce"], 
                        default="train", help="Execution mode")
     parser.add_argument("--quick", action="store_true",
@@ -629,44 +531,8 @@ def main():
                     logger.info("================================================================================")
                     logger.info("FINAL PERFORMANCE ANALYSIS SUMMARY")
                     logger.info("================================================================================")
-                    logger.info(f"Analysis Mode: {'QUICK MODE (50 samples)' if results.get('quick_mode') else 'FULL MODE'}")
-                    logger.info(f"Models Analyzed: {results['successful_models']}")
-                    logger.info(f"Reports Generated: {results['successful_models']}")
-                    logger.info("")
-                    logger.info("MODEL PERFORMANCE RESULTS:")
-                    logger.info("--------------------------------------------------")
-                    
-                    for model_name, perf in results.get('model_performances', {}).items():
-                        logger.info(f"{model_name}:")
-                        logger.info(f"  Combined Score: {perf.get('combined_score', 0.0):.4f}")
-                        logger.info(f"  AP Score: {perf.get('ap_score', 0.0):.4f}")
-                        logger.info(f"  AUC Score: {perf.get('auc_score', 'nan')}")
-                        logger.info(f"  CTR Quality: {perf.get('ctr_quality', 'UNKNOWN')}")
-                        logger.info(f"  CTR Bias: {perf.get('ctr_bias', 0.0):.6f}")
-                        logger.info(f"  Performance Tier: {perf.get('performance_tier', 'UNKNOWN')}")
-                        logger.info("")
-                    
-                    target_score = 0.34
-                    achieving_models = sum(1 for perf in results.get('model_performances', {}).values() 
-                                         if perf.get('combined_score', 0.0) >= target_score)
-                    
-                    logger.info("TARGET ACHIEVEMENT STATUS:")
-                    logger.info("--------------------------------------------------")
-                    logger.info(f"Target Combined Score: {target_score}")
-                    logger.info(f"Models Achieving Target: {achieving_models}/{results['successful_models']}")
-                    logger.info("")
-                    logger.info("OUTPUT FILES:")
-                    logger.info("--------------------------------------------------")
-                    logger.info("Analysis Reports: results/analysis_report_[model_name].json")
-                    logger.info("Results folder: results/")
-                    logger.info("  - summary.csv (comprehensive metrics)")
-                    logger.info("  - model_performance.png (performance comparison)")
-                    logger.info("  - ctr_analysis.png (4-panel CTR dashboard)")
-                    logger.info("  - execution_summary.png (resource usage)")
-                    logger.info("  - comprehensive_report.pdf (complete analysis)")
-                    
-                    for model_name in results.get('model_performances', {}).keys():
-                        logger.info(f"  - analysis_report_{model_name}.json (detailed analysis)")
+                    logger.info("Reports generated:")
+                    logger.info("  - performance_summary.json (basic metrics)")
                     
                     logger.info("")
                     logger.info("================================================================================")
