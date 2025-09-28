@@ -2,6 +2,7 @@
 
 import os
 import sys
+import gc
 from pathlib import Path
 import psutil
 import logging
@@ -17,7 +18,7 @@ logging.basicConfig(
 )
 
 class Config:
-    """Configuration class for CTR modeling system"""
+    """Memory optimized configuration for CTR modeling system"""
     
     # Base paths
     BASE_DIR = Path(__file__).parent.absolute()
@@ -32,359 +33,247 @@ class Config:
     SUBMISSION_PATH = DATA_DIR / "sample_submission.csv"
     SUBMISSION_TEMPLATE_PATH = DATA_DIR / "sample_submission.csv"
     
-    # Memory configuration (35GB limit - adjusted for feature engineering)
-    MAX_MEMORY_GB = 35.0  # Reduced from 40GB for stability
-    MEMORY_WARNING_THRESHOLD = 0.70  # 24.5GB
-    MEMORY_CRITICAL_THRESHOLD = 0.80  # 28GB
-    MEMORY_ABORT_THRESHOLD = 0.90  # 31.5GB
+    # Conservative memory configuration (45GB available, use max 30GB)
+    MAX_MEMORY_GB = 25.0  # Very conservative limit
+    MEMORY_WARNING_THRESHOLD = 0.50  # 12.5GB warning
+    MEMORY_CRITICAL_THRESHOLD = 0.70  # 17.5GB critical  
+    MEMORY_ABORT_THRESHOLD = 0.85  # 21.25GB abort
     
-    # Processing configuration for memory efficiency
-    CHUNK_SIZE = 40000  # Increased for better processing
-    BATCH_SIZE_CPU = 10000  # Increased batch size
-    BATCH_SIZE_GPU = 20000
+    # Aggressive chunking for memory efficiency
+    CHUNK_SIZE = 15000  # Much smaller chunks
+    SMALL_CHUNK_SIZE = 5000  # For memory-intensive operations
+    TINY_CHUNK_SIZE = 1000  # For critical memory operations
     
-    # Data size limits
-    MAX_TRAIN_SIZE = 10704179  # Full dataset
-    MAX_TEST_SIZE = 1527298   # Full dataset
+    # Batch processing optimization
+    BATCH_SIZE_CPU = 2000  # Smaller batches for CPU
+    BATCH_SIZE_GPU = 5000  # Smaller batches for GPU
+    MAX_WORKERS = 2  # Reduced parallel workers
     
-    # Sampling configuration for memory management
-    AGGRESSIVE_SAMPLING_THRESHOLD = 0.75  # Start sampling at 75% memory
-    MIN_SAMPLE_SIZE = 100000
-    MAX_SAMPLE_SIZE = 8000000  # Increased max sample size
+    # Data processing limits
+    MAX_TRAIN_SIZE = 10704179
+    MAX_TEST_SIZE = 1527298
     
-    # Feature engineering limits
-    MAX_FEATURES = 600  # Increased for more features
-    MAX_CATEGORICAL_UNIQUE = 5000  # Increased limit for categorical features
-    SEQ_HASH_SIZE = 100000  # Hash size for seq column processing
+    # Memory-conservative sampling
+    AGGRESSIVE_SAMPLING_THRESHOLD = 0.60  # Start sampling earlier
+    MIN_SAMPLE_SIZE = 50000  # Smaller minimum sample
+    MAX_SAMPLE_SIZE = 2000000  # Much smaller max sample
+    EMERGENCY_SAMPLE_SIZE = 100000  # Emergency fallback sample
+    
+    # Feature engineering constraints
+    MAX_FEATURES = 200  # Reduced max features
+    MAX_CATEGORICAL_UNIQUE = 1000  # Reduced categorical limit
+    SEQ_HASH_SIZE = 10000  # Smaller hash size
+    MAX_INTERACTIONS = 20  # Limited interaction features
     
     # Model training configuration
     CV_FOLDS = 3
-    EARLY_STOPPING_ROUNDS = 50
+    EARLY_STOPPING_ROUNDS = 30
     RANDOM_STATE = 42
     
-    # Quick mode configuration
-    QUICK_SAMPLE_SIZE = 50
-    QUICK_TEST_SIZE = 25
+    # Memory optimization settings
+    DTYPE_OPTIMIZATION = True
+    AGGRESSIVE_GC = True
+    GC_FREQUENCY = 5  # Run GC every 5 operations
     
-    # Thread configuration
-    N_JOBS = min(8, os.cpu_count())  # Increased thread count
-    
-    # Target encoding configuration
-    TARGET_ENCODING_CHUNKS = 20  # Number of chunks for target encoding
-    MIN_CATEGORY_SAMPLES = 5  # Minimum samples for target encoding
-    SMOOTHING_FACTOR = 100  # Smoothing factor for target encoding
-    
-    # CTR correction parameters
-    TARGET_CTR = 0.0191
-    CTR_CORRECTION_FACTOR = 0.5  # Factor to reduce over-prediction
-    CTR_ALIGNMENT_WEIGHT = 0.3  # Weight for CTR alignment in scoring
-    
-    # Model parameters for memory efficiency and performance
-    MODEL_PARAMS = {
-        'lightgbm': {
-            'objective': 'binary',
-            'metric': 'binary_logloss',
-            'boosting_type': 'gbdt',
-            'num_leaves': 127,  # Increased for better performance
-            'learning_rate': 0.01,  # Reduced for stability
-            'feature_fraction': 0.8,
-            'bagging_fraction': 0.8,
-            'bagging_freq': 5,
-            'verbose': -1,
-            'random_state': RANDOM_STATE,
-            'n_jobs': N_JOBS,
-            'max_depth': 8,  # Increased depth
-            'min_data_in_leaf': 50,  # Reduced for more splits
-            'reg_alpha': 0.1,
-            'reg_lambda': 0.1,
-            'force_col_wise': True,
-            'n_estimators': 1000,  # Increased iterations
-        },
-        'xgboost': {
-            'objective': 'binary:logistic',
-            'eval_metric': 'logloss',
-            'max_depth': 10,  # Increased depth
-            'learning_rate': 0.01,  # Reduced for stability
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'random_state': RANDOM_STATE,
-            'n_jobs': N_JOBS,
-            'tree_method': 'hist',
-            'max_leaves': 127,  # Increased leaves
-            'n_estimators': 1000,  # Increased iterations
-            'reg_alpha': 0.1,
-            'reg_lambda': 0.1,
-        },
-        'logistic': {
-            'max_iter': 2000,  # Increased iterations
-            'random_state': RANDOM_STATE,
-            'n_jobs': N_JOBS,
-            'solver': 'saga',  # Changed solver for large datasets
-            'C': 0.001,  # Increased regularization
-            'class_weight': 'balanced',
-        }
-    }
-    
-    # Ensemble configuration
-    ENSEMBLE_WEIGHTS = {
-        'lightgbm': 0.45,
-        'xgboost': 0.35,
-        'logistic': 0.20
-    }
+    # Quick mode for testing
+    QUICK_SAMPLE_SIZE = 1000
+    QUICK_TEST_SIZE = 500
     
     @classmethod
     def setup_directories(cls):
         """Create necessary directories"""
-        directories = [cls.DATA_DIR, cls.MODEL_DIR, cls.LOG_DIR, cls.OUTPUT_DIR]
-        created = []
-        
-        for directory in directories:
-            if not directory.exists():
-                directory.mkdir(parents=True, exist_ok=True)
-                created.append(str(directory))
-        
-        if created:
-            print(f"Created directories: {created}")
-        
-        return created
+        for directory in [cls.DATA_DIR, cls.MODEL_DIR, cls.LOG_DIR, cls.OUTPUT_DIR]:
+            directory.mkdir(parents=True, exist_ok=True)
     
     @classmethod
-    def get_available_memory(cls) -> float:
-        """Get available system memory in GB"""
+    def get_memory_usage_gb(cls) -> float:
+        """Get current memory usage in GB"""
         try:
-            memory = psutil.virtual_memory()
-            available_gb = memory.available / (1024**3)
-            return min(available_gb, cls.MAX_MEMORY_GB)
+            process = psutil.Process()
+            return process.memory_info().rss / (1024**3)
         except:
-            return cls.MAX_MEMORY_GB * 0.8
+            return 2.0
+    
+    @classmethod
+    def get_available_memory_gb(cls) -> float:
+        """Get available memory in GB"""
+        try:
+            return psutil.virtual_memory().available / (1024**3)
+        except:
+            return 30.0
     
     @classmethod
     def get_memory_usage_percent(cls) -> float:
-        """Get current memory usage percentage"""
-        try:
-            memory = psutil.virtual_memory()
-            return memory.percent
-        except:
-            return 50.0
+        """Get memory usage percentage"""
+        current_gb = cls.get_memory_usage_gb()
+        return (current_gb / cls.MAX_MEMORY_GB) * 100
     
     @classmethod
     def should_use_sampling(cls) -> bool:
         """Check if sampling should be used"""
-        try:
-            memory_usage = cls.get_memory_usage_percent() / 100.0
-            return memory_usage > cls.AGGRESSIVE_SAMPLING_THRESHOLD
-        except:
-            return False
+        usage_percent = cls.get_memory_usage_percent()
+        return usage_percent > (cls.AGGRESSIVE_SAMPLING_THRESHOLD * 100)
     
     @classmethod
-    def get_optimal_chunk_size(cls) -> int:
-        """Get optimal chunk size based on available memory"""
-        try:
-            available_memory = cls.get_available_memory()
-            
-            if available_memory < 20:
-                return 20000
-            elif available_memory < 25:
-                return cls.CHUNK_SIZE
-            else:
-                return min(cls.CHUNK_SIZE * 2, 80000)
-        except:
-            return 20000
+    def get_emergency_config(cls) -> dict:
+        """Get emergency memory configuration"""
+        return {
+            'chunk_size': cls.TINY_CHUNK_SIZE,
+            'batch_size': 500,
+            'max_features': 50,
+            'sample_size': cls.EMERGENCY_SAMPLE_SIZE,
+            'disable_interactions': True,
+            'aggressive_sampling': True
+        }
+    
+    @classmethod
+    def get_safe_chunk_size(cls) -> int:
+        """Get safe chunk size based on current memory"""
+        usage_percent = cls.get_memory_usage_percent()
+        
+        if usage_percent > 80:
+            return cls.TINY_CHUNK_SIZE
+        elif usage_percent > 60:
+            return cls.SMALL_CHUNK_SIZE
+        else:
+            return cls.CHUNK_SIZE
+    
+    @classmethod
+    def force_memory_cleanup(cls):
+        """Force aggressive memory cleanup"""
+        if cls.AGGRESSIVE_GC:
+            gc.collect()
+            gc.collect()  # Second pass for better cleanup
+            gc.collect()  # Third pass for maximum cleanup
+    
+    @classmethod
+    def monitor_memory_critical(cls) -> dict:
+        """Monitor memory and return critical status"""
+        current_gb = cls.get_memory_usage_gb()
+        available_gb = cls.get_available_memory_gb()
+        usage_percent = cls.get_memory_usage_percent()
+        
+        status = {
+            'current_gb': current_gb,
+            'available_gb': available_gb,
+            'usage_percent': usage_percent,
+            'level': 'normal',
+            'action_required': False,
+            'emergency_mode': False
+        }
+        
+        if usage_percent > 85 or available_gb < 5:
+            status['level'] = 'emergency'
+            status['emergency_mode'] = True
+            status['action_required'] = True
+        elif usage_percent > 70 or available_gb < 10:
+            status['level'] = 'critical' 
+            status['action_required'] = True
+        elif usage_percent > 50:
+            status['level'] = 'warning'
+        
+        return status
     
     @classmethod
     def validate_system_requirements(cls):
-        """Validate system has minimum requirements"""
-        print("=== System requirements validation ===")
+        """Validate system requirements"""
+        # Check available memory
+        available_gb = cls.get_available_memory_gb()
+        if available_gb < 15:
+            raise RuntimeError(f"Insufficient memory: {available_gb:.1f}GB available, need at least 15GB")
         
-        # Check memory
-        try:
-            total_memory = psutil.virtual_memory().total / (1024**3)
-            available_memory = psutil.virtual_memory().available / (1024**3)
-            
-            print(f"Total memory: {total_memory:.1f}GB")
-            print(f"Available memory: {available_memory:.1f}GB")
-            print(f"Configured limit: {cls.MAX_MEMORY_GB}GB")
-            
-            if total_memory < 32:
-                print("WARNING: Less than 32GB total memory detected")
-                return False
-            
-            if available_memory < 20:
-                print("WARNING: Less than 20GB available memory")
-                return False
-                
-        except Exception as e:
-            print(f"Memory check failed: {e}")
-            return False
+        # Create directories
+        cls.setup_directories()
         
-        # Check CPU cores
-        cpu_cores = os.cpu_count()
-        print(f"CPU cores: {cpu_cores}")
-        
-        if cpu_cores < 4:
-            print("WARNING: Less than 4 CPU cores detected")
-        
-        # Check disk space
-        try:
-            disk_usage = psutil.disk_usage(str(cls.BASE_DIR))
-            free_gb = disk_usage.free / (1024**3)
-            print(f"Free disk space: {free_gb:.1f}GB")
-            
-            if free_gb < 50:
-                print("WARNING: Less than 50GB free disk space")
-                return False
-                
-        except Exception as e:
-            print(f"Disk check failed: {e}")
-            return False
-        
-        print("System requirements check: PASSED")
-        return True
+        logging.info(f"System validation passed - Available memory: {available_gb:.1f}GB")
     
     @classmethod
     def validate_paths(cls):
-        """Validate all required paths"""
-        print("=== Path validation ===")
+        """Validate required file paths"""
+        required_files = [cls.TRAIN_PATH, cls.TEST_PATH, cls.SUBMISSION_TEMPLATE_PATH]
         
-        paths_to_check = {
-            'BASE_DIR': cls.BASE_DIR,
-            'DATA_DIR': cls.DATA_DIR,
-            'TRAIN_PATH': cls.TRAIN_PATH,
-            'TEST_PATH': cls.TEST_PATH,
-            'SUBMISSION_PATH': cls.SUBMISSION_PATH,
-            'SUBMISSION_TEMPLATE_PATH': cls.SUBMISSION_TEMPLATE_PATH
-        }
+        for file_path in required_files:
+            if not file_path.exists():
+                raise FileNotFoundError(f"Required file not found: {file_path}")
         
-        for name, path in paths_to_check.items():
-            exists = path.exists()
-            size_info = ""
-            if exists and path.is_file():
-                size_mb = path.stat().st_size / (1024**2)
-                size_info = f", size: {size_mb:.1f}MB"
-            
-            print(f"{name}: {path} (exists: {exists}{size_info})")
-        
-        print("=== Validation completed ===")
+        logging.info("All required files validated")
     
     @classmethod
     def verify_data_requirements(cls):
-        """Data requirements validation"""
-        print("=== Data requirements validation ===")
-        
-        requirements = {
-            'train_file_exists': cls.TRAIN_PATH.exists(),
-            'test_file_exists': cls.TEST_PATH.exists(),
-            'train_file_size_mb': cls.TRAIN_PATH.stat().st_size / (1024**2) if cls.TRAIN_PATH.exists() else 0,
-            'test_file_size_mb': cls.TEST_PATH.stat().st_size / (1024**2) if cls.TEST_PATH.exists() else 0,
-            'memory_available': cls.MAX_MEMORY_GB,
-            'chunk_size': cls.CHUNK_SIZE,
-            'expected_train_size': cls.MAX_TRAIN_SIZE,
-            'expected_test_size': cls.MAX_TEST_SIZE,
-        }
-        
-        requirements['train_size_adequate'] = requirements['train_file_size_mb'] > 1000
-        requirements['test_size_adequate'] = requirements['test_file_size_mb'] > 100
-        requirements['memory_adequate'] = requirements['memory_available'] >= 20
-        
-        for key, value in requirements.items():
-            status = "✓" if value else "✗"
-            print(f"{status} {key}: {value}")
-        
-        all_met = all([
-            requirements['train_file_exists'],
-            requirements['test_file_exists'], 
-            requirements['train_size_adequate'],
-            requirements['test_size_adequate'],
-            requirements['memory_adequate']
-        ])
-        
-        print(f"\nAll requirements met: {'✓' if all_met else '✗'}")
-        if all_met:
-            print("Data processing ready with memory limit!")
-        else:
-            print("Requirements not met. Check data files and system resources.")
-        
-        return requirements
+        """Verify data file requirements"""
+        try:
+            import pandas as pd
+            
+            # Quick validation without loading full data
+            train_info = pd.read_parquet(cls.TRAIN_PATH, columns=[]).shape
+            test_info = pd.read_parquet(cls.TEST_PATH, columns=[]).shape
+            
+            logging.info(f"Data validation - Train: {train_info}, Test: {test_info}")
+            
+        except Exception as e:
+            logging.warning(f"Data validation failed: {e}")
+
+# Memory optimization utilities
+def optimize_dataframe_memory(df):
+    """Optimize dataframe memory usage"""
+    import pandas as pd
+    import numpy as np
     
-    @classmethod
-    def get_memory_efficient_config(cls):
-        """Get memory efficient configuration"""
-        return {
-            'chunk_size': cls.get_optimal_chunk_size(),
-            'batch_size': cls.BATCH_SIZE_CPU,
-            'max_train_size': cls.MAX_TRAIN_SIZE,
-            'max_test_size': cls.MAX_TEST_SIZE,
-            'memory_limit_gb': cls.MAX_MEMORY_GB,
-            'target_encoding_chunks': cls.TARGET_ENCODING_CHUNKS,
-            'seq_hash_size': cls.SEQ_HASH_SIZE,
-            'memory_thresholds': {
-                'warning': cls.MEMORY_WARNING_THRESHOLD,
-                'critical': cls.MEMORY_CRITICAL_THRESHOLD,
-                'abort': cls.MEMORY_ABORT_THRESHOLD
-            },
-            'sampling_config': {
-                'aggressive_threshold': cls.AGGRESSIVE_SAMPLING_THRESHOLD,
-                'min_sample_size': cls.MIN_SAMPLE_SIZE,
-                'max_sample_size': cls.MAX_SAMPLE_SIZE
-            },
-            'feature_limits': {
-                'max_features': cls.MAX_FEATURES,
-                'max_categorical_unique': cls.MAX_CATEGORICAL_UNIQUE
-            },
-            'ctr_correction': {
-                'target_ctr': cls.TARGET_CTR,
-                'correction_factor': cls.CTR_CORRECTION_FACTOR,
-                'alignment_weight': cls.CTR_ALIGNMENT_WEIGHT
-            }
-        }
+    for col in df.columns:
+        col_type = df[col].dtype
+        
+        if col_type != 'object':
+            c_min = df[col].min()
+            c_max = df[col].max()
+            
+            if str(col_type)[:3] == 'int':
+                if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
+                    df[col] = df[col].astype(np.int8)
+                elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
+                    df[col] = df[col].astype(np.int16)
+                elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
+                    df[col] = df[col].astype(np.int32)
+            else:
+                if c_min > np.finfo(np.float32).min and c_max < np.finfo(np.float32).max:
+                    df[col] = df[col].astype(np.float32)
     
-    @classmethod
-    def get_processing_config(cls):
-        """Get processing configuration for current system"""
-        available_memory = cls.get_available_memory()
-        memory_usage = cls.get_memory_usage_percent()
-        
-        config = {
-            'chunk_size': cls.get_optimal_chunk_size(),
-            'n_jobs': cls.N_JOBS,
-            'memory_efficient': True,
-            'use_sampling': cls.should_use_sampling(),
-            'available_memory': available_memory,
-            'memory_usage': memory_usage
-        }
-        
-        if available_memory < 25:
-            config.update({
-                'chunk_size': 15000,
-                'n_jobs': max(1, cls.N_JOBS // 2),
-                'aggressive_gc': True
-            })
-        elif available_memory > 30:
-            config.update({
-                'chunk_size': min(80000, cls.CHUNK_SIZE * 2),
-                'n_jobs': cls.N_JOBS,
-                'aggressive_gc': False
-            })
-        
-        return config
+    return df
+
+def emergency_memory_cleanup():
+    """Emergency memory cleanup procedure"""
+    import gc
+    
+    # Multiple garbage collection passes
+    for _ in range(5):
+        gc.collect()
+    
+    # Force cleanup of unreferenced objects
+    if hasattr(gc, 'set_threshold'):
+        gc.set_threshold(700, 10, 10)
 
 # Create default instance
 config = Config()
 
 if __name__ == "__main__":
-    print("CTR Modeling System Configuration Validation")
-    print("=" * 50)
+    print("CTR Modeling System - Memory Optimized Configuration")
+    print("=" * 60)
     
     Config.setup_directories()
     Config.validate_system_requirements()
     Config.validate_paths()
     Config.verify_data_requirements()
     
-    print("\n=== Memory Configuration ===")
-    mem_config = Config.get_memory_efficient_config()
-    for key, value in mem_config.items():
+    print("\n=== Memory Status ===")
+    memory_status = Config.monitor_memory_critical()
+    for key, value in memory_status.items():
         print(f"{key}: {value}")
     
     print(f"\nMemory limit: {Config.MAX_MEMORY_GB}GB")
-    print(f"Current memory usage: {Config.get_memory_usage_percent():.1f}%")
-    print(f"Available for processing: {Config.get_available_memory():.1f}GB")
+    print(f"Safe chunk size: {Config.get_safe_chunk_size()}")
+    print(f"Should use sampling: {Config.should_use_sampling()}")
+    
+    if memory_status['emergency_mode']:
+        print("\n*** EMERGENCY MODE CONFIGURATION ***")
+        emergency_config = Config.get_emergency_config()
+        for key, value in emergency_config.items():
+            print(f"{key}: {value}")
