@@ -1,4 +1,5 @@
 # main.py
+# score : 0.3193693153
 
 import os
 import sys
@@ -123,8 +124,8 @@ def validate_environment() -> bool:
         logger.error(f"Environment validation failed: {e}")
         return False
 
-def safe_train_test_split(X, y, test_size=0.2, random_state=42):
-    """Safe train test split with class imbalance handling and validation data preparation"""
+def safe_train_test_split(X, y, test_size=0.3, random_state=42):
+    """Safe train test split with class imbalance handling"""
     try:
         from sklearn.model_selection import train_test_split
         
@@ -132,20 +133,16 @@ def safe_train_test_split(X, y, test_size=0.2, random_state=42):
         unique_classes, class_counts = np.unique(y, return_counts=True)
         min_class_count = min(class_counts)
         
-        # Calculate actual test size to ensure minimum samples
-        min_val_size = max(1000, int(len(y) * 0.05))  # At least 1000 samples or 5%
-        actual_test_size = min(test_size, min_val_size / len(y))
-        
         # If any class has too few samples, don't stratify
         if min_class_count < 2 or len(y) < 10:
             logger.warning(f"Small dataset ({len(y)} samples) or class imbalance detected. Using simple split.")
             X_train, X_val, y_train, y_val = train_test_split(
-                X, y, test_size=actual_test_size, random_state=random_state
+                X, y, test_size=test_size, random_state=random_state
             )
         else:
             # Safe stratified split
             X_train, X_val, y_train, y_val = train_test_split(
-                X, y, test_size=actual_test_size, random_state=random_state, stratify=y
+                X, y, test_size=test_size, random_state=random_state, stratify=y
             )
         
         # Ensure validation set has both classes
@@ -157,12 +154,9 @@ def safe_train_test_split(X, y, test_size=0.2, random_state=42):
             negative_indices = np.where(y == 0)[0]
             
             if len(positive_indices) >= 1 and len(negative_indices) >= 1:
-                # Take balanced samples for validation
-                pos_val_size = min(len(positive_indices) // 10, 100)
-                neg_val_size = min(len(negative_indices) // 10, 1000)
-                
-                val_pos_idx = np.random.choice(positive_indices, size=pos_val_size, replace=False)
-                val_neg_idx = np.random.choice(negative_indices, size=neg_val_size, replace=False)
+                # Take at least one positive and one negative for validation
+                val_pos_idx = np.random.choice(positive_indices, size=min(1, len(positive_indices)), replace=False)
+                val_neg_idx = np.random.choice(negative_indices, size=min(2, len(negative_indices)), replace=False)
                 val_indices = np.concatenate([val_pos_idx, val_neg_idx])
                 train_indices = np.setdiff1d(np.arange(len(y)), val_indices)
                 
@@ -173,12 +167,8 @@ def safe_train_test_split(X, y, test_size=0.2, random_state=42):
             else:
                 # Fallback to simple split
                 X_train, X_val, y_train, y_val = train_test_split(
-                    X, y, test_size=actual_test_size, random_state=random_state
+                    X, y, test_size=test_size, random_state=random_state
                 )
-        
-        # Validate the split
-        logger.info(f"Data split validation - Train: {len(y_train)}, Val: {len(y_val)}")
-        logger.info(f"Train CTR: {y_train.mean():.4f}, Val CTR: {y_val.mean():.4f}")
         
         return X_train, X_val, y_train, y_val
         
@@ -188,97 +178,8 @@ def safe_train_test_split(X, y, test_size=0.2, random_state=42):
         split_point = int(len(X) * (1 - test_size))
         return X.iloc[:split_point], X.iloc[split_point:], y.iloc[:split_point], y.iloc[split_point:]
 
-def create_unified_model_wrapper(model, model_type: str, scaler=None):
-    """Create unified model wrapper with consistent predict_proba interface"""
-    class UnifiedModelWrapper:
-        def __init__(self, model, model_type, scaler=None):
-            self.model = model
-            self.model_type = model_type
-            self.scaler = scaler
-            self.is_fitted = True
-        
-        def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-            """Unified predict_proba interface for all model types"""
-            try:
-                if self.model_type == 'logistic':
-                    if self.scaler is not None:
-                        X_scaled = self.scaler.transform(X)
-                        proba = self.model.predict_proba(X_scaled)[:, 1]
-                    else:
-                        proba = self.model.predict_proba(X)[:, 1]
-                        
-                elif self.model_type == 'lightgbm':
-                    # Handle both lgb.Booster and sklearn-style models
-                    if hasattr(self.model, 'predict'):
-                        # lgb.Booster object
-                        if hasattr(self.model, 'best_iteration'):
-                            proba = self.model.predict(X, num_iteration=self.model.best_iteration)
-                        else:
-                            proba = self.model.predict(X)
-                    elif hasattr(self.model, 'predict_proba'):
-                        # sklearn-style LGBMClassifier
-                        proba = self.model.predict_proba(X)[:, 1]
-                    else:
-                        raise ValueError(f"Unsupported LightGBM model type: {type(self.model)}")
-                        
-                elif self.model_type == 'xgboost':
-                    if hasattr(self.model, 'predict_proba'):
-                        proba = self.model.predict_proba(X)[:, 1]
-                    elif hasattr(self.model, 'predict'):
-                        # Handle both sklearn-style and native xgboost
-                        proba = self.model.predict(X)
-                    else:
-                        raise ValueError(f"Unsupported XGBoost model type: {type(self.model)}")
-                        
-                else:
-                    raise ValueError(f"Unsupported model type: {self.model_type}")
-                
-                # Ensure output is 1D array with proper bounds
-                proba = np.asarray(proba).flatten()
-                proba = np.clip(proba, 1e-15, 1-1e-15)
-                
-                return proba
-                
-            except Exception as e:
-                logger.error(f"Unified model prediction failed for {self.model_type}: {e}")
-                # Return default CTR predictions
-                return np.full(len(X), 0.0191)
-        
-        def predict(self, X: pd.DataFrame) -> np.ndarray:
-            """Binary prediction"""
-            proba = self.predict_proba(X)
-            return (proba >= 0.5).astype(int)
-    
-    return UnifiedModelWrapper(model, model_type, scaler)
-
-def safe_model_prediction(model, X_test: pd.DataFrame, model_name: str) -> np.ndarray:
-    """Safe model prediction with error handling"""
-    try:
-        if hasattr(model, 'predict_proba'):
-            predictions = model.predict_proba(X_test)
-            # Handle both 1D and 2D arrays
-            if predictions.ndim == 2:
-                if predictions.shape[1] == 2:
-                    predictions = predictions[:, 1]  # Take positive class
-                elif predictions.shape[1] == 1:
-                    predictions = predictions.flatten()
-            
-            predictions = np.asarray(predictions).flatten()
-            predictions = np.clip(predictions, 1e-15, 1-1e-15)
-            
-            logger.info(f"{model_name} prediction successful - shape: {predictions.shape}, mean: {predictions.mean():.4f}")
-            return predictions
-            
-        else:
-            logger.warning(f"{model_name} does not have predict_proba method")
-            return np.full(len(X_test), 0.0191)
-            
-    except Exception as e:
-        logger.error(f"{model_name} prediction failed: {e}")
-        return np.full(len(X_test), 0.0191)
-
 def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[str, Any]]:
-    """Execute complete CTR modeling pipeline with improved error handling"""
+    """Execute complete CTR modeling pipeline"""
     try:
         start_time = time.time()
         
@@ -343,7 +244,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             available_memory = vm.available / (1024**3)
             logger.info(f"Pre-loading memory status: available {available_memory:.1f}GB")
         
-        # Load data with complete processing
+        # Load data
         if quick_mode:
             logger.info("Quick mode: Loading sample data (50 samples)")
             train_df, test_df = data_loader.load_quick_sample_data()
@@ -354,30 +255,6 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         if train_df is None or test_df is None:
             logger.error("Data loading failed")
             return None
-        
-        # Verify test data size
-        expected_test_size = 1527298
-        actual_test_size = len(test_df)
-        
-        if not quick_mode and actual_test_size != expected_test_size:
-            logger.warning(f"Test data size mismatch: expected {expected_test_size}, got {actual_test_size}")
-            # If we're missing test data, reload with full processing
-            logger.info("Attempting to reload test data with full processing")
-            try:
-                from data_loader import StreamingDataLoader
-                streaming_loader = StreamingDataLoader(config)
-                test_df = streaming_loader.load_parquet_streaming(
-                    config.TEST_PATH, 
-                    max_rows=None,
-                    ensure_complete=True
-                )
-                if test_df is not None:
-                    actual_test_size = len(test_df)
-                    logger.info(f"Test data reloaded: {actual_test_size} rows")
-                else:
-                    logger.warning("Test data reload failed, continuing with available data")
-            except Exception as e:
-                logger.warning(f"Test data reload failed: {e}")
         
         logger.info(f"Data loading completed - train: {train_df.shape}, test: {test_df.shape}")
         
@@ -420,9 +297,9 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         ensemble_manager = CTREnsembleManager(config)
         logger.info("Ensemble manager initialization completed")
         
-        # Safe train/validation split with proper validation data
+        # Safe train/validation split
         X_train_split, X_val_split, y_train_split, y_val_split = safe_train_test_split(
-            X_train, y_train, test_size=0.2, random_state=42
+            X_train, y_train, test_size=0.3, random_state=42
         )
         
         logger.info(f"Data split completed - train: {X_train_split.shape}, validation: {X_val_split.shape}")
@@ -435,7 +312,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             models_to_train = available_models
             logger.info(f"Full mode: Training all models {models_to_train}")
         
-        # Train models with unified wrapper
+        # Train models
         trained_models = {}
         model_performances = {}
         
@@ -446,7 +323,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             force_memory_cleanup()
             
             try:
-                # Train model with proper validation data
+                # Train model
                 model, performance = trainer.train_model(
                     model_name=model_name,
                     X_train=X_train_split,
@@ -456,30 +333,14 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                     quick_mode=quick_mode
                 )
                 
-                if model is not None and performance:
-                    # Create unified wrapper for consistent interface
-                    if model_name == 'logistic':
-                        scaler = getattr(model, 'scaler', None)
-                        unified_model = create_unified_model_wrapper(
-                            model.model if hasattr(model, 'model') else model, 
-                            model_name, 
-                            scaler
-                        )
-                    else:
-                        unified_model = create_unified_model_wrapper(
-                            model.model if hasattr(model, 'model') else model, 
-                            model_name
-                        )
-                    
-                    trained_models[model_name] = unified_model
+                if model is not None:
+                    trained_models[model_name] = model
                     model_performances[model_name] = performance
                     
-                    # Add to ensemble with unified wrapper
-                    ensemble_manager.add_base_model(model_name, unified_model)
+                    # Add to ensemble - Fixed parameter order
+                    ensemble_manager.add_base_model(model_name, model)
                     
-                    # Log actual performance values
                     logger.info(f"{model_name} model training completed successfully")
-                    logger.info(f"{model_name} performance - AUC: {performance.get('auc', 0.0):.4f}, AP: {performance.get('ap', 0.0):.4f}")
                 else:
                     logger.error(f"{model_name} model training failed")
                     
@@ -502,7 +363,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             ensemble_enabled = False
         elif ensemble_enabled:
             try:
-                # Prepare ensemble with proper validation data
+                # Prepare ensemble
                 ensemble_manager.train_all_ensembles(X_val_split, y_val_split)
                 ensemble_used = True
                 logger.info("Ensemble preparation completed")
@@ -519,143 +380,69 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.info("Submission file generation started")
         logger.info(f"Test data size: {len(X_test)} rows")
         
-        # Generate predictions with improved error handling
-        predictions = None
-        
+        # Generate predictions
         if ensemble_used and ensemble_manager.final_ensemble and ensemble_manager.final_ensemble.is_fitted:
             logger.info("Using ensemble for prediction")
-            try:
-                # Get base model predictions with safe wrapper
-                base_predictions = {}
-                for name, model in trained_models.items():
-                    try:
-                        pred = safe_model_prediction(model, X_test, name)
-                        base_predictions[name] = pred
-                        logger.info(f"{name} prediction completed - mean: {pred.mean():.4f}")
-                    except Exception as e:
-                        logger.warning(f"Prediction failed for {name}: {e}")
-                        base_predictions[name] = np.full(len(X_test), 0.0191)
-                
-                # Ensemble prediction with error handling
+            # Get base model predictions
+            base_predictions = {}
+            for name, model in trained_models.items():
                 try:
-                    predictions = ensemble_manager.final_ensemble.predict_proba(base_predictions)
-                    predictions = np.asarray(predictions).flatten()
-                    predictions = np.clip(predictions, 1e-15, 1-1e-15)
-                    logger.info(f"Ensemble prediction completed - mean: {predictions.mean():.4f}")
+                    pred = model.predict_proba(X_test)
+                    base_predictions[name] = pred
                 except Exception as e:
-                    logger.warning(f"Ensemble prediction failed: {e}")
-                    # Fallback to simple average
-                    valid_preds = [pred for pred in base_predictions.values() if len(pred) == len(X_test)]
-                    if valid_preds:
-                        predictions = np.mean(valid_preds, axis=0)
-                        logger.info(f"Using simple average fallback - mean: {predictions.mean():.4f}")
-                    else:
-                        predictions = None
-                
-            except Exception as e:
-                logger.error(f"Ensemble prediction process failed: {e}")
-                predictions = None
-        
-        # Single model fallback
-        if predictions is None:
-            logger.info("Using single best model prediction")
+                    logger.warning(f"Prediction failed for {name}: {e}")
+                    base_predictions[name] = np.full(len(X_test), 0.0191)
+            
+            # Ensemble prediction
             try:
-                # Get best model by performance
-                if model_performances:
-                    best_model_name = max(model_performances.keys(), 
-                                        key=lambda k: model_performances[k].get('auc', 0))
-                else:
-                    best_model_name = list(trained_models.keys())[0]
-                
-                logger.info(f"Using single model: {best_model_name}")
-                best_model = trained_models[best_model_name]
-                predictions = safe_model_prediction(best_model, X_test, best_model_name)
-                logger.info(f"Single model prediction completed - mean: {predictions.mean():.4f}")
-                
+                predictions = ensemble_manager.final_ensemble.predict_proba(base_predictions)
+            except Exception as e:
+                logger.warning(f"Ensemble prediction failed: {e}")
+                predictions = np.mean(list(base_predictions.values()), axis=0)
+        else:
+            # Use single best model
+            best_model_name = list(trained_models.keys())[0]
+            logger.info(f"Using single model: {best_model_name}")
+            best_model = trained_models[best_model_name]
+            try:
+                predictions = best_model.predict_proba(X_test)
             except Exception as e:
                 logger.error(f"Single model prediction failed: {e}")
                 predictions = np.full(len(X_test), 0.0191)
-                logger.warning("Using default CTR predictions")
         
-        # Ensure predictions are valid
-        if predictions is None:
-            predictions = np.full(len(X_test), 0.0191)
-            logger.warning("Using default predictions due to all failures")
-        
-        predictions = np.clip(predictions, 1e-15, 1-1e-15)
-        
-        # Create submission dataframe with proper ID handling
+        # Load sample submission to get proper ID format
         try:
             sample_submission = pd.read_csv('data/sample_submission.csv')
-            
             if len(sample_submission) != len(predictions):
                 logger.warning(f"Sample submission length ({len(sample_submission)}) != predictions length ({len(predictions)})")
-                
-                # If we have the correct number of test samples, use them
-                if len(predictions) == expected_test_size:
-                    # Generate IDs to match expected format
-                    submission_df = pd.DataFrame({
-                        'ID': sample_submission['ID'].iloc[:len(predictions)].values if len(sample_submission) >= len(predictions) else [f"TEST_{i:07d}" for i in range(len(predictions))],
-                        'clicked': predictions
-                    })
-                else:
-                    # Use available predictions and pad if necessary
-                    if len(predictions) < len(sample_submission):
-                        # Repeat predictions to fill sample submission
-                        repeat_count = len(sample_submission) // len(predictions)
-                        remainder = len(sample_submission) % len(predictions)
-                        
-                        expanded_predictions = np.tile(predictions, repeat_count)
-                        if remainder > 0:
-                            expanded_predictions = np.concatenate([
-                                expanded_predictions, 
-                                predictions[:remainder]
-                            ])
-                        
-                        submission_df = pd.DataFrame({
-                            'ID': sample_submission['ID'].values,
-                            'clicked': expanded_predictions
-                        })
-                        
-                        logger.info(f"Expanded predictions from {len(predictions)} to {len(expanded_predictions)}")
-                    else:
-                        # Truncate predictions to match sample submission
-                        submission_df = pd.DataFrame({
-                            'ID': sample_submission['ID'].values,
-                            'clicked': predictions[:len(sample_submission)]
-                        })
-                        logger.info(f"Truncated predictions from {len(predictions)} to {len(sample_submission)}")
+                # Generate IDs in same format as sample
+                submission_df = pd.DataFrame({
+                    'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
+                    'clicked': predictions
+                })
             else:
-                # Perfect match
+                # Use IDs from sample submission
                 submission_df = pd.DataFrame({
                     'ID': sample_submission['ID'].values,
                     'clicked': predictions
                 })
-                
         except Exception as e:
             logger.warning(f"Could not load sample submission: {e}")
-            # Generate IDs based on expected format
+            # Fallback: generate IDs in expected format
             submission_df = pd.DataFrame({
                 'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
                 'clicked': predictions
             })
         
-        # Save submission
         submission_path = 'submission.csv'
         submission_df.to_csv(submission_path, index=False)
         logger.info(f"Submission file saved: {submission_path}")
-        logger.info(f"Submission statistics: mean={submission_df['clicked'].mean():.4f}, std={submission_df['clicked'].std():.4f}")
+        logger.info(f"Submission statistics: mean={predictions.mean():.4f}, std={predictions.std():.4f}")
         
         # Phase 6: Final Results
         logger.info("=== Pipeline completed ===")
         
         execution_time = time.time() - start_time
-        
-        # Calculate calibration status
-        calibration_applied = any(
-            getattr(model, 'is_calibrated', False) 
-            for model in trained_models.values()
-        )
         
         results = {
             'quick_mode': quick_mode,
@@ -663,12 +450,10 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             'successful_models': len(trained_models),
             'ensemble_enabled': ensemble_enabled,
             'ensemble_used': ensemble_used,
-            'calibration_applied': calibration_applied,
+            'calibration_applied': False,
             'submission_file': submission_path,
-            'submission_rows': len(submission_df),
-            'model_performances': model_performances,
-            'final_prediction_mean': float(submission_df['clicked'].mean()),
-            'final_prediction_std': float(submission_df['clicked'].std())
+            'submission_rows': len(predictions),
+            'model_performances': model_performances
         }
         
         logger.info(f"Mode: {'QUICK (50 samples)' if quick_mode else 'FULL dataset'}")
@@ -676,9 +461,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.info(f"Successful models: {len(trained_models)}")
         logger.info(f"Ensemble activated: {'Yes' if ensemble_enabled else 'No'}")
         logger.info(f"Ensemble actually used: {'Yes' if ensemble_used else 'No'}")
-        logger.info(f"Calibration applied: {'Yes' if results['calibration_applied'] else 'No'}")
-        logger.info(f"Submission file: {len(submission_df)} rows")
-        logger.info(f"Final prediction - Mean: {results['final_prediction_mean']:.4f}, Std: {results['final_prediction_std']:.4f}")
+        logger.info(f"Submission file: {len(predictions)} rows")
         
         # Final memory status
         if PSUTIL_AVAILABLE:
@@ -842,7 +625,7 @@ def main():
                         logger.info("Performance analysis completed")
                         logger.info(f"Analysis results saved: {results['successful_models']} reports")
                     
-                    # Print final summary with actual performance values
+                    # Print final summary
                     logger.info("================================================================================")
                     logger.info("FINAL PERFORMANCE ANALYSIS SUMMARY")
                     logger.info("================================================================================")
@@ -855,23 +638,22 @@ def main():
                     
                     for model_name, perf in results.get('model_performances', {}).items():
                         logger.info(f"{model_name}:")
-                        logger.info(f"  AUC Score: {perf.get('auc', 0.0):.4f}")
-                        logger.info(f"  AP Score: {perf.get('ap', 0.0):.4f}")
-                        logger.info(f"  Combined Score: {(perf.get('auc', 0.0) * 0.6 + perf.get('ap', 0.0) * 0.4):.4f}")
+                        logger.info(f"  Combined Score: {perf.get('combined_score', 0.0):.4f}")
+                        logger.info(f"  AP Score: {perf.get('ap_score', 0.0):.4f}")
+                        logger.info(f"  AUC Score: {perf.get('auc_score', 'nan')}")
+                        logger.info(f"  CTR Quality: {perf.get('ctr_quality', 'UNKNOWN')}")
+                        logger.info(f"  CTR Bias: {perf.get('ctr_bias', 0.0):.6f}")
+                        logger.info(f"  Performance Tier: {perf.get('performance_tier', 'UNKNOWN')}")
                         logger.info("")
                     
                     target_score = 0.34
-                    best_combined_score = max([(perf.get('auc', 0.0) * 0.6 + perf.get('ap', 0.0) * 0.4) 
-                                              for perf in results.get('model_performances', {}).values()], default=0)
+                    achieving_models = sum(1 for perf in results.get('model_performances', {}).values() 
+                                         if perf.get('combined_score', 0.0) >= target_score)
                     
                     logger.info("TARGET ACHIEVEMENT STATUS:")
                     logger.info("--------------------------------------------------")
                     logger.info(f"Target Combined Score: {target_score}")
-                    logger.info(f"Best Achieved Score: {best_combined_score:.4f}")
-                    logger.info(f"Target Achievement: {'Yes' if best_combined_score >= target_score else 'No'}")
-                    logger.info(f"Final Prediction Statistics:")
-                    logger.info(f"  - Mean CTR: {results.get('final_prediction_mean', 0.0):.4f}")
-                    logger.info(f"  - Std CTR: {results.get('final_prediction_std', 0.0):.4f}")
+                    logger.info(f"Models Achieving Target: {achieving_models}/{results['successful_models']}")
                     logger.info("")
                     logger.info("OUTPUT FILES:")
                     logger.info("--------------------------------------------------")
