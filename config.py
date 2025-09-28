@@ -63,141 +63,141 @@ class Config:
     USE_MIXED_PRECISION = True
     GPU_OPTIMIZATION_LEVEL = 3
     
-    # Memory settings - adjusted for stability
-    MAX_MEMORY_GB = 55  # Reduced from 60 for safety margin
-    CHUNK_SIZE = 100000  # Increased for efficiency
-    BATCH_SIZE_GPU = 16384  # Increased for better GPU utilization
-    BATCH_SIZE_CPU = 4096  
-    PREFETCH_FACTOR = 4
-    NUM_WORKERS = 8
+    # Memory settings - optimized for performance
+    MAX_MEMORY_GB = 58  # Increased from 55 for better performance
+    CHUNK_SIZE = 150000  # Increased from 100000 for efficiency
+    BATCH_SIZE_GPU = 20480  # Increased for better GPU utilization
+    BATCH_SIZE_CPU = 6144  # Increased from 4096
+    PREFETCH_FACTOR = 6  # Increased from 4
+    NUM_WORKERS = 10  # Increased from 8
     
-    # Memory thresholds
-    MEMORY_WARNING_THRESHOLD = 45  # Adjusted for 64GB system
-    MEMORY_CRITICAL_THRESHOLD = 50
-    MEMORY_ABORT_THRESHOLD = 58
+    # Memory thresholds - adjusted for performance
+    MEMORY_WARNING_THRESHOLD = 48  # Increased threshold
+    MEMORY_CRITICAL_THRESHOLD = 53  # Increased threshold
+    MEMORY_ABORT_THRESHOLD = 60
     
-    # Data size limits - increased for full data processing
-    MAX_TRAIN_SIZE = 12000000  # Increased to handle full dataset
-    MAX_TEST_SIZE = 2000000
-    MAX_INTERACTION_FEATURES = 50  # Reduced for memory efficiency
+    # Data size limits - optimized for full dataset
+    MAX_TRAIN_SIZE = 15000000  # Increased from 12000000
+    MAX_TEST_SIZE = 2500000  # Increased from 2000000
+    MAX_INTERACTION_FEATURES = 80  # Increased from 50
     
-    # Model training settings - tuned for CTR prediction accuracy
+    # Model training settings - optimized for performance
     MODEL_TRAINING_CONFIG = {
         'lightgbm': {
-            'max_depth': 4,  # Reduced for better generalization
-            'num_leaves': 15,  # Significantly reduced
-            'min_data_in_leaf': 300,  # Increased for regularization
-            'feature_fraction': 0.6,  # Reduced for regularization
-            'bagging_fraction': 0.6,
+            'max_depth': 6,  # Increased from 4 for better capacity
+            'num_leaves': 63,  # Increased from 15 for more complexity
+            'min_data_in_leaf': 200,  # Reduced from 300 for better learning
+            'feature_fraction': 0.8,  # Increased from 0.6
+            'bagging_fraction': 0.8,  # Increased from 0.6
             'bagging_freq': 5,
-            'lambda_l1': 1.0,  # Increased regularization
-            'lambda_l2': 1.0,
-            'min_gain_to_split': 0.05,  # Increased threshold
-            'max_cat_threshold': 16,  # Reduced
-            'cat_smooth': 20.0,  # Increased smoothing
-            'cat_l2': 20.0,
-            'learning_rate': 0.02,  # Reduced learning rate
-            'num_iterations': 500,  # Reduced iterations
-            'scale_pos_weight': 52.3,  # Adjust for class imbalance
+            'lambda_l1': 0.5,  # Reduced from 1.0 for less regularization
+            'lambda_l2': 0.5,  # Reduced from 1.0
+            'min_gain_to_split': 0.02,  # Reduced from 0.05
+            'max_cat_threshold': 32,  # Increased from 16
+            'cat_smooth': 10.0,  # Reduced from 20.0
+            'cat_l2': 10.0,  # Reduced from 20.0
+            'learning_rate': 0.05,  # Increased from 0.02
+            'num_iterations': 800,  # Increased from 500
+            'scale_pos_weight': 52.3,
             'is_unbalance': True
         },
         'xgboost': {
-            'max_depth': 4,  # Reduced depth
-            'learning_rate': 0.03,  # Reduced learning rate
-            'n_estimators': 400,  # Reduced estimators
-            'subsample': 0.6,  # Reduced subsample
-            'colsample_bytree': 0.6,
-            'min_child_weight': 15,  # Increased
-            'gamma': 0.2,  # Increased regularization
-            'alpha': 1.0,  # Increased L1 regularization
-            'lambda': 1.0,  # Increased L2 regularization
-            'scale_pos_weight': 52.3,  # Adjust for class imbalance
-            'reg_alpha': 1.0,
-            'reg_lambda': 1.0
+            'max_depth': 6,  # Increased from 4
+            'learning_rate': 0.05,  # Increased from 0.03
+            'n_estimators': 600,  # Increased from 400
+            'subsample': 0.8,  # Increased from 0.6
+            'colsample_bytree': 0.8,  # Increased from 0.6
+            'min_child_weight': 10,  # Reduced from 15
+            'gamma': 0.1,  # Reduced from 0.2
+            'alpha': 0.5,  # Reduced from 1.0
+            'lambda': 0.5,  # Reduced from 1.0
+            'scale_pos_weight': 52.3,
+            'reg_alpha': 0.5,  # Reduced from 1.0
+            'reg_lambda': 0.5  # Reduced from 1.0
         },
         'logistic': {
-            'C': 0.01,  # Much stronger regularization
+            'C': 0.1,  # Increased from 0.01 for less regularization
             'penalty': 'l2',
             'solver': 'saga',
-            'max_iter': 3000,  # Reduced iterations
+            'max_iter': 5000,  # Increased from 3000
             'class_weight': 'balanced',
             'random_state': 42,
-            'tol': 0.0001
+            'tol': 0.00001  # Tighter tolerance
         }
     }
     
-    # Feature engineering settings - focused on CTR prediction
+    # Feature engineering settings - expanded for better features
     FEATURE_ENGINEERING_CONFIG = {
         'enable_interaction_features': True,
-        'enable_polynomial_features': False,  # Disabled for memory and simplicity
+        'enable_polynomial_features': True,  # Re-enabled
         'enable_binning': True,
         'enable_target_encoding': True,
         'enable_frequency_encoding': True,
-        'enable_statistical_features': True,  # Re-enabled with memory limits
-        'max_interaction_degree': 2,
-        'binning_strategy': 'uniform',  # Changed from quantile to uniform
-        'n_bins': 5,  # Reduced bins
-        'min_frequency': 20,  # Increased threshold
-        'target_encoding_smoothing': 50.0,  # Much higher smoothing for CTR bias
-        'enable_cross_validation_encoding': False
+        'enable_statistical_features': True,
+        'max_interaction_degree': 3,  # Increased from 2
+        'binning_strategy': 'quantile',  # Changed back to quantile
+        'n_bins': 8,  # Increased from 5
+        'min_frequency': 10,  # Reduced from 20
+        'target_encoding_smoothing': 20.0,  # Reduced from 50.0
+        'enable_cross_validation_encoding': True  # Re-enabled
     }
     
     # Cross-validation settings
-    CV_FOLDS = 3
+    CV_FOLDS = 5  # Increased from 3
     CV_SHUFFLE = True
     RANDOM_STATE = 42
     
     # Early stopping settings
-    EARLY_STOPPING_ROUNDS = 100  # Reduced
-    EARLY_STOPPING_TOLERANCE = 1e-4
+    EARLY_STOPPING_ROUNDS = 150  # Increased from 100
+    EARLY_STOPPING_TOLERANCE = 1e-5  # Tighter tolerance
     
-    # Hyperparameter tuning settings
-    OPTUNA_N_TRIALS = 30  # Reduced
-    OPTUNA_TIMEOUT = 1200  # Reduced
-    OPTUNA_N_JOBS = 1
+    # Hyperparameter tuning settings - significantly increased
+    OPTUNA_N_TRIALS = 150  # Increased from 30
+    OPTUNA_TIMEOUT = 3600  # Increased from 1200
+    OPTUNA_N_JOBS = 2  # Increased from 1
     OPTUNA_VERBOSITY = 1
     
-    # Ensemble settings - simplified strategy
+    # Ensemble settings - enhanced strategy
     ENSEMBLE_CONFIG = {
-        'voting_weights': {'lightgbm': 0.4, 'xgboost': 0.3, 'logistic': 0.3},
-        'stacking_cv_folds': 3,
-        'blending_ratio': 0.7,
-        'diversity_threshold': 0.05,
-        'performance_threshold': 0.25,  # Lowered threshold
-        'enable_meta_features': False,
-        'use_simple_average': True
+        'voting_weights': {'lightgbm': 0.45, 'xgboost': 0.35, 'logistic': 0.2},  # Adjusted weights
+        'stacking_cv_folds': 5,  # Increased from 3
+        'blending_ratio': 0.8,  # Increased from 0.7
+        'diversity_threshold': 0.03,  # Reduced from 0.05
+        'performance_threshold': 0.20,  # Reduced threshold
+        'enable_meta_features': True,  # Re-enabled
+        'use_simple_average': False  # Disabled for better ensembling
     }
     
-    # Calibration settings - mandatory and aggressive
+    # Calibration settings - optimized
     CALIBRATION_METHOD = 'isotonic'
-    CALIBRATION_CV_FOLDS = 3
+    CALIBRATION_CV_FOLDS = 5  # Increased from 3
     CALIBRATION_MANDATORY = True
     
-    # Evaluation configuration - CTR-focused tuning
+    # Evaluation configuration - balanced for performance
     EVALUATION_CONFIG = {
-        'ap_weight': 0.5,  # Reduced AP weight
-        'wll_weight': 0.5,  # Increased WLL weight
+        'ap_weight': 0.6,  # Increased AP weight for better CTR prediction
+        'wll_weight': 0.4,  # Reduced WLL weight
         'target_combined_score': 0.34,
         'target_ctr': 0.0191,
-        'ctr_tolerance': 0.0005,  # Tighter tolerance
-        'bias_penalty_weight': 15.0,  # Much higher penalty for CTR bias
-        'calibration_weight': 0.7,  # Increased calibration importance
+        'ctr_tolerance': 0.0003,  # Tighter tolerance
+        'bias_penalty_weight': 8.0,  # Reduced from 15.0 for less aggressive penalty
+        'calibration_weight': 0.6,  # Reduced from 0.7
         'pos_weight': 52.3,
         'neg_weight': 1.0,
-        'wll_normalization_factor': 1.8,  # Adjusted normalization
-        'ctr_bias_multiplier': 20.0  # Strong CTR bias penalty
+        'wll_normalization_factor': 2.2,  # Increased from 1.8
+        'ctr_bias_multiplier': 12.0  # Reduced from 20.0
     }
     
-    # CTR bias correction settings - much more aggressive
+    # CTR bias correction settings - less aggressive
     CTR_BIAS_CORRECTION = {
         'enable': True,
         'target_ctr': 0.0191,
-        'correction_factor': 0.15,  # Much more aggressive correction (85% reduction)
+        'correction_factor': 0.25,  # Less aggressive (was 0.15)
         'post_processing': True,
-        'clip_range': (0.001, 0.08),  # Tighter range
-        'bias_threshold': 0.0002,  # Strict threshold
-        'calibration_strength': 2.0,  # Strong calibration
-        'prediction_scaling': 0.38  # Additional scaling factor
+        'clip_range': (0.0005, 0.1),  # Wider range
+        'bias_threshold': 0.0003,  # Tighter threshold
+        'calibration_strength': 1.5,  # Reduced from 2.0
+        'prediction_scaling': 0.5  # Less aggressive scaling
     }
     
     # Evaluation metrics
@@ -215,15 +215,15 @@ class Config:
     # Performance settings
     ENABLE_PARALLEL_PROCESSING = True
     ENABLE_MEMORY_MAPPING = False
-    ENABLE_CACHING = False
-    CACHE_SIZE_MB = 1024
+    ENABLE_CACHING = True  # Re-enabled for performance
+    CACHE_SIZE_MB = 2048  # Increased from 1024
     
     # Large dataset specific settings
     LARGE_DATASET_MODE = True
     MEMORY_EFFICIENT_SAMPLING = True
-    AGGRESSIVE_SAMPLING_THRESHOLD = 0.5
-    MIN_SAMPLE_SIZE = 1000000
-    MAX_SAMPLE_SIZE = 5000000
+    AGGRESSIVE_SAMPLING_THRESHOLD = 0.6  # Increased from 0.5
+    MIN_SAMPLE_SIZE = 2000000  # Increased from 1000000
+    MAX_SAMPLE_SIZE = 8000000  # Increased from 5000000
     
     # RTX 4060 Ti specific settings
     RTX_4060_TI_OPTIMIZATION = True

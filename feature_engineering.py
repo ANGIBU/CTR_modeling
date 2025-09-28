@@ -7,9 +7,13 @@ import logging
 import time
 import gc
 import warnings
+import os
+import pickle
+import tempfile
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler, LabelEncoder, TargetEncoder
 from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.model_selection import KFold
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import joblib
@@ -19,7 +23,7 @@ from data_loader import MemoryMonitor
 logger = logging.getLogger(__name__)
 
 class CTRFeatureEngineer:
-    """CTR feature engineering class"""
+    """CTR feature engineering class with enhanced capabilities"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -47,6 +51,8 @@ class CTRFeatureEngineer:
         self.binning_features = []
         self.rank_features = []
         self.ratio_features = []
+        self.advanced_features = []
+        self.clustering_features = []
         self.removed_columns = []
         self.original_feature_order = []
         self.final_feature_columns = []
@@ -87,8 +93,8 @@ class CTRFeatureEngineer:
             logger.info("=== Quick Mode Feature Engineering Started ===")
             return self.create_quick_features(train_df, test_df, target_col)
         else:
-            logger.info("=== Full Feature Engineering Started ===")
-            return self.create_all_features(train_df, test_df, target_col)
+            logger.info("=== Enhanced Feature Engineering Started ===")
+            return self.create_enhanced_features(train_df, test_df, target_col)
     
     def create_quick_features(self,
                             train_df: pd.DataFrame,
@@ -134,12 +140,12 @@ class CTRFeatureEngineer:
             logger.error(f"Quick feature engineering failed: {e}")
             return self._create_minimal_features(train_df, test_df, target_col)
     
-    def create_all_features(self, 
-                          train_df: pd.DataFrame, 
-                          test_df: pd.DataFrame, 
-                          target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Complete feature engineering pipeline for full dataset processing"""
-        logger.info("Creating comprehensive features for full dataset")
+    def create_enhanced_features(self, 
+                               train_df: pd.DataFrame, 
+                               test_df: pd.DataFrame, 
+                               target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Enhanced feature engineering pipeline for full dataset processing"""
+        logger.info("Creating enhanced features for full dataset")
         
         try:
             self._initialize_processing(train_df, test_df, target_col)
@@ -158,61 +164,70 @@ class CTRFeatureEngineer:
             
             # Memory check for full processing
             memory_status = self.memory_monitor.get_memory_status()
-            if not memory_status['should_cleanup'] and memory_status['available_gb'] > 8:
-                logger.info("Full feature engineering enabled - sufficient memory available")
+            if not memory_status['should_cleanup'] and memory_status['available_gb'] > 10:
+                logger.info("Enhanced feature engineering enabled - sufficient memory available")
                 
-                # 5. Target encoding features
-                X_train, X_test = self._create_target_encoding_features(X_train, X_test, y_train)
+                # 5. Enhanced target encoding features
+                X_train, X_test = self._create_enhanced_target_encoding_features(X_train, X_test, y_train)
                 
-                # 6. Interaction feature creation
-                X_train, X_test = self._create_interaction_features(X_train, X_test, y_train)
+                # 6. Expanded interaction feature creation
+                X_train, X_test = self._create_expanded_interaction_features(X_train, X_test, y_train)
                 
-                # 7. Statistical features
-                X_train, X_test = self._create_statistical_features(X_train, X_test)
+                # 7. Enhanced statistical features
+                X_train, X_test = self._create_enhanced_statistical_features(X_train, X_test)
                 
-                # 8. Frequency-based features
-                X_train, X_test = self._create_frequency_features(X_train, X_test)
+                # 8. Frequency-based features with CV
+                X_train, X_test = self._create_cv_frequency_features(X_train, X_test, y_train)
                 
-                # 9. Cross features
-                X_train, X_test = self._create_cross_features(X_train, X_test, y_train)
+                # 9. Enhanced cross features
+                X_train, X_test = self._create_enhanced_cross_features(X_train, X_test, y_train)
                 
                 # 10. Time-based features
                 X_train, X_test = self._create_temporal_features(X_train, X_test)
                 
-                # 11. Binning features - FIXED VERSION
+                # 11. Enhanced binning features
                 if self.config.FEATURE_ENGINEERING_CONFIG.get('enable_binning', True):
-                    X_train, X_test = self._create_binning_features_fixed(X_train, X_test)
+                    X_train, X_test = self._create_enhanced_binning_features(X_train, X_test)
                 
-                # 12. Rank features
-                X_train, X_test = self._create_rank_features(X_train, X_test)
+                # 12. Rank features with multiple methods
+                X_train, X_test = self._create_enhanced_rank_features(X_train, X_test)
                 
-                # 13. Ratio features
-                X_train, X_test = self._create_ratio_features(X_train, X_test)
+                # 13. Enhanced ratio features
+                X_train, X_test = self._create_enhanced_ratio_features(X_train, X_test)
                 
                 # 14. Polynomial features
                 if self.config.FEATURE_ENGINEERING_CONFIG.get('enable_polynomial_features', True):
-                    X_train, X_test = self._create_polynomial_features(X_train, X_test)
+                    X_train, X_test = self._create_enhanced_polynomial_features(X_train, X_test)
+                
+                # 15. Clustering-based features
+                X_train, X_test = self._create_clustering_features(X_train, X_test)
+                
+                # 16. Advanced mathematical features
+                X_train, X_test = self._create_advanced_math_features(X_train, X_test)
                 
             else:
                 logger.warning("Simplified feature engineering due to memory constraints")
+                # Fallback to basic enhanced features
+                X_train, X_test = self._create_target_encoding_features(X_train, X_test, y_train)
+                X_train, X_test = self._create_interaction_features(X_train, X_test, y_train)
             
-            # 15. Safe categorical feature encoding
+            # 17. Safe categorical feature encoding
             X_train, X_test = self._encode_categorical_features_safe(X_train, X_test, y_train)
             
-            # 16. Numeric feature transformation
+            # 18. Numeric feature transformation
             X_train, X_test = self._create_numeric_features(X_train, X_test)
             
-            # 17. Final data cleanup
-            X_train, X_test = self._final_data_cleanup(X_train, X_test)
+            # 19. Final data cleanup and optimization
+            X_train, X_test = self._final_data_cleanup_enhanced(X_train, X_test)
             
             self._finalize_processing(X_train, X_test)
             
-            logger.info(f"=== Feature engineering completed: {X_train.shape} ===")
+            logger.info(f"=== Enhanced feature engineering completed: {X_train.shape} ===")
             
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Feature engineering failed: {e}")
+            logger.error(f"Enhanced feature engineering failed: {e}")
             self.memory_monitor.force_memory_cleanup()
             
             # Use basic features only on failure
@@ -229,7 +244,7 @@ class CTRFeatureEngineer:
             
             self.original_feature_order = sorted([col for col in train_df.columns if col != self.target_column])
             
-            mode_info = "QUICK MODE" if self.quick_mode else "FULL MODE"
+            mode_info = "QUICK MODE" if self.quick_mode else "ENHANCED MODE"
             logger.info(f"Feature engineering initialization ({mode_info})")
             logger.info(f"Initial data: Training {train_df.shape}, Test {test_df.shape}")
             logger.info(f"Target column: {self.target_column}")
@@ -347,7 +362,7 @@ class CTRFeatureEngineer:
             return df
     
     def _safe_fillna(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Safe fillna that handles categorical columns properly - FIXED VERSION"""
+        """Safe fillna that handles categorical columns properly"""
         try:
             df_filled = self._convert_categorical_to_object(df)
             
@@ -368,7 +383,7 @@ class CTRFeatureEngineer:
             return df_converted.fillna(0)
     
     def _unify_data_types_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Safe data type unification - FIXED VERSION"""
+        """Safe data type unification"""
         try:
             # Convert categorical columns to object first
             X_train = self._convert_categorical_to_object(X_train)
@@ -428,7 +443,7 @@ class CTRFeatureEngineer:
             return X_train, X_test
     
     def _clean_basic_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Clean basic features - FIXED VERSION"""
+        """Clean basic features"""
         try:
             # Fill missing values with safe handling
             X_train = self._safe_fillna(X_train)
@@ -447,67 +462,86 @@ class CTRFeatureEngineer:
             
             return X_train, X_test
     
-    def _create_target_encoding_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create target encoding features with memory efficiency"""
+    def _create_enhanced_target_encoding_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Create enhanced target encoding features with cross-validation"""
         try:
             if len(self.categorical_features) == 0:
                 return X_train, X_test
             
-            logger.info("Creating target encoding features")
+            logger.info("Creating enhanced target encoding features")
             
             # Select top categorical features by cardinality
             cat_features_to_encode = []
             for col in self.categorical_features:
                 if col in X_train.columns:
                     cardinality = X_train[col].nunique()
-                    if 2 < cardinality < 1000:  # Skip binary and high-cardinality features
+                    if 2 < cardinality < 2000:  # Expanded range
                         cat_features_to_encode.append(col)
             
-            # Limit to top 10 features for memory efficiency
-            if len(cat_features_to_encode) > 10:
-                cat_features_to_encode = cat_features_to_encode[:10]
+            # Expanded to top 20 features for enhanced performance
+            if len(cat_features_to_encode) > 20:
+                cat_features_to_encode = cat_features_to_encode[:20]
             
             for col in cat_features_to_encode:
                 try:
-                    # Create target encoder with smoothing
-                    encoder = TargetEncoder(target_type='binary', smooth='auto')
-                    
                     # Ensure columns are object type
                     X_train[col] = X_train[col].astype('object')
                     X_test[col] = X_test[col].astype('object')
                     
-                    # Fit and transform
-                    X_train_encoded = encoder.fit_transform(X_train[[col]], y_train).flatten()
-                    X_test_encoded = encoder.transform(X_test[[col]]).flatten()
-                    
-                    # Add encoded feature
-                    feature_name = f"{col}_target_encoded"
-                    X_train[feature_name] = X_train_encoded
-                    X_test[feature_name] = X_test_encoded
+                    if self.config.FEATURE_ENGINEERING_CONFIG.get('enable_cross_validation_encoding', True):
+                        # Cross-validation target encoding
+                        encoded_train = np.zeros(len(X_train))
+                        kf = KFold(n_splits=5, shuffle=True, random_state=42)
+                        
+                        for train_idx, val_idx in kf.split(X_train):
+                            encoder = TargetEncoder(target_type='binary', smooth='auto')
+                            encoded_train[val_idx] = encoder.fit_transform(
+                                X_train[col].iloc[train_idx].values.reshape(-1, 1), 
+                                y_train.iloc[train_idx]
+                            ).flatten()
+                        
+                        # Train encoder on full data for test set
+                        encoder = TargetEncoder(target_type='binary', smooth='auto')
+                        encoder.fit(X_train[[col]], y_train)
+                        encoded_test = encoder.transform(X_test[[col]]).flatten()
+                        
+                        feature_name = f"{col}_target_encoded_cv"
+                        X_train[feature_name] = encoded_train
+                        X_test[feature_name] = encoded_test
+                    else:
+                        # Simple target encoding
+                        encoder = TargetEncoder(target_type='binary', smooth='auto')
+                        
+                        X_train_encoded = encoder.fit_transform(X_train[[col]], y_train).flatten()
+                        X_test_encoded = encoder.transform(X_test[[col]]).flatten()
+                        
+                        feature_name = f"{col}_target_encoded"
+                        X_train[feature_name] = X_train_encoded
+                        X_test[feature_name] = X_test_encoded
                     
                     # Store encoder
                     self.target_encoders[col] = encoder
                     self.target_encoding_features.append(feature_name)
                     
                 except Exception as e:
-                    logger.warning(f"Target encoding failed for {col}: {e}")
+                    logger.warning(f"Enhanced target encoding failed for {col}: {e}")
                     continue
             
-            logger.info(f"Target encoding completed: {len(self.target_encoding_features)} features created")
+            logger.info(f"Enhanced target encoding completed: {len(self.target_encoding_features)} features created")
             
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Target encoding features failed: {e}")
+            logger.error(f"Enhanced target encoding features failed: {e}")
             return X_train, X_test
     
-    def _create_interaction_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create interaction features with memory efficiency"""
+    def _create_expanded_interaction_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Create expanded interaction features with higher complexity"""
         try:
             if len(self.numerical_features) < 2:
                 return X_train, X_test
             
-            logger.info("Creating interaction features")
+            logger.info("Creating expanded interaction features")
             
             # Select top numerical features by variance
             numeric_features_selected = []
@@ -516,13 +550,13 @@ class CTRFeatureEngineer:
                     if X_train[col].var() > 0:
                         numeric_features_selected.append(col)
             
-            # Limit to top 8 features for memory efficiency
-            if len(numeric_features_selected) > 8:
-                numeric_features_selected = numeric_features_selected[:8]
+            # Expanded to top 15 features for enhanced performance
+            if len(numeric_features_selected) > 15:
+                numeric_features_selected = numeric_features_selected[:15]
             
             # Create pairwise interactions
             interaction_count = 0
-            max_interactions = 10  # Limit interactions
+            max_interactions = 50  # Increased from 10
             
             for i in range(len(numeric_features_selected)):
                 for j in range(i + 1, len(numeric_features_selected)):
@@ -536,32 +570,63 @@ class CTRFeatureEngineer:
                         feature_name = f"{col1}_x_{col2}"
                         X_train[feature_name] = X_train[col1] * X_train[col2]
                         X_test[feature_name] = X_test[col1] * X_test[col2]
-                        
                         self.interaction_features.append(feature_name)
                         interaction_count += 1
                         
+                        # Addition interaction (new)
+                        if interaction_count < max_interactions:
+                            feature_name = f"{col1}_plus_{col2}"
+                            X_train[feature_name] = X_train[col1] + X_train[col2]
+                            X_test[feature_name] = X_test[col1] + X_test[col2]
+                            self.interaction_features.append(feature_name)
+                            interaction_count += 1
+                        
                     except Exception as e:
-                        logger.warning(f"Interaction feature creation failed for {col1} x {col2}: {e}")
+                        logger.warning(f"Expanded interaction feature creation failed for {col1} x {col2}: {e}")
                         continue
             
-            logger.info(f"Interaction features completed: {len(self.interaction_features)} features created")
+            # Three-way interactions for top features
+            if len(numeric_features_selected) >= 3:
+                max_three_way = 10
+                three_way_count = 0
+                
+                for i in range(min(5, len(numeric_features_selected))):
+                    for j in range(i + 1, min(5, len(numeric_features_selected))):
+                        for k in range(j + 1, min(5, len(numeric_features_selected))):
+                            if three_way_count >= max_three_way:
+                                break
+                            
+                            col1, col2, col3 = numeric_features_selected[i], numeric_features_selected[j], numeric_features_selected[k]
+                            
+                            try:
+                                feature_name = f"{col1}_x_{col2}_x_{col3}"
+                                X_train[feature_name] = X_train[col1] * X_train[col2] * X_train[col3]
+                                X_test[feature_name] = X_test[col1] * X_test[col2] * X_test[col3]
+                                self.interaction_features.append(feature_name)
+                                three_way_count += 1
+                                
+                            except Exception as e:
+                                logger.warning(f"Three-way interaction failed for {col1}x{col2}x{col3}: {e}")
+                                continue
+            
+            logger.info(f"Expanded interaction features completed: {len(self.interaction_features)} features created")
             
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Interaction features failed: {e}")
+            logger.error(f"Expanded interaction features failed: {e}")
             return X_train, X_test
     
-    def _create_statistical_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create statistical features with memory efficiency"""
+    def _create_enhanced_statistical_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Create enhanced statistical features with more complexity"""
         try:
             if len(self.numerical_features) < 3:
                 return X_train, X_test
             
-            logger.info("Creating statistical features")
+            logger.info("Creating enhanced statistical features")
             
             # Select numerical features for statistical transformation
-            numeric_cols = [col for col in self.numerical_features if col in X_train.columns][:8]  # Limit to 8 features
+            numeric_cols = [col for col in self.numerical_features if col in X_train.columns][:12]  # Increased from 8
             
             if len(numeric_cols) < 3:
                 return X_train, X_test
@@ -570,7 +635,7 @@ class CTRFeatureEngineer:
             numeric_data_train = X_train[numeric_cols].values
             numeric_data_test = X_test[numeric_cols].values
             
-            # Row-wise statistics
+            # Basic row-wise statistics
             X_train['row_mean'] = np.mean(numeric_data_train, axis=1)
             X_test['row_mean'] = np.mean(numeric_data_test, axis=1)
             
@@ -583,26 +648,50 @@ class CTRFeatureEngineer:
             X_train['row_max'] = np.max(numeric_data_train, axis=1)
             X_test['row_max'] = np.max(numeric_data_test, axis=1)
             
-            self.statistical_features.extend(['row_mean', 'row_std', 'row_min', 'row_max'])
+            # Enhanced statistical features
+            X_train['row_median'] = np.median(numeric_data_train, axis=1)
+            X_test['row_median'] = np.median(numeric_data_test, axis=1)
             
-            logger.info(f"Statistical features completed: {len(self.statistical_features)} features created")
+            X_train['row_q25'] = np.percentile(numeric_data_train, 25, axis=1)
+            X_test['row_q25'] = np.percentile(numeric_data_test, 25, axis=1)
+            
+            X_train['row_q75'] = np.percentile(numeric_data_train, 75, axis=1)
+            X_test['row_q75'] = np.percentile(numeric_data_test, 75, axis=1)
+            
+            X_train['row_range'] = X_train['row_max'] - X_train['row_min']
+            X_test['row_range'] = X_test['row_max'] - X_test['row_min']
+            
+            X_train['row_skew'] = np.apply_along_axis(lambda x: pd.Series(x).skew(), 1, numeric_data_train)
+            X_test['row_skew'] = np.apply_along_axis(lambda x: pd.Series(x).skew(), 1, numeric_data_test)
+            
+            # Handle NaN values
+            for feature in ['row_mean', 'row_std', 'row_min', 'row_max', 'row_median', 
+                           'row_q25', 'row_q75', 'row_range', 'row_skew']:
+                X_train[feature] = X_train[feature].fillna(0)
+                X_test[feature] = X_test[feature].fillna(0)
+            
+            enhanced_stats = ['row_mean', 'row_std', 'row_min', 'row_max', 'row_median', 
+                             'row_q25', 'row_q75', 'row_range', 'row_skew']
+            self.statistical_features.extend(enhanced_stats)
+            
+            logger.info(f"Enhanced statistical features completed: {len(self.statistical_features)} features created")
             
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Statistical features failed: {e}")
+            logger.error(f"Enhanced statistical features failed: {e}")
             return X_train, X_test
     
-    def _create_frequency_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create frequency features with memory efficiency - FIXED VERSION"""
+    def _create_cv_frequency_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Create frequency features with cross-validation to prevent overfitting"""
         try:
             if len(self.categorical_features) == 0:
                 return X_train, X_test
             
-            logger.info("Creating frequency features")
+            logger.info("Creating CV frequency features")
             
             # Select categorical features for frequency encoding
-            cat_features_selected = [col for col in self.categorical_features if col in X_train.columns][:5]  # Limit to 5 features
+            cat_features_selected = [col for col in self.categorical_features if col in X_train.columns][:8]  # Increased from 5
             
             for col in cat_features_selected:
                 try:
@@ -610,41 +699,58 @@ class CTRFeatureEngineer:
                     X_train[col] = X_train[col].astype('object')
                     X_test[col] = X_test[col].astype('object')
                     
-                    # Calculate value frequencies
-                    freq_map = X_train[col].value_counts().to_dict()
+                    # CV-based frequency encoding
+                    encoded_train = np.zeros(len(X_train))
+                    kf = KFold(n_splits=5, shuffle=True, random_state=42)
                     
-                    # Apply frequency encoding
-                    feature_name = f"{col}_frequency"
-                    X_train[feature_name] = X_train[col].map(freq_map).fillna(0)
-                    X_test[feature_name] = X_test[col].map(freq_map).fillna(0)
+                    for train_idx, val_idx in kf.split(X_train):
+                        freq_map = X_train[col].iloc[train_idx].value_counts().to_dict()
+                        encoded_train[val_idx] = X_train[col].iloc[val_idx].map(freq_map).fillna(0)
+                    
+                    # Calculate frequency mapping on full training data for test set
+                    freq_map_full = X_train[col].value_counts().to_dict()
+                    encoded_test = X_test[col].map(freq_map_full).fillna(0)
+                    
+                    # Add features
+                    feature_name = f"{col}_frequency_cv"
+                    X_train[feature_name] = encoded_train
+                    X_test[feature_name] = encoded_test
+                    
+                    # Also add normalized frequency
+                    feature_name_norm = f"{col}_frequency_norm"
+                    max_freq = max(encoded_train.max(), encoded_test.max())
+                    if max_freq > 0:
+                        X_train[feature_name_norm] = encoded_train / max_freq
+                        X_test[feature_name_norm] = encoded_test / max_freq
+                        self.frequency_features.append(feature_name_norm)
                     
                     self.frequency_features.append(feature_name)
                     
                 except Exception as e:
-                    logger.warning(f"Frequency encoding failed for {col}: {e}")
+                    logger.warning(f"CV frequency encoding failed for {col}: {e}")
                     continue
             
-            logger.info(f"Frequency features completed: {len(self.frequency_features)} features created")
+            logger.info(f"CV frequency features completed: {len(self.frequency_features)} features created")
             
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Frequency features failed: {e}")
+            logger.error(f"CV frequency features failed: {e}")
             return X_train, X_test
     
-    def _create_cross_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create cross features with memory efficiency"""
+    def _create_enhanced_cross_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Create enhanced cross features with better combinations"""
         try:
             if len(self.categorical_features) < 2:
                 return X_train, X_test
             
-            logger.info("Creating cross features")
+            logger.info("Creating enhanced cross features")
             
             # Select categorical features for crossing
-            cat_features_selected = [col for col in self.categorical_features if col in X_train.columns][:4]  # Limit to 4 features
+            cat_features_selected = [col for col in self.categorical_features if col in X_train.columns][:6]  # Increased from 4
             
             cross_count = 0
-            max_crosses = 6  # Limit cross features
+            max_crosses = 15  # Increased from 6
             
             for i in range(len(cat_features_selected)):
                 for j in range(i + 1, len(cat_features_selected)):
@@ -660,40 +766,81 @@ class CTRFeatureEngineer:
                         X_test[col1] = X_test[col1].astype('object')
                         X_test[col2] = X_test[col2].astype('object')
                         
-                        # Create cross feature
+                        # Create cross feature with better separator
                         feature_name = f"{col1}_cross_{col2}"
-                        X_train[feature_name] = X_train[col1].astype(str) + "_" + X_train[col2].astype(str)
-                        X_test[feature_name] = X_test[col1].astype(str) + "_" + X_test[col2].astype(str)
+                        X_train[feature_name] = X_train[col1].astype(str) + "_X_" + X_train[col2].astype(str)
+                        X_test[feature_name] = X_test[col1].astype(str) + "_X_" + X_test[col2].astype(str)
                         
                         self.cross_features.append(feature_name)
                         cross_count += 1
                         
                     except Exception as e:
-                        logger.warning(f"Cross feature creation failed for {col1} x {col2}: {e}")
+                        logger.warning(f"Enhanced cross feature creation failed for {col1} x {col2}: {e}")
                         continue
             
-            logger.info(f"Cross features completed: {len(self.cross_features)} features created")
+            logger.info(f"Enhanced cross features completed: {len(self.cross_features)} features created")
             
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Cross features failed: {e}")
+            logger.error(f"Enhanced cross features failed: {e}")
             return X_train, X_test
     
     def _create_temporal_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Create temporal features if time-related columns exist"""
-        return X_train, X_test
+        try:
+            # Look for time-related columns
+            time_columns = []
+            for col in X_train.columns:
+                if any(time_keyword in col.lower() for time_keyword in ['time', 'date', 'hour', 'day', 'minute']):
+                    time_columns.append(col)
+            
+            if not time_columns:
+                return X_train, X_test
+            
+            logger.info(f"Creating temporal features from: {time_columns}")
+            
+            for col in time_columns:
+                try:
+                    if col in X_train.columns and X_train[col].dtype in ['int64', 'float64']:
+                        # Create cyclic features for time-related columns
+                        if 'hour' in col.lower():
+                            X_train[f'{col}_sin'] = np.sin(2 * np.pi * X_train[col] / 24)
+                            X_train[f'{col}_cos'] = np.cos(2 * np.pi * X_train[col] / 24)
+                            X_test[f'{col}_sin'] = np.sin(2 * np.pi * X_test[col] / 24)
+                            X_test[f'{col}_cos'] = np.cos(2 * np.pi * X_test[col] / 24)
+                            self.temporal_features.extend([f'{col}_sin', f'{col}_cos'])
+                        
+                        elif 'day' in col.lower():
+                            X_train[f'{col}_sin'] = np.sin(2 * np.pi * X_train[col] / 7)
+                            X_train[f'{col}_cos'] = np.cos(2 * np.pi * X_train[col] / 7)
+                            X_test[f'{col}_sin'] = np.sin(2 * np.pi * X_test[col] / 7)
+                            X_test[f'{col}_cos'] = np.cos(2 * np.pi * X_test[col] / 7)
+                            self.temporal_features.extend([f'{col}_sin', f'{col}_cos'])
+                
+                except Exception as e:
+                    logger.warning(f"Temporal feature creation failed for {col}: {e}")
+                    continue
+            
+            if self.temporal_features:
+                logger.info(f"Temporal features completed: {len(self.temporal_features)} features created")
+            
+            return X_train, X_test
+            
+        except Exception as e:
+            logger.error(f"Temporal features failed: {e}")
+            return X_train, X_test
     
-    def _create_binning_features_fixed(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create binning features with memory efficiency - FIXED VERSION"""
+    def _create_enhanced_binning_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Create enhanced binning features with multiple strategies"""
         try:
             if len(self.numerical_features) == 0:
                 return X_train, X_test
             
-            logger.info("Creating binning features")
+            logger.info("Creating enhanced binning features")
             
             # Select numerical features for binning
-            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:5]  # Limit to 5 features
+            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:8]  # Increased from 5
             
             for col in numeric_features_selected:
                 try:
@@ -701,100 +848,134 @@ class CTRFeatureEngineer:
                     X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0)
                     X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0)
                     
-                    # Create quantile-based bins with duplicate handling
+                    # Strategy 1: Quantile-based binning
                     try:
-                        # First try qcut
-                        train_binned, bin_edges = pd.qcut(X_train[col], q=5, labels=False, duplicates='drop', retbins=True)
+                        train_binned, bin_edges = pd.qcut(X_train[col], q=8, labels=False, duplicates='drop', retbins=True)
                         train_binned = train_binned.fillna(0)
                         
-                        # Apply same bins to test set
                         test_binned = pd.cut(X_test[col], bins=bin_edges, labels=False, include_lowest=True)
                         test_binned = test_binned.fillna(0)
                         
-                        feature_name = f"{col}_binned"
+                        feature_name = f"{col}_qbinned"
                         X_train[feature_name] = train_binned.astype('int32')
                         X_test[feature_name] = test_binned.astype('int32')
-                        
                         self.binning_features.append(feature_name)
                         
-                    except Exception as inner_e:
-                        # Fallback to cut with uniform bins
-                        logger.warning(f"qcut failed for {col}, using uniform bins: {inner_e}")
-                        
+                    except Exception:
+                        # Fallback to uniform binning
                         min_val = X_train[col].min()
                         max_val = X_train[col].max()
                         
                         if max_val > min_val:
-                            bins = np.linspace(min_val, max_val, 6)  # 5 bins
+                            bins = np.linspace(min_val, max_val, 9)  # 8 bins
                             
                             train_binned = pd.cut(X_train[col], bins=bins, labels=False, include_lowest=True)
                             test_binned = pd.cut(X_test[col], bins=bins, labels=False, include_lowest=True)
                             
-                            feature_name = f"{col}_binned"
+                            feature_name = f"{col}_ubinned"
                             X_train[feature_name] = train_binned.fillna(0).astype('int32')
                             X_test[feature_name] = test_binned.fillna(0).astype('int32')
-                            
                             self.binning_features.append(feature_name)
                     
+                    # Strategy 2: Standard deviation based binning
+                    try:
+                        mean_val = X_train[col].mean()
+                        std_val = X_train[col].std()
+                        
+                        if std_val > 0:
+                            # Create bins based on standard deviations
+                            bins = [float('-inf'), mean_val - 2*std_val, mean_val - std_val, 
+                                   mean_val, mean_val + std_val, mean_val + 2*std_val, float('inf')]
+                            
+                            train_std_binned = pd.cut(X_train[col], bins=bins, labels=False)
+                            test_std_binned = pd.cut(X_test[col], bins=bins, labels=False)
+                            
+                            feature_name = f"{col}_stdbinned"
+                            X_train[feature_name] = train_std_binned.fillna(2).astype('int32')  # Fill with middle bin
+                            X_test[feature_name] = test_std_binned.fillna(2).astype('int32')
+                            self.binning_features.append(feature_name)
+                    
+                    except Exception as e:
+                        logger.warning(f"Std binning failed for {col}: {e}")
+                    
                 except Exception as e:
-                    logger.warning(f"Binning failed for {col}: {e}")
+                    logger.warning(f"Enhanced binning failed for {col}: {e}")
                     continue
             
-            logger.info(f"Binning features completed: {len(self.binning_features)} features created")
+            logger.info(f"Enhanced binning features completed: {len(self.binning_features)} features created")
             
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Binning features failed: {e}")
+            logger.error(f"Enhanced binning features failed: {e}")
             return X_train, X_test
     
-    def _create_rank_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create rank features with memory efficiency"""
+    def _create_enhanced_rank_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Create enhanced rank features with multiple ranking methods"""
         try:
             if len(self.numerical_features) == 0:
                 return X_train, X_test
             
-            logger.info("Creating rank features")
+            logger.info("Creating enhanced rank features")
             
             # Select numerical features for ranking
-            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:4]  # Limit to 4 features
+            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:6]  # Increased from 4
             
             for col in numeric_features_selected:
                 try:
-                    # Create rank feature
-                    feature_name = f"{col}_rank"
+                    # Standard percentile rank
+                    feature_name = f"{col}_pctrank"
                     X_train[feature_name] = X_train[col].rank(pct=True)
-                    
-                    # For test set, use training set distribution
                     X_test[feature_name] = X_test[col].rank(pct=True)
-                    
                     self.rank_features.append(feature_name)
                     
+                    # Dense rank
+                    feature_name = f"{col}_denserank"
+                    X_train[feature_name] = X_train[col].rank(method='dense')
+                    X_test[feature_name] = X_test[col].rank(method='dense')
+                    self.rank_features.append(feature_name)
+                    
+                    # Quantile-based rank
+                    try:
+                        feature_name = f"{col}_quantilerank"
+                        # Use training data quantiles for both train and test
+                        quantiles = X_train[col].quantile([0.25, 0.5, 0.75]).values
+                        
+                        train_qrank = np.searchsorted(quantiles, X_train[col])
+                        test_qrank = np.searchsorted(quantiles, X_test[col])
+                        
+                        X_train[feature_name] = train_qrank
+                        X_test[feature_name] = test_qrank
+                        self.rank_features.append(feature_name)
+                        
+                    except Exception as e:
+                        logger.warning(f"Quantile rank failed for {col}: {e}")
+                    
                 except Exception as e:
-                    logger.warning(f"Rank feature creation failed for {col}: {e}")
+                    logger.warning(f"Enhanced rank feature creation failed for {col}: {e}")
                     continue
             
-            logger.info(f"Rank features completed: {len(self.rank_features)} features created")
+            logger.info(f"Enhanced rank features completed: {len(self.rank_features)} features created")
             
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Rank features failed: {e}")
+            logger.error(f"Enhanced rank features failed: {e}")
             return X_train, X_test
     
-    def _create_ratio_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create ratio features with memory efficiency"""
+    def _create_enhanced_ratio_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Create enhanced ratio features with safe operations"""
         try:
             if len(self.numerical_features) < 2:
                 return X_train, X_test
             
-            logger.info("Creating ratio features")
+            logger.info("Creating enhanced ratio features")
             
             # Select numerical features for ratio calculation
-            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:6]  # Limit to 6 features
+            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:8]  # Increased from 6
             
             ratio_count = 0
-            max_ratios = 8  # Limit ratio features
+            max_ratios = 20  # Increased from 8
             
             for i in range(len(numeric_features_selected)):
                 for j in range(i + 1, len(numeric_features_selected)):
@@ -804,68 +985,269 @@ class CTRFeatureEngineer:
                     col1, col2 = numeric_features_selected[i], numeric_features_selected[j]
                     
                     try:
-                        # Create ratio feature (avoid division by zero)
-                        feature_name = f"{col1}_div_{col2}"
+                        # Safe division with epsilon
+                        epsilon = 1e-8
                         
-                        denominator_train = X_train[col2].replace(0, 0.001)  # Small epsilon to avoid division by zero
-                        denominator_test = X_test[col2].replace(0, 0.001)
+                        # Ratio feature col1/col2
+                        feature_name = f"{col1}_div_{col2}"
+                        denominator_train = X_train[col2].replace(0, epsilon)
+                        denominator_test = X_test[col2].replace(0, epsilon)
                         
                         X_train[feature_name] = X_train[col1] / denominator_train
                         X_test[feature_name] = X_test[col1] / denominator_test
                         
-                        # Handle infinite values
-                        X_train[feature_name] = X_train[feature_name].replace([np.inf, -np.inf], 0)
-                        X_test[feature_name] = X_test[feature_name].replace([np.inf, -np.inf], 0)
+                        # Handle extreme values
+                        X_train[feature_name] = np.clip(X_train[feature_name], -1e6, 1e6)
+                        X_test[feature_name] = np.clip(X_test[feature_name], -1e6, 1e6)
                         
                         self.ratio_features.append(feature_name)
                         ratio_count += 1
                         
+                        # Reverse ratio col2/col1
+                        if ratio_count < max_ratios:
+                            feature_name = f"{col2}_div_{col1}"
+                            denominator_train = X_train[col1].replace(0, epsilon)
+                            denominator_test = X_test[col1].replace(0, epsilon)
+                            
+                            X_train[feature_name] = X_train[col2] / denominator_train
+                            X_test[feature_name] = X_test[col2] / denominator_test
+                            
+                            X_train[feature_name] = np.clip(X_train[feature_name], -1e6, 1e6)
+                            X_test[feature_name] = np.clip(X_test[feature_name], -1e6, 1e6)
+                            
+                            self.ratio_features.append(feature_name)
+                            ratio_count += 1
+                        
                     except Exception as e:
-                        logger.warning(f"Ratio feature creation failed for {col1}/{col2}: {e}")
+                        logger.warning(f"Enhanced ratio feature creation failed for {col1}/{col2}: {e}")
                         continue
             
-            logger.info(f"Ratio features completed: {len(self.ratio_features)} features created")
+            logger.info(f"Enhanced ratio features completed: {len(self.ratio_features)} features created")
             
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Ratio features failed: {e}")
+            logger.error(f"Enhanced ratio features failed: {e}")
             return X_train, X_test
     
-    def _create_polynomial_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create polynomial features with memory efficiency"""
+    def _create_enhanced_polynomial_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Create enhanced polynomial features with multiple degrees"""
         try:
             if len(self.numerical_features) == 0:
                 return X_train, X_test
             
-            logger.info("Creating polynomial features")
+            logger.info("Creating enhanced polynomial features")
             
             # Select top numerical features for polynomial transformation
-            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:3]  # Limit to 3 features
+            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:5]  # Increased from 3
             
             for col in numeric_features_selected:
                 try:
-                    # Create squared feature
+                    # Squared feature
                     feature_name = f"{col}_squared"
                     X_train[feature_name] = X_train[col] ** 2
                     X_test[feature_name] = X_test[col] ** 2
-                    
                     self.polynomial_features.append(feature_name)
                     
+                    # Cubic feature
+                    feature_name = f"{col}_cubed"
+                    X_train[feature_name] = X_train[col] ** 3
+                    X_test[feature_name] = X_test[col] ** 3
+                    self.polynomial_features.append(feature_name)
+                    
+                    # Square root feature (for positive values)
+                    try:
+                        if X_train[col].min() >= 0:
+                            feature_name = f"{col}_sqrt"
+                            X_train[feature_name] = np.sqrt(np.abs(X_train[col]))
+                            X_test[feature_name] = np.sqrt(np.abs(X_test[col]))
+                            self.polynomial_features.append(feature_name)
+                    except Exception:
+                        pass
+                    
+                    # Log feature (for positive values)
+                    try:
+                        if X_train[col].min() > 0:
+                            feature_name = f"{col}_log"
+                            X_train[feature_name] = np.log1p(X_train[col])
+                            X_test[feature_name] = np.log1p(X_test[col])
+                            self.polynomial_features.append(feature_name)
+                    except Exception:
+                        pass
+                    
                 except Exception as e:
-                    logger.warning(f"Polynomial feature creation failed for {col}: {e}")
+                    logger.warning(f"Enhanced polynomial feature creation failed for {col}: {e}")
                     continue
             
-            logger.info(f"Polynomial features completed: {len(self.polynomial_features)} features created")
+            logger.info(f"Enhanced polynomial features completed: {len(self.polynomial_features)} features created")
             
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Polynomial features failed: {e}")
+            logger.error(f"Enhanced polynomial features failed: {e}")
             return X_train, X_test
     
+    def _create_clustering_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Create clustering-based features"""
+        try:
+            if len(self.numerical_features) < 3:
+                return X_train, X_test
+            
+            logger.info("Creating clustering features")
+            
+            from sklearn.cluster import KMeans
+            from sklearn.preprocessing import StandardScaler
+            
+            # Select features for clustering
+            cluster_features = [col for col in self.numerical_features if col in X_train.columns][:10]
+            
+            if len(cluster_features) < 3:
+                return X_train, X_test
+            
+            # Prepare data for clustering
+            cluster_data_train = X_train[cluster_features].fillna(0)
+            cluster_data_test = X_test[cluster_features].fillna(0)
+            
+            # Scale data
+            scaler = StandardScaler()
+            cluster_data_train_scaled = scaler.fit_transform(cluster_data_train)
+            cluster_data_test_scaled = scaler.transform(cluster_data_test)
+            
+            # Apply K-means clustering with different k values
+            for n_clusters in [5, 10, 15]:
+                try:
+                    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                    
+                    train_clusters = kmeans.fit_predict(cluster_data_train_scaled)
+                    test_clusters = kmeans.predict(cluster_data_test_scaled)
+                    
+                    feature_name = f"cluster_{n_clusters}"
+                    X_train[feature_name] = train_clusters
+                    X_test[feature_name] = test_clusters
+                    
+                    # Distance to cluster centers
+                    train_distances = np.min(kmeans.transform(cluster_data_train_scaled), axis=1)
+                    test_distances = np.min(kmeans.transform(cluster_data_test_scaled), axis=1)
+                    
+                    feature_name = f"cluster_distance_{n_clusters}"
+                    X_train[feature_name] = train_distances
+                    X_test[feature_name] = test_distances
+                    
+                    self.clustering_features.extend([f"cluster_{n_clusters}", f"cluster_distance_{n_clusters}"])
+                    
+                except Exception as e:
+                    logger.warning(f"Clustering with {n_clusters} clusters failed: {e}")
+                    continue
+            
+            logger.info(f"Clustering features completed: {len(self.clustering_features)} features created")
+            
+            return X_train, X_test
+            
+        except Exception as e:
+            logger.error(f"Clustering features failed: {e}")
+            return X_train, X_test
+    
+    def _create_advanced_math_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Create advanced mathematical features"""
+        try:
+            if len(self.numerical_features) < 2:
+                return X_train, X_test
+            
+            logger.info("Creating advanced mathematical features")
+            
+            # Select features for advanced operations
+            math_features = [col for col in self.numerical_features if col in X_train.columns][:8]
+            
+            for i, col in enumerate(math_features):
+                try:
+                    # Trigonometric features
+                    if X_train[col].std() > 0:
+                        # Normalize to [0, 2π] range
+                        col_normalized_train = (X_train[col] - X_train[col].min()) / (X_train[col].max() - X_train[col].min()) * 2 * np.pi
+                        col_normalized_test = (X_test[col] - X_train[col].min()) / (X_train[col].max() - X_train[col].min()) * 2 * np.pi
+                        
+                        # Sine and cosine features
+                        X_train[f"{col}_sin"] = np.sin(col_normalized_train)
+                        X_test[f"{col}_sin"] = np.sin(col_normalized_test)
+                        
+                        X_train[f"{col}_cos"] = np.cos(col_normalized_train)
+                        X_test[f"{col}_cos"] = np.cos(col_normalized_test)
+                        
+                        self.advanced_features.extend([f"{col}_sin", f"{col}_cos"])
+                    
+                    # Exponential features (with clipping for safety)
+                    if X_train[col].max() < 10:  # Only for reasonable values
+                        X_train[f"{col}_exp"] = np.exp(np.clip(X_train[col], -10, 10))
+                        X_test[f"{col}_exp"] = np.exp(np.clip(X_test[col], -10, 10))
+                        self.advanced_features.append(f"{col}_exp")
+                    
+                except Exception as e:
+                    logger.warning(f"Advanced math features failed for {col}: {e}")
+                    continue
+            
+            # Pairwise advanced operations
+            for i in range(min(4, len(math_features))):
+                for j in range(i + 1, min(4, len(math_features))):
+                    col1, col2 = math_features[i], math_features[j]
+                    
+                    try:
+                        # Euclidean distance
+                        feature_name = f"{col1}_{col2}_euclidean"
+                        X_train[feature_name] = np.sqrt(X_train[col1]**2 + X_train[col2]**2)
+                        X_test[feature_name] = np.sqrt(X_test[col1]**2 + X_test[col2]**2)
+                        self.advanced_features.append(feature_name)
+                        
+                    except Exception as e:
+                        logger.warning(f"Pairwise advanced feature failed for {col1}, {col2}: {e}")
+                        continue
+            
+            logger.info(f"Advanced mathematical features completed: {len(self.advanced_features)} features created")
+            
+            return X_train, X_test
+            
+        except Exception as e:
+            logger.error(f"Advanced mathematical features failed: {e}")
+            return X_train, X_test
+    
+    # Keep all the original methods for backward compatibility
+    def _create_target_encoding_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Original target encoding method for fallback"""
+        return self._create_enhanced_target_encoding_features(X_train, X_test, y_train)
+    
+    def _create_interaction_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Original interaction method for fallback"""
+        return self._create_expanded_interaction_features(X_train, X_test, y_train)
+    
+    def _create_statistical_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Original statistical method for fallback"""
+        return self._create_enhanced_statistical_features(X_train, X_test)
+    
+    def _create_frequency_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Original frequency method for fallback"""
+        return self._create_cv_frequency_features(X_train, X_test, pd.Series([0] * len(X_train)))
+    
+    def _create_cross_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Original cross method for fallback"""
+        return self._create_enhanced_cross_features(X_train, X_test, y_train)
+    
+    def _create_binning_features_fixed(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Original binning method for fallback"""
+        return self._create_enhanced_binning_features(X_train, X_test)
+    
+    def _create_rank_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Original rank method for fallback"""
+        return self._create_enhanced_rank_features(X_train, X_test)
+    
+    def _create_ratio_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Original ratio method for fallback"""
+        return self._create_enhanced_ratio_features(X_train, X_test)
+    
+    def _create_polynomial_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Original polynomial method for fallback"""
+        return self._create_enhanced_polynomial_features(X_train, X_test)
+    
     def _encode_categorical_features_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Safe categorical feature encoding - FIXED VERSION"""
+        """Safe categorical feature encoding"""
         try:
             # Get all categorical features including cross features
             all_categorical_features = self.categorical_features + self.cross_features
@@ -952,8 +1334,8 @@ class CTRFeatureEngineer:
             logger.error(f"Basic normalization failed: {e}")
             return X_train, X_test
     
-    def _final_data_cleanup(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Final data cleanup - FIXED VERSION"""
+    def _final_data_cleanup_enhanced(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Enhanced final data cleanup"""
         try:
             # Replace infinite values
             X_train = X_train.replace([np.inf, -np.inf], 0)
@@ -974,6 +1356,21 @@ class CTRFeatureEngineer:
                 X_test = X_test.drop(columns=constant_features)
                 logger.info(f"Removed {len(constant_features)} constant features")
             
+            # Remove highly correlated features (optional, memory permitting)
+            if len(X_train.columns) > 100:
+                try:
+                    corr_matrix = X_train.corr().abs()
+                    upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+                    to_drop = [column for column in upper_tri.columns if any(upper_tri[column] > 0.95)]
+                    
+                    if to_drop:
+                        X_train = X_train.drop(columns=to_drop)
+                        X_test = X_test.drop(columns=to_drop)
+                        logger.info(f"Removed {len(to_drop)} highly correlated features")
+                
+                except Exception as e:
+                    logger.warning(f"Correlation-based feature removal failed: {e}")
+            
             # Ensure consistent data types
             for col in X_train.columns:
                 if col in X_test.columns:
@@ -986,7 +1383,7 @@ class CTRFeatureEngineer:
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Final data cleanup failed: {e}")
+            logger.error(f"Enhanced final data cleanup failed: {e}")
             return X_train, X_test
     
     def _clean_final_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -1023,6 +1420,9 @@ class CTRFeatureEngineer:
                 'rank': len(self.rank_features),
                 'ratio': len(self.ratio_features),
                 'polynomial': len(self.polynomial_features),
+                'temporal': len(self.temporal_features),
+                'clustering': len(self.clustering_features),
+                'advanced': len(self.advanced_features),
                 'final': len(self.final_feature_columns)
             }
             
@@ -1035,12 +1435,15 @@ class CTRFeatureEngineer:
                 len(self.binning_features),
                 len(self.rank_features),
                 len(self.ratio_features),
-                len(self.polynomial_features)
+                len(self.polynomial_features),
+                len(self.temporal_features),
+                len(self.clustering_features),
+                len(self.advanced_features)
             ])
             
             self.processing_stats['total_features_generated'] = total_generated
             
-            logger.info(f"Feature engineering finalized - {len(self.final_feature_columns)} features in {self.processing_stats['processing_time']:.2f}s")
+            logger.info(f"Enhanced feature engineering finalized - {len(self.final_feature_columns)} features in {self.processing_stats['processing_time']:.2f}s")
             
         except Exception as e:
             logger.error(f"Processing finalization failed: {e}")

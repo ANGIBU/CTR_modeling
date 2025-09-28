@@ -125,27 +125,36 @@ class MemoryMonitor:
             pass
 
 class CTRBiasCorrector:
-    """CTR bias correction for predictions"""
+    """Enhanced CTR bias correction for predictions"""
     
     def __init__(self, target_ctr: float = 0.0191):
         self.target_ctr = target_ctr
         self.correction_factor = None
-        self.scale_factor = 0.75  # Reduced from 0.4 to 0.75 for less aggressive scaling
+        self.scale_factor = 0.85  # Less aggressive than before (was 0.75)
+        self.adaptive_correction = True
+        self.correction_history = []
         
     def fit(self, y_true: np.ndarray, y_pred: np.ndarray):
-        """Calculate correction factor from training data"""
+        """Calculate adaptive correction factor from training data"""
         actual_ctr = np.mean(y_true)
         predicted_ctr = np.mean(y_pred)
         
         if predicted_ctr > 0:
-            self.correction_factor = self.target_ctr / predicted_ctr
+            # Base correction factor
+            base_correction = self.target_ctr / predicted_ctr
+            
+            # Adaptive adjustment based on prediction quality
+            prediction_std = np.std(y_pred)
+            diversity_factor = min(1.2, max(0.8, prediction_std * 50))  # Reward diversity
+            
+            self.correction_factor = base_correction * diversity_factor
         else:
             self.correction_factor = 1.0
             
         logger.info(f"CTR bias correction factor: {self.correction_factor:.4f}")
         
     def transform(self, y_pred: np.ndarray) -> np.ndarray:
-        """Apply CTR bias correction with improved logic"""
+        """Apply enhanced CTR bias correction"""
         # Apply scale factor first
         corrected = y_pred * self.scale_factor
         
@@ -153,13 +162,16 @@ class CTRBiasCorrector:
         if self.correction_factor is not None:
             corrected = corrected * self.correction_factor
         
-        # Clip to reasonable range
-        corrected = np.clip(corrected, 0.001, 0.08)  # Increased upper limit
+        # Adaptive clipping based on target CTR
+        lower_bound = self.target_ctr * 0.05  # 5% of target
+        upper_bound = self.target_ctr * 4.0   # 400% of target (less restrictive)
+        
+        corrected = np.clip(corrected, lower_bound, upper_bound)
         
         return corrected
 
-class MultiMethodCalibrator:
-    """Multi-method probability calibrator with CTR bias correction"""
+class EnhancedMultiMethodCalibrator:
+    """Enhanced multi-method probability calibrator with advanced techniques"""
     
     def __init__(self):
         self.calibration_models = {}
@@ -170,11 +182,12 @@ class MultiMethodCalibrator:
         self.ctr_corrector = CTRBiasCorrector()
         self.scaler = None
         self.is_fitted = False
+        self.ensemble_calibrator = None
         
     def fit(self, y_true: np.ndarray, y_pred_proba: np.ndarray, method: str = 'auto') -> bool:
-        """Fit calibration models with CTR correction"""
+        """Fit enhanced calibration models with multiple methods"""
         try:
-            if len(y_true) < 10:  # Minimum samples for calibration
+            if len(y_true) < 10:
                 logger.warning("Insufficient data for calibration")
                 self.is_fitted = False
                 return False
@@ -182,7 +195,7 @@ class MultiMethodCalibrator:
             # Fit CTR bias correction first
             self.ctr_corrector.fit(y_true, y_pred_proba)
             
-            methods_to_try = ['isotonic', 'platt'] if method == 'auto' else [method]
+            methods_to_try = ['isotonic', 'platt', 'beta'] if method == 'auto' else [method]
             
             for cal_method in methods_to_try:
                 try:
@@ -197,10 +210,17 @@ class MultiMethodCalibrator:
                         calibrator.fit(y_pred_proba.reshape(-1, 1), y_true)
                         self.calibration_models[cal_method] = calibrator
                     
+                    elif cal_method == 'beta':
+                        # Beta calibration for improved performance
+                        calibrator = self._fit_beta_calibration(y_pred_proba, y_true)
+                        if calibrator is not None:
+                            self.calibration_models[cal_method] = calibrator
+                    
                     # Calculate calibration score
                     calibrated_proba = self._predict_with_method(y_pred_proba, cal_method)
-                    score = -log_loss(y_true, calibrated_proba)
-                    self.calibration_scores[cal_method] = score
+                    if calibrated_proba is not None:
+                        score = -log_loss(y_true, calibrated_proba)
+                        self.calibration_scores[cal_method] = score
                     
                 except Exception as e:
                     logger.warning(f"Calibration method {cal_method} failed: {e}")
@@ -212,10 +232,15 @@ class MultiMethodCalibrator:
                 
                 # Calculate additional bias correction
                 best_calibrated = self._predict_with_method(y_pred_proba, self.best_method)
-                self.bias_correction = np.mean(y_true) - np.mean(best_calibrated)
+                if best_calibrated is not None:
+                    self.bias_correction = np.mean(y_true) - np.mean(best_calibrated)
+                    
+                    if np.mean(best_calibrated) > 0:
+                        self.multiplicative_correction = np.mean(y_true) / np.mean(best_calibrated)
                 
-                if np.mean(best_calibrated) > 0:
-                    self.multiplicative_correction = np.mean(y_true) / np.mean(best_calibrated)
+                # Try ensemble calibration if multiple methods work
+                if len(self.calibration_models) > 1:
+                    self._fit_ensemble_calibrator(y_true, y_pred_proba)
                 
                 self.is_fitted = True
                 logger.info(f"Best calibration method: {self.best_method}")
@@ -225,34 +250,113 @@ class MultiMethodCalibrator:
             return False
             
         except Exception as e:
-            logger.warning(f"Calibration fitting failed: {e}")
+            logger.warning(f"Enhanced calibration fitting failed: {e}")
             self.is_fitted = False
             return False
     
-    def _predict_with_method(self, y_pred_proba: np.ndarray, method: str) -> np.ndarray:
+    def _fit_beta_calibration(self, y_pred_proba: np.ndarray, y_true: np.ndarray):
+        """Fit beta calibration model"""
+        try:
+            from scipy.optimize import minimize_scalar
+            
+            def beta_loss(param):
+                try:
+                    calibrated = np.power(y_pred_proba, param)
+                    calibrated = np.clip(calibrated, 1e-15, 1-1e-15)
+                    return log_loss(y_true, calibrated)
+                except:
+                    return float('inf')
+            
+            result = minimize_scalar(beta_loss, bounds=(0.1, 3.0), method='bounded')
+            
+            if result.success:
+                return {'type': 'beta', 'param': result.x}
+            else:
+                return None
+                
+        except Exception:
+            return None
+    
+    def _fit_ensemble_calibrator(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
+        """Fit ensemble calibrator using multiple methods"""
+        try:
+            # Get predictions from all methods
+            method_predictions = {}
+            for method in self.calibration_models.keys():
+                pred = self._predict_with_method(y_pred_proba, method)
+                if pred is not None:
+                    method_predictions[method] = pred
+            
+            if len(method_predictions) < 2:
+                return
+            
+            # Calculate weights based on performance
+            weights = {}
+            total_score = 0
+            
+            for method, pred in method_predictions.items():
+                try:
+                    score = -log_loss(y_true, pred)
+                    weights[method] = max(0, score)  # Ensure non-negative
+                    total_score += weights[method]
+                except:
+                    weights[method] = 0
+            
+            # Normalize weights
+            if total_score > 0:
+                for method in weights:
+                    weights[method] /= total_score
+                
+                self.ensemble_calibrator = weights
+                logger.info(f"Ensemble calibrator fitted with weights: {weights}")
+            
+        except Exception as e:
+            logger.warning(f"Ensemble calibrator fitting failed: {e}")
+    
+    def _predict_with_method(self, y_pred_proba: np.ndarray, method: str) -> Optional[np.ndarray]:
         """Predict with specific calibration method"""
         try:
+            if method not in self.calibration_models:
+                return None
+                
+            calibrator = self.calibration_models[method]
+            
             if method == 'isotonic':
-                return self.calibration_models[method].predict(y_pred_proba)
+                return calibrator.predict(y_pred_proba)
             elif method == 'platt':
-                return self.calibration_models[method].predict(y_pred_proba.reshape(-1, 1)).flatten()
+                return calibrator.predict(y_pred_proba.reshape(-1, 1)).flatten()
+            elif method == 'beta':
+                param = calibrator['param']
+                result = np.power(y_pred_proba, param)
+                return np.clip(result, 1e-15, 1-1e-15)
             else:
                 return y_pred_proba
         except Exception:
-            return y_pred_proba
+            return None
     
     def predict_proba(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """Apply calibration and CTR correction to predictions"""
+        """Apply enhanced calibration and CTR correction to predictions"""
         try:
-            # Apply calibration if available and fitted
-            if self.is_fitted and self.best_method and self.best_method in self.calibration_models:
-                if self.best_method == 'isotonic':
-                    calibrated = self.calibration_models[self.best_method].predict(y_pred_proba)
-                elif self.best_method == 'platt':
-                    calibrated = self.calibration_models[self.best_method].predict(
-                        y_pred_proba.reshape(-1, 1)
-                    ).flatten()
+            # Try ensemble calibration first
+            if self.ensemble_calibrator and len(self.ensemble_calibrator) > 1:
+                ensemble_pred = np.zeros_like(y_pred_proba)
+                total_weight = 0
+                
+                for method, weight in self.ensemble_calibrator.items():
+                    method_pred = self._predict_with_method(y_pred_proba, method)
+                    if method_pred is not None:
+                        ensemble_pred += weight * method_pred
+                        total_weight += weight
+                
+                if total_weight > 0:
+                    calibrated = ensemble_pred / total_weight
                 else:
+                    calibrated = y_pred_proba
+            
+            # Fallback to best single method
+            elif self.is_fitted and self.best_method and self.best_method in self.calibration_models:
+                calibrated = self._predict_with_method(y_pred_proba, self.best_method)
+                if calibrated is None:
                     calibrated = y_pred_proba
             else:
                 calibrated = y_pred_proba
@@ -263,16 +367,17 @@ class MultiMethodCalibrator:
             return np.clip(corrected, 1e-15, 1 - 1e-15)
             
         except Exception as e:
-            logger.warning(f"Calibration prediction failed: {e}")
+            logger.warning(f"Enhanced calibration prediction failed: {e}")
             # Still apply CTR correction even if calibration fails
             return self.ctr_corrector.transform(y_pred_proba)
     
     def get_calibration_summary(self) -> Dict[str, Any]:
-        """Get calibration summary"""
+        """Get enhanced calibration summary"""
         return {
             'best_method': self.best_method,
             'calibration_scores': self.calibration_scores,
             'available_methods': list(self.calibration_models.keys()),
+            'ensemble_weights': self.ensemble_calibrator,
             'bias_correction': self.bias_correction,
             'multiplicative_correction': self.multiplicative_correction,
             'ctr_correction_factor': self.ctr_corrector.correction_factor,
@@ -280,7 +385,7 @@ class MultiMethodCalibrator:
         }
 
 class BaseModel(ABC):
-    """Base class for all models with mandatory calibration"""
+    """Base class for all models with enhanced calibration"""
     
     def __init__(self, name: str, params: Dict[str, Any] = None):
         self.name = name
@@ -290,12 +395,14 @@ class BaseModel(ABC):
         self.feature_names = None
         self.calibrator = None
         self.is_calibrated = False
-        self.prediction_diversity_threshold = 2500
+        self.prediction_diversity_threshold = 2000  # Reduced for better diversity
         self.calibration_applied = True
         self.memory_monitor = MemoryMonitor()
         self.quick_mode = False
         self.scaler = StandardScaler()
         self.use_scaling = True
+        self.training_time = 0.0
+        self.validation_score = 0.0
         
     def set_quick_mode(self, enabled: bool):
         """Enable or disable quick mode for model training"""
@@ -398,21 +505,35 @@ class BaseModel(ABC):
             return X
     
     def _enhance_prediction_diversity(self, predictions: np.ndarray) -> np.ndarray:
-        """Enhance prediction diversity to prevent convergence"""
+        """Enhanced prediction diversity to prevent convergence"""
         try:
-            if len(predictions) > self.prediction_diversity_threshold:
-                noise_scale = max(np.std(predictions) * 0.001, 1e-6)
-            else:
-                noise_scale = max(np.std(predictions) * 0.001, 1e-5)
+            unique_predictions = len(np.unique(predictions))
             
-            noise = np.random.normal(0, noise_scale, len(predictions))
-            enhanced_predictions = predictions + noise
-            return np.clip(enhanced_predictions, 1e-15, 1 - 1e-15)
+            if unique_predictions < self.prediction_diversity_threshold:
+                # More sophisticated noise injection
+                base_noise_scale = max(np.std(predictions) * 0.002, 1e-6)
+                
+                # Adaptive noise based on prediction range
+                pred_range = np.max(predictions) - np.min(predictions)
+                range_factor = max(0.5, min(2.0, pred_range * 100))
+                
+                noise_scale = base_noise_scale * range_factor
+                
+                # Use different noise distributions
+                if np.random.random() > 0.5:
+                    noise = np.random.normal(0, noise_scale, len(predictions))
+                else:
+                    noise = np.random.laplace(0, noise_scale * 0.7, len(predictions))
+                
+                enhanced_predictions = predictions + noise
+                return np.clip(enhanced_predictions, 1e-15, 1 - 1e-15)
+            
+            return predictions
         except Exception:
             return predictions
     
-    def apply_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, method: str = 'isotonic'):
-        """Apply probability calibration - MANDATORY for all models"""
+    def apply_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, method: str = 'auto'):
+        """Apply enhanced probability calibration"""
         try:
             if not self.is_fitted:
                 logger.warning("Model not fitted, cannot apply calibration")
@@ -423,29 +544,29 @@ class BaseModel(ABC):
                 logger.info("Quick mode: Skipping calibration for small dataset")
                 return False
             
-            logger.info(f"{self.name}: Starting mandatory calibration")
+            logger.info(f"{self.name}: Starting enhanced calibration")
             raw_predictions = self.predict_proba_raw(X_val)
             
-            self.calibrator = MultiMethodCalibrator()
+            self.calibrator = EnhancedMultiMethodCalibrator()
             success = self.calibrator.fit(y_val.values, raw_predictions, method)
             
             if success:
                 self.is_calibrated = True
-                logger.info(f"{self.name}: Calibration applied successfully")
+                logger.info(f"{self.name}: Enhanced calibration applied successfully")
                 return True
             else:
                 # Even if calibration fails, still apply CTR correction
-                self.calibrator = MultiMethodCalibrator()
+                self.calibrator = EnhancedMultiMethodCalibrator()
                 self.calibrator.ctr_corrector.fit(y_val.values, raw_predictions)
                 self.is_calibrated = True
                 logger.warning(f"{self.name}: Calibration fitting failed, using CTR correction only")
                 return True
                 
         except Exception as e:
-            logger.warning(f"Calibration application failed: {e}")
+            logger.warning(f"Enhanced calibration application failed: {e}")
             # Create basic CTR corrector as fallback
             try:
-                self.calibrator = MultiMethodCalibrator()
+                self.calibrator = EnhancedMultiMethodCalibrator()
                 self.calibrator.ctr_corrector.fit(y_val.values, raw_predictions)
                 self.is_calibrated = True
                 return True
@@ -453,7 +574,7 @@ class BaseModel(ABC):
                 return False
     
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Calibrated probability predictions with mandatory CTR correction"""
+        """Enhanced calibrated probability predictions with CTR correction"""
         raw_predictions = self.predict_proba_raw(X)
         
         if self.is_calibrated and self.calibrator is not None:
@@ -475,21 +596,21 @@ class BaseModel(ABC):
         pass
 
 class LogisticModel(BaseModel):
-    """Logistic Regression model with fixed convergence"""
+    """Enhanced Logistic Regression model with optimized parameters"""
     
     def __init__(self, name: str = "LogisticRegression", params: Dict[str, Any] = None):
         if not SKLEARN_AVAILABLE:
             raise ImportError("Scikit-learn is not installed.")
         
         default_params = {
-            'C': 0.3,  # Balanced regularization
+            'C': 0.5,  # Increased from 0.3 for less regularization
             'penalty': 'l2',
             'solver': 'saga',
-            'max_iter': 3000,  # Reduced iterations
+            'max_iter': 4000,  # Increased from 3000
             'random_state': 42,
             'class_weight': 'balanced',
-            'n_jobs': 6,
-            'tol': 0.0001  # Tighter tolerance
+            'n_jobs': 8,  # Increased from 6
+            'tol': 0.00005  # Tighter tolerance
         }
         
         if params:
@@ -497,17 +618,17 @@ class LogisticModel(BaseModel):
         
         super().__init__(name, default_params)
         self.model = LogisticRegression(**self.params)
-        self.prediction_diversity_threshold = 2800
+        self.prediction_diversity_threshold = 2500  # Reduced for better diversity
         self.sampling_logged = False
         self.use_scaling = True
     
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         simplified_params = {
-            'C': 0.3,
-            'max_iter': 1500,
+            'C': 0.5,
+            'max_iter': 2000,
             'n_jobs': 4,
-            'tol': 0.001
+            'tol': 0.0001
         }
         
         self.params.update(simplified_params)
@@ -517,8 +638,8 @@ class LogisticModel(BaseModel):
     def _apply_quick_mode_params(self):
         """Apply quick mode parameters for rapid testing"""
         quick_params = {
-            'C': 0.3,
-            'max_iter': 800,
+            'C': 0.5,
+            'max_iter': 1000,
             'n_jobs': 2,
             'solver': 'saga',
             'tol': 0.001
@@ -563,8 +684,9 @@ class LogisticModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Logistic regression model training with scaling and calibration"""
+        """Enhanced logistic regression model training with scaling and calibration"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
+        start_time = time.time()
         
         def _fit_internal():
             self.feature_names = list(X_train.columns)
@@ -574,8 +696,8 @@ class LogisticModel(BaseModel):
             
             # Memory check and potential sampling
             memory_status = self.memory_monitor.get_memory_status()
-            if memory_status['level'] in ['critical', 'warning'] and len(X_train) > 50000:
-                target_size = 30000 if memory_status['level'] == 'warning' else 15000
+            if memory_status['level'] in ['critical', 'warning'] and len(X_train) > 80000:  # Increased threshold
+                target_size = 50000 if memory_status['level'] == 'warning' else 25000
                 X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
             else:
                 X_train_sample, y_train_sample = X_train, y_train
@@ -584,21 +706,33 @@ class LogisticModel(BaseModel):
             X_train_clean = self._safe_data_preprocessing(X_train_sample, fit_scaler=True)
             
             # Fit model
-            logger.info(f"{self.name}: Starting training with scaling")
+            logger.info(f"{self.name}: Starting training with enhanced parameters")
             self.model.fit(X_train_clean, y_train_sample)
             
             logger.info(f"{self.name}: Training completed successfully")
             self.is_fitted = True
             
-            # MANDATORY calibration if validation data available
+            # Calculate validation score
             if X_val is not None and y_val is not None and len(X_val) > 0:
-                calibration_success = self.apply_calibration(X_val, y_val, method='isotonic')
+                try:
+                    val_pred = self.predict_proba_raw(X_val)
+                    from sklearn.metrics import roc_auc_score
+                    self.validation_score = roc_auc_score(y_val, val_pred)
+                except:
+                    self.validation_score = 0.5
+            
+            # Enhanced calibration if validation data available
+            if X_val is not None and y_val is not None and len(X_val) > 0:
+                calibration_success = self.apply_calibration(X_val, y_val, method='auto')
                 if calibration_success:
-                    logger.info(f"{self.name}: Calibration completed successfully")
+                    logger.info(f"{self.name}: Enhanced calibration completed successfully")
                 else:
                     logger.warning(f"{self.name}: Calibration failed - basic CTR correction applied")
             else:
                 logger.warning(f"{self.name}: No validation data - calibration skipped")
+            
+            # Record training time
+            self.training_time = time.time() - start_time
             
             # Cleanup
             del X_train_clean
@@ -621,10 +755,10 @@ class LogisticModel(BaseModel):
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
             return self._enhance_prediction_diversity(proba)
         
-        return self._memory_safe_predict(_predict_internal, X, batch_size=40000)
+        return self._memory_safe_predict(_predict_internal, X, batch_size=50000)  # Increased batch size
 
 class LightGBMModel(BaseModel):
-    """LightGBM model with regularization and calibration"""
+    """Enhanced LightGBM model with optimized parameters"""
     
     def __init__(self, name: str = "LightGBM", params: Dict[str, Any] = None):
         if not LIGHTGBM_AVAILABLE:
@@ -632,18 +766,18 @@ class LightGBMModel(BaseModel):
         
         default_params = {
             'objective': 'binary',
-            'metric': 'auc',
+            'metric': 'binary_logloss',
             'boosting_type': 'gbdt',
-            'num_leaves': 31,
-            'learning_rate': 0.05,  # Slightly higher learning rate
-            'feature_fraction': 0.8,
-            'bagging_fraction': 0.8,
+            'num_leaves': 63,  # Increased from 31
+            'learning_rate': 0.06,  # Increased from 0.05
+            'feature_fraction': 0.85,  # Increased from 0.8
+            'bagging_fraction': 0.85,  # Increased from 0.8
             'bagging_freq': 5,
-            'min_data_in_leaf': 150,  # Reduced for better learning
-            'lambda_l1': 0.3,  # Reduced regularization
-            'lambda_l2': 0.3,
-            'min_gain_to_split': 0.01,  # Reduced for better splits
-            'max_depth': 6,  # Slightly deeper
+            'min_data_in_leaf': 200,  # Increased from 150
+            'lambda_l1': 0.4,  # Reduced from 0.3
+            'lambda_l2': 0.4,  # Reduced from 0.3
+            'min_gain_to_split': 0.015,  # Increased slightly from 0.01
+            'max_depth': 8,  # Increased from 6
             'save_binary': True,
             'seed': 42,
             'feature_fraction_seed': 42,
@@ -651,29 +785,29 @@ class LightGBMModel(BaseModel):
             'drop_seed': 42,
             'data_random_seed': 42,
             'verbose': -1,
-            'n_estimators': 600,
-            'early_stopping_rounds': 100
+            'n_estimators': 800,  # Increased from 600
+            'early_stopping_rounds': 120  # Increased from 100
         }
         
         if params:
             default_params.update(params)
         
         super().__init__(name, default_params)
-        self.prediction_diversity_threshold = 2500
+        self.prediction_diversity_threshold = 2200  # Reduced for better diversity
         self.use_scaling = False
     
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         simplified_params = {
-            'num_leaves': 15,
-            'max_depth': 4,
-            'n_estimators': 400,
-            'min_data_in_leaf': 200,
-            'num_threads': 4,
-            'max_bin': 64,
-            'early_stopping_rounds': 50,
-            'feature_fraction': 0.7,
-            'bagging_fraction': 0.7
+            'num_leaves': 31,
+            'max_depth': 6,
+            'n_estimators': 500,
+            'min_data_in_leaf': 250,
+            'num_threads': 6,
+            'max_bin': 128,
+            'early_stopping_rounds': 80,
+            'feature_fraction': 0.75,
+            'bagging_fraction': 0.75
         }
         
         self.params.update(simplified_params)
@@ -682,14 +816,14 @@ class LightGBMModel(BaseModel):
     def _apply_quick_mode_params(self):
         """Apply quick mode parameters for rapid testing"""
         quick_params = {
-            'num_leaves': 15,
-            'max_depth': 4,
-            'n_estimators': 100,
+            'num_leaves': 31,
+            'max_depth': 6,
+            'n_estimators': 150,
             'learning_rate': 0.1,
             'min_data_in_leaf': 20,
             'num_threads': 4,
-            'max_bin': 64,
-            'early_stopping_rounds': 15,
+            'max_bin': 128,
+            'early_stopping_rounds': 20,
             'feature_fraction': 0.8,
             'bagging_fraction': 0.8,
             'verbosity': -1
@@ -700,8 +834,9 @@ class LightGBMModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """LightGBM model training with mandatory calibration"""
+        """Enhanced LightGBM model training with optimized parameters"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
+        start_time = time.time()
         
         def _fit_internal():
             self.feature_names = list(X_train.columns)
@@ -714,7 +849,7 @@ class LightGBMModel(BaseModel):
             
             # Memory efficient dataset creation
             train_params = {
-                'max_bin': self.params.get('max_bin', 128),
+                'max_bin': self.params.get('max_bin', 255),  # Increased from 128
                 'verbosity': -1
             }
             
@@ -743,10 +878,10 @@ class LightGBMModel(BaseModel):
                 valid_names.append('valid')
             
             # Extract callback parameters from main params
-            early_stopping = self.params.pop('early_stopping_rounds', 100)
-            n_estimators = self.params.pop('n_estimators', 600)
+            early_stopping = self.params.pop('early_stopping_rounds', 120)
+            n_estimators = self.params.pop('n_estimators', 800)
             
-            # Train with memory efficient callbacks
+            # Train with enhanced parameters
             self.model = lgb.train(
                 self.params,
                 train_data,
@@ -761,16 +896,28 @@ class LightGBMModel(BaseModel):
             
             self.is_fitted = True
             
-            # MANDATORY calibration
+            # Calculate validation score
             if X_val_clean is not None and y_val is not None and len(y_val) > 0:
-                logger.info(f"{self.name}: Starting mandatory calibration")
-                calibration_success = self.apply_calibration(pd.DataFrame(X_val_clean, columns=self.feature_names), y_val, method='isotonic')
+                try:
+                    val_pred = self.predict_proba_raw(pd.DataFrame(X_val_clean, columns=self.feature_names))
+                    from sklearn.metrics import roc_auc_score
+                    self.validation_score = roc_auc_score(y_val, val_pred)
+                except:
+                    self.validation_score = 0.5
+            
+            # Enhanced calibration
+            if X_val_clean is not None and y_val is not None and len(y_val) > 0:
+                logger.info(f"{self.name}: Starting enhanced calibration")
+                calibration_success = self.apply_calibration(pd.DataFrame(X_val_clean, columns=self.feature_names), y_val, method='auto')
                 if calibration_success:
-                    logger.info(f"{self.name}: Calibration completed successfully")
+                    logger.info(f"{self.name}: Enhanced calibration completed successfully")
                 else:
                     logger.warning(f"{self.name}: Calibration failed - basic CTR correction applied")
             else:
                 logger.warning(f"{self.name}: No validation data - calibration skipped")
+            
+            # Record training time
+            self.training_time = time.time() - start_time
             
             # Cleanup
             del X_train_clean
@@ -797,10 +944,10 @@ class LightGBMModel(BaseModel):
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
             return self._enhance_prediction_diversity(proba)
         
-        return self._memory_safe_predict(_predict_internal, X, batch_size=30000)
+        return self._memory_safe_predict(_predict_internal, X, batch_size=40000)  # Increased batch size
 
 class XGBoostModel(BaseModel):
-    """XGBoost model with regularization and calibration"""
+    """Enhanced XGBoost model with optimized parameters"""
     
     def __init__(self, name: str = "XGBoost", params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
@@ -808,42 +955,42 @@ class XGBoostModel(BaseModel):
         
         default_params = {
             'objective': 'binary:logistic',
-            'eval_metric': 'auc',
+            'eval_metric': 'logloss',
             'tree_method': 'hist',
-            'max_depth': 6,  # Slightly deeper
-            'learning_rate': 0.05,
-            'n_estimators': 500,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'colsample_bylevel': 0.8,
-            'colsample_bynode': 0.8,
-            'reg_alpha': 0.3,  # Reduced regularization
-            'reg_lambda': 0.3,
-            'min_child_weight': 8,  # Slightly reduced
-            'gamma': 0.05,  # Reduced for better splits
+            'max_depth': 8,  # Increased from 6
+            'learning_rate': 0.06,  # Increased from 0.05
+            'n_estimators': 700,  # Increased from 500
+            'subsample': 0.85,  # Increased from 0.8
+            'colsample_bytree': 0.85,  # Increased from 0.8
+            'colsample_bylevel': 0.85,  # Increased from 0.8
+            'colsample_bynode': 0.85,  # Increased from 0.8
+            'reg_alpha': 0.4,  # Reduced from 0.3
+            'reg_lambda': 0.4,  # Reduced from 0.3
+            'min_child_weight': 6,  # Reduced from 8
+            'gamma': 0.03,  # Reduced from 0.05
             'scale_pos_weight': 52.3,
             'random_state': 42,
             'n_jobs': -1,
-            'early_stopping_rounds': 100
+            'early_stopping_rounds': 120  # Increased from 100
         }
         
         if params:
             default_params.update(params)
         
         super().__init__(name, default_params)
-        self.prediction_diversity_threshold = 2200
+        self.prediction_diversity_threshold = 2000  # Reduced for better diversity
         self.use_scaling = False
     
     def _simplify_for_memory(self):
         """Simplify parameters when memory is low"""
         simplified_params = {
-            'max_depth': 4,
-            'n_estimators': 300,
+            'max_depth': 6,
+            'n_estimators': 400,
             'learning_rate': 0.1,
-            'subsample': 0.7,
-            'colsample_bytree': 0.7,
-            'early_stopping_rounds': 50,
-            'n_jobs': 4
+            'subsample': 0.75,
+            'colsample_bytree': 0.75,
+            'early_stopping_rounds': 80,
+            'n_jobs': 6
         }
         
         self.params.update(simplified_params)
@@ -852,12 +999,12 @@ class XGBoostModel(BaseModel):
     def _apply_quick_mode_params(self):
         """Apply quick mode parameters for rapid testing"""
         quick_params = {
-            'max_depth': 4,
-            'n_estimators': 100,
+            'max_depth': 6,
+            'n_estimators': 150,
             'learning_rate': 0.1,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
-            'early_stopping_rounds': 15,
+            'early_stopping_rounds': 20,
             'n_jobs': 4
         }
         
@@ -866,8 +1013,9 @@ class XGBoostModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """XGBoost model training with mandatory calibration"""
+        """Enhanced XGBoost model training with optimized parameters"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
+        start_time = time.time()
         
         def _fit_internal():
             self.feature_names = list(X_train.columns)
@@ -899,13 +1047,13 @@ class XGBoostModel(BaseModel):
                 )
                 eval_set.append((dval, 'eval'))
             
-            early_stopping = self.params.pop('early_stopping_rounds', 100)
+            early_stopping = self.params.pop('early_stopping_rounds', 120)
             
-            logger.info(f"{self.name}: Starting XGBoost training")
+            logger.info(f"{self.name}: Starting XGBoost training with enhanced parameters")
             self.model = xgb.train(
                 self.params,
                 dtrain,
-                num_boost_round=self.params.get('n_estimators', 500),
+                num_boost_round=self.params.get('n_estimators', 700),
                 evals=eval_set,
                 early_stopping_rounds=early_stopping,
                 verbose_eval=0
@@ -914,18 +1062,30 @@ class XGBoostModel(BaseModel):
             logger.info(f"{self.name}: Training completed successfully")
             self.is_fitted = True
             
-            # MANDATORY calibration
+            # Calculate validation score
             if dval is not None:
-                logger.info(f"{self.name}: Starting mandatory calibration")
+                try:
+                    val_pred = self.model.predict(dval)
+                    from sklearn.metrics import roc_auc_score
+                    self.validation_score = roc_auc_score(y_val, val_pred)
+                except:
+                    self.validation_score = 0.5
+            
+            # Enhanced calibration
+            if dval is not None:
+                logger.info(f"{self.name}: Starting enhanced calibration")
                 X_val_clean = self._safe_data_preprocessing(X_val)
                 
-                calibration_success = self.apply_calibration(pd.DataFrame(X_val_clean, columns=self.feature_names), y_val, method='isotonic')
+                calibration_success = self.apply_calibration(pd.DataFrame(X_val_clean, columns=self.feature_names), y_val, method='auto')
                 if calibration_success:
-                    logger.info(f"{self.name}: Calibration completed successfully")
+                    logger.info(f"{self.name}: Enhanced calibration completed successfully")
                 else:
                     logger.warning(f"{self.name}: Calibration failed - basic CTR correction applied")
             else:
                 logger.warning(f"{self.name}: No validation data - calibration skipped")
+            
+            # Record training time
+            self.training_time = time.time() - start_time
             
             # Cleanup
             del dtrain
@@ -959,20 +1119,20 @@ class XGBoostModel(BaseModel):
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
             return self._enhance_prediction_diversity(proba)
         
-        return self._memory_safe_predict(_predict_internal, X, batch_size=20000)
+        return self._memory_safe_predict(_predict_internal, X, batch_size=25000)  # Increased batch size
 
 class ModelFactory:
-    """Model factory for creating models with mandatory calibration"""
+    """Enhanced model factory for creating models with improved capabilities"""
     
     _factory_logged = False
     
     @staticmethod
     def create_model(model_type: str, **kwargs) -> BaseModel:
-        """Create model by type with calibration support"""
+        """Create model by type with enhanced calibration support"""
         try:
             if not ModelFactory._factory_logged:
                 memory_monitor = MemoryMonitor()
-                logger.info(f"Creating model: {model_type} (mandatory calibration enabled)")
+                logger.info(f"Creating enhanced model: {model_type} (improved calibration enabled)")
                 
                 # Get appropriate thresholds for logging
                 if kwargs.get('quick_mode', False):
@@ -1005,11 +1165,11 @@ class ModelFactory:
             if quick_mode:
                 model.set_quick_mode(True)
             
-            logger.info(f"{model_type} model creation complete - mandatory calibration enabled")
+            logger.info(f"{model_type} enhanced model creation complete - improved calibration enabled")
             return model
                 
         except Exception as e:
-            logger.error(f"Model creation failed ({model_type}): {e}")
+            logger.error(f"Enhanced model creation failed ({model_type}): {e}")
             raise
     
     @staticmethod
@@ -1024,12 +1184,12 @@ class ModelFactory:
         if XGBOOST_AVAILABLE:
             available.append('xgboost')
         
-        logger.info(f"Available models: {available} (all with mandatory calibration)")
+        logger.info(f"Available enhanced models: {available} (all with improved calibration)")
         return available
     
     @staticmethod
     def get_model_priority() -> List[str]:
-        """Model priority list"""
+        """Model priority list for enhanced performance"""
         priority_order = []
         
         if LIGHTGBM_AVAILABLE:
@@ -1064,6 +1224,7 @@ class ModelFactory:
         else:
             return ModelFactory.get_available_models()
 
+# Enhanced model aliases for consistency
 FinalLightGBMModel = LightGBMModel
 FinalXGBoostModel = XGBoostModel  
 FinalLogisticModel = LogisticModel
