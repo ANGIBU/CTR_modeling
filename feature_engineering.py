@@ -321,7 +321,7 @@ class CTRFeatureEngineer:
             for col in X.columns:
                 if X[col].dtype in ['int64', 'float64', 'int32', 'float32']:
                     unique_count = X[col].nunique()
-                    if unique_count > 20:  # Treat as numerical
+                    if unique_count > 20:
                         self.numerical_features.append(col)
                     else:
                         self.categorical_features.append(col)
@@ -368,42 +368,34 @@ class CTRFeatureEngineer:
             
             for col in df_filled.columns:
                 if df_filled[col].dtype in ['int64', 'float64', 'int32', 'float32']:
-                    # For numeric columns, fill with 0
                     df_filled[col] = df_filled[col].fillna(0)
                 else:
-                    # For object/string columns, fill with 'missing'
                     df_filled[col] = df_filled[col].fillna('missing').astype('object')
             
             return df_filled
             
         except Exception as e:
             logger.warning(f"Safe fillna failed: {e}")
-            # Fallback: convert all categorical to object first
             df_converted = self._convert_categorical_to_object(df)
             return df_converted.fillna(0)
     
     def _unify_data_types_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Safe data type unification"""
         try:
-            # Convert categorical columns to object first
             X_train = self._convert_categorical_to_object(X_train)
             X_test = self._convert_categorical_to_object(X_test)
             
             for col in X_train.columns:
                 if col in X_test.columns:
-                    # Try to unify data types safely
                     try:
                         if X_train[col].dtype != X_test[col].dtype:
-                            # Convert both to string first, then to most appropriate type
                             train_str = X_train[col].astype(str)
                             test_str = X_test[col].astype(str)
                             
-                            # Try numeric conversion
                             try:
                                 X_train[col] = pd.to_numeric(train_str, errors='coerce').fillna(0)
                                 X_test[col] = pd.to_numeric(test_str, errors='coerce').fillna(0)
                             except:
-                                # Keep as object/string
                                 X_train[col] = train_str.astype('object')
                                 X_test[col] = test_str.astype('object')
                     
@@ -421,13 +413,11 @@ class CTRFeatureEngineer:
     def _fix_basic_data_types_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Safe basic data type fixes"""
         try:
-            # Convert categorical columns first
             X_train = self._convert_categorical_to_object(X_train)
             X_test = self._convert_categorical_to_object(X_test)
             
             for col in X_train.columns:
                 if col in X_test.columns:
-                    # Simple type conversion
                     try:
                         if X_train[col].dtype == 'object':
                             X_train[col] = X_train[col].astype(str)
@@ -445,7 +435,6 @@ class CTRFeatureEngineer:
     def _clean_basic_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Clean basic features"""
         try:
-            # Fill missing values with safe handling
             X_train = self._safe_fillna(X_train)
             X_test = self._safe_fillna(X_test)
             
@@ -453,13 +442,6 @@ class CTRFeatureEngineer:
             
         except Exception as e:
             logger.error(f"Basic feature cleaning failed: {e}")
-            # Convert categorical to object and then fill
-            X_train = self._convert_categorical_to_object(X_train)
-            X_test = self._convert_categorical_to_object(X_test)
-            
-            X_train = X_train.fillna(0)
-            X_test = X_test.fillna(0)
-            
             return X_train, X_test
     
     def _create_enhanced_target_encoding_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -475,29 +457,31 @@ class CTRFeatureEngineer:
             for col in self.categorical_features:
                 if col in X_train.columns:
                     cardinality = X_train[col].nunique()
-                    if 2 < cardinality < 2000:  # Expanded range
+                    if 2 < cardinality < 2000:
                         cat_features_to_encode.append(col)
             
-            # Expanded to top 20 features for enhanced performance
             if len(cat_features_to_encode) > 20:
                 cat_features_to_encode = cat_features_to_encode[:20]
             
             for col in cat_features_to_encode:
                 try:
-                    # Ensure columns are object type
                     X_train[col] = X_train[col].astype('object')
                     X_test[col] = X_test[col].astype('object')
                     
                     if self.config.FEATURE_ENGINEERING_CONFIG.get('enable_cross_validation_encoding', True):
-                        # Cross-validation target encoding
+                        # Cross-validation target encoding (FIXED: use fit and transform separately)
                         encoded_train = np.zeros(len(X_train))
                         kf = KFold(n_splits=5, shuffle=True, random_state=42)
                         
                         for train_idx, val_idx in kf.split(X_train):
                             encoder = TargetEncoder(target_type='binary', smooth='auto')
-                            encoded_train[val_idx] = encoder.fit_transform(
+                            # Fix: Use fit and transform separately
+                            encoder.fit(
                                 X_train[col].iloc[train_idx].values.reshape(-1, 1), 
                                 y_train.iloc[train_idx]
+                            )
+                            encoded_train[val_idx] = encoder.transform(
+                                X_train[col].iloc[val_idx].values.reshape(-1, 1)
                             ).flatten()
                         
                         # Train encoder on full data for test set
@@ -519,7 +503,6 @@ class CTRFeatureEngineer:
                         X_train[feature_name] = X_train_encoded
                         X_test[feature_name] = X_test_encoded
                     
-                    # Store encoder
                     self.target_encoders[col] = encoder
                     self.target_encoding_features.append(feature_name)
                     
@@ -543,20 +526,17 @@ class CTRFeatureEngineer:
             
             logger.info("Creating expanded interaction features")
             
-            # Select top numerical features by variance
             numeric_features_selected = []
             for col in self.numerical_features:
                 if col in X_train.columns:
                     if X_train[col].var() > 0:
                         numeric_features_selected.append(col)
             
-            # Expanded to top 15 features for enhanced performance
             if len(numeric_features_selected) > 15:
                 numeric_features_selected = numeric_features_selected[:15]
             
-            # Create pairwise interactions
             interaction_count = 0
-            max_interactions = 50  # Increased from 10
+            max_interactions = 50
             
             for i in range(len(numeric_features_selected)):
                 for j in range(i + 1, len(numeric_features_selected)):
@@ -573,7 +553,7 @@ class CTRFeatureEngineer:
                         self.interaction_features.append(feature_name)
                         interaction_count += 1
                         
-                        # Addition interaction (new)
+                        # Addition interaction
                         if interaction_count < max_interactions:
                             feature_name = f"{col1}_plus_{col2}"
                             X_train[feature_name] = X_train[col1] + X_train[col2]
@@ -585,7 +565,7 @@ class CTRFeatureEngineer:
                         logger.warning(f"Expanded interaction feature creation failed for {col1} x {col2}: {e}")
                         continue
             
-            # Three-way interactions for top features
+            # Three-way interactions
             if len(numeric_features_selected) >= 3:
                 max_three_way = 10
                 three_way_count = 0
@@ -625,17 +605,14 @@ class CTRFeatureEngineer:
             
             logger.info("Creating enhanced statistical features")
             
-            # Select numerical features for statistical transformation
-            numeric_cols = [col for col in self.numerical_features if col in X_train.columns][:12]  # Increased from 8
+            numeric_cols = [col for col in self.numerical_features if col in X_train.columns][:12]
             
             if len(numeric_cols) < 3:
                 return X_train, X_test
             
-            # Calculate statistical features across rows
             numeric_data_train = X_train[numeric_cols].values
             numeric_data_test = X_test[numeric_cols].values
             
-            # Basic row-wise statistics
             X_train['row_mean'] = np.mean(numeric_data_train, axis=1)
             X_test['row_mean'] = np.mean(numeric_data_test, axis=1)
             
@@ -648,7 +625,6 @@ class CTRFeatureEngineer:
             X_train['row_max'] = np.max(numeric_data_train, axis=1)
             X_test['row_max'] = np.max(numeric_data_test, axis=1)
             
-            # Enhanced statistical features
             X_train['row_median'] = np.median(numeric_data_train, axis=1)
             X_test['row_median'] = np.median(numeric_data_test, axis=1)
             
@@ -664,7 +640,6 @@ class CTRFeatureEngineer:
             X_train['row_skew'] = np.apply_along_axis(lambda x: pd.Series(x).skew(), 1, numeric_data_train)
             X_test['row_skew'] = np.apply_along_axis(lambda x: pd.Series(x).skew(), 1, numeric_data_test)
             
-            # Handle NaN values
             for feature in ['row_mean', 'row_std', 'row_min', 'row_max', 'row_median', 
                            'row_q25', 'row_q75', 'row_range', 'row_skew']:
                 X_train[feature] = X_train[feature].fillna(0)
@@ -690,16 +665,13 @@ class CTRFeatureEngineer:
             
             logger.info("Creating CV frequency features")
             
-            # Select categorical features for frequency encoding
-            cat_features_selected = [col for col in self.categorical_features if col in X_train.columns][:8]  # Increased from 5
+            cat_features_selected = [col for col in self.categorical_features if col in X_train.columns][:8]
             
             for col in cat_features_selected:
                 try:
-                    # Ensure column is object type
                     X_train[col] = X_train[col].astype('object')
                     X_test[col] = X_test[col].astype('object')
                     
-                    # CV-based frequency encoding
                     encoded_train = np.zeros(len(X_train))
                     kf = KFold(n_splits=5, shuffle=True, random_state=42)
                     
@@ -707,16 +679,13 @@ class CTRFeatureEngineer:
                         freq_map = X_train[col].iloc[train_idx].value_counts().to_dict()
                         encoded_train[val_idx] = X_train[col].iloc[val_idx].map(freq_map).fillna(0)
                     
-                    # Calculate frequency mapping on full training data for test set
                     freq_map_full = X_train[col].value_counts().to_dict()
                     encoded_test = X_test[col].map(freq_map_full).fillna(0)
                     
-                    # Add features
                     feature_name = f"{col}_frequency_cv"
                     X_train[feature_name] = encoded_train
                     X_test[feature_name] = encoded_test
                     
-                    # Also add normalized frequency
                     feature_name_norm = f"{col}_frequency_norm"
                     max_freq = max(encoded_train.max(), encoded_test.max())
                     if max_freq > 0:
@@ -746,11 +715,10 @@ class CTRFeatureEngineer:
             
             logger.info("Creating enhanced cross features")
             
-            # Select categorical features for crossing
-            cat_features_selected = [col for col in self.categorical_features if col in X_train.columns][:6]  # Increased from 4
+            cat_features_selected = [col for col in self.categorical_features if col in X_train.columns][:6]
             
             cross_count = 0
-            max_crosses = 15  # Increased from 6
+            max_crosses = 15
             
             for i in range(len(cat_features_selected)):
                 for j in range(i + 1, len(cat_features_selected)):
@@ -760,13 +728,11 @@ class CTRFeatureEngineer:
                     col1, col2 = cat_features_selected[i], cat_features_selected[j]
                     
                     try:
-                        # Ensure columns are object type
                         X_train[col1] = X_train[col1].astype('object')
                         X_train[col2] = X_train[col2].astype('object')
                         X_test[col1] = X_test[col1].astype('object')
                         X_test[col2] = X_test[col2].astype('object')
                         
-                        # Create cross feature with better separator
                         feature_name = f"{col1}_cross_{col2}"
                         X_train[feature_name] = X_train[col1].astype(str) + "_X_" + X_train[col2].astype(str)
                         X_test[feature_name] = X_test[col1].astype(str) + "_X_" + X_test[col2].astype(str)
@@ -789,7 +755,6 @@ class CTRFeatureEngineer:
     def _create_temporal_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Create temporal features if time-related columns exist"""
         try:
-            # Look for time-related columns
             time_columns = []
             for col in X_train.columns:
                 if any(time_keyword in col.lower() for time_keyword in ['time', 'date', 'hour', 'day', 'minute']):
@@ -803,7 +768,6 @@ class CTRFeatureEngineer:
             for col in time_columns:
                 try:
                     if col in X_train.columns and X_train[col].dtype in ['int64', 'float64']:
-                        # Create cyclic features for time-related columns
                         if 'hour' in col.lower():
                             X_train[f'{col}_sin'] = np.sin(2 * np.pi * X_train[col] / 24)
                             X_train[f'{col}_cos'] = np.cos(2 * np.pi * X_train[col] / 24)
@@ -839,64 +803,45 @@ class CTRFeatureEngineer:
             
             logger.info("Creating enhanced binning features")
             
-            # Select numerical features for binning
-            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:8]  # Increased from 5
+            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:8]
             
             for col in numeric_features_selected:
                 try:
-                    # Ensure column is numeric
-                    X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0)
-                    X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0)
-                    
-                    # Strategy 1: Quantile-based binning
-                    try:
-                        train_binned, bin_edges = pd.qcut(X_train[col], q=8, labels=False, duplicates='drop', retbins=True)
-                        train_binned = train_binned.fillna(0)
-                        
-                        test_binned = pd.cut(X_test[col], bins=bin_edges, labels=False, include_lowest=True)
-                        test_binned = test_binned.fillna(0)
-                        
-                        feature_name = f"{col}_qbinned"
-                        X_train[feature_name] = train_binned.astype('int32')
-                        X_test[feature_name] = test_binned.astype('int32')
-                        self.binning_features.append(feature_name)
-                        
-                    except Exception:
-                        # Fallback to uniform binning
-                        min_val = X_train[col].min()
-                        max_val = X_train[col].max()
-                        
-                        if max_val > min_val:
-                            bins = np.linspace(min_val, max_val, 9)  # 8 bins
+                    if X_train[col].nunique() > 10:
+                        # Quantile binning
+                        try:
+                            bins = np.percentile(X_train[col].dropna(), [0, 25, 50, 75, 100])
+                            bins = np.unique(bins)
                             
-                            train_binned = pd.cut(X_train[col], bins=bins, labels=False, include_lowest=True)
-                            test_binned = pd.cut(X_test[col], bins=bins, labels=False, include_lowest=True)
-                            
-                            feature_name = f"{col}_ubinned"
-                            X_train[feature_name] = train_binned.fillna(0).astype('int32')
-                            X_test[feature_name] = test_binned.fillna(0).astype('int32')
-                            self.binning_features.append(feature_name)
-                    
-                    # Strategy 2: Standard deviation based binning
-                    try:
-                        mean_val = X_train[col].mean()
-                        std_val = X_train[col].std()
+                            if len(bins) > 2:
+                                train_binned = pd.cut(X_train[col], bins=bins, labels=False, duplicates='drop')
+                                test_binned = pd.cut(X_test[col], bins=bins, labels=False, duplicates='drop')
+                                
+                                feature_name = f"{col}_binned"
+                                X_train[feature_name] = train_binned.fillna(0).astype('int32')
+                                X_test[feature_name] = test_binned.fillna(0).astype('int32')
+                                self.binning_features.append(feature_name)
                         
-                        if std_val > 0:
-                            # Create bins based on standard deviations
-                            bins = [float('-inf'), mean_val - 2*std_val, mean_val - std_val, 
-                                   mean_val, mean_val + std_val, mean_val + 2*std_val, float('inf')]
+                        except Exception as e:
+                            logger.warning(f"Quantile binning failed for {col}: {e}")
+                        
+                        # Standard deviation binning
+                        try:
+                            mean = X_train[col].mean()
+                            std = X_train[col].std()
                             
-                            train_std_binned = pd.cut(X_train[col], bins=bins, labels=False)
-                            test_std_binned = pd.cut(X_test[col], bins=bins, labels=False)
-                            
-                            feature_name = f"{col}_stdbinned"
-                            X_train[feature_name] = train_std_binned.fillna(2).astype('int32')  # Fill with middle bin
-                            X_test[feature_name] = test_std_binned.fillna(2).astype('int32')
-                            self.binning_features.append(feature_name)
-                    
-                    except Exception as e:
-                        logger.warning(f"Std binning failed for {col}: {e}")
+                            if std > 0:
+                                bins = [float('-inf'), mean - std, mean, mean + std, float('inf')]
+                                train_std_binned = pd.cut(X_train[col], bins=bins, labels=False)
+                                test_std_binned = pd.cut(X_test[col], bins=bins, labels=False)
+                                
+                                feature_name = f"{col}_stdbinned"
+                                X_train[feature_name] = train_std_binned.fillna(2).astype('int32')
+                                X_test[feature_name] = test_std_binned.fillna(2).astype('int32')
+                                self.binning_features.append(feature_name)
+                        
+                        except Exception as e:
+                            logger.warning(f"Std binning failed for {col}: {e}")
                     
                 except Exception as e:
                     logger.warning(f"Enhanced binning failed for {col}: {e}")
@@ -918,8 +863,7 @@ class CTRFeatureEngineer:
             
             logger.info("Creating enhanced rank features")
             
-            # Select numerical features for ranking
-            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:6]  # Increased from 4
+            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:6]
             
             for col in numeric_features_selected:
                 try:
@@ -938,7 +882,6 @@ class CTRFeatureEngineer:
                     # Quantile-based rank
                     try:
                         feature_name = f"{col}_quantilerank"
-                        # Use training data quantiles for both train and test
                         quantiles = X_train[col].quantile([0.25, 0.5, 0.75]).values
                         
                         train_qrank = np.searchsorted(quantiles, X_train[col])
@@ -971,11 +914,10 @@ class CTRFeatureEngineer:
             
             logger.info("Creating enhanced ratio features")
             
-            # Select numerical features for ratio calculation
-            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:8]  # Increased from 6
+            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:8]
             
             ratio_count = 0
-            max_ratios = 20  # Increased from 8
+            max_ratios = 20
             
             for i in range(len(numeric_features_selected)):
                 for j in range(i + 1, len(numeric_features_selected)):
@@ -985,7 +927,6 @@ class CTRFeatureEngineer:
                     col1, col2 = numeric_features_selected[i], numeric_features_selected[j]
                     
                     try:
-                        # Safe division with epsilon
                         epsilon = 1e-8
                         
                         # Ratio feature col1/col2
@@ -996,7 +937,6 @@ class CTRFeatureEngineer:
                         X_train[feature_name] = X_train[col1] / denominator_train
                         X_test[feature_name] = X_test[col1] / denominator_test
                         
-                        # Handle extreme values
                         X_train[feature_name] = np.clip(X_train[feature_name], -1e6, 1e6)
                         X_test[feature_name] = np.clip(X_test[feature_name], -1e6, 1e6)
                         
@@ -1038,8 +978,7 @@ class CTRFeatureEngineer:
             
             logger.info("Creating enhanced polynomial features")
             
-            # Select top numerical features for polynomial transformation
-            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:5]  # Increased from 3
+            numeric_features_selected = [col for col in self.numerical_features if col in X_train.columns][:5]
             
             for col in numeric_features_selected:
                 try:
@@ -1055,7 +994,7 @@ class CTRFeatureEngineer:
                     X_test[feature_name] = X_test[col] ** 3
                     self.polynomial_features.append(feature_name)
                     
-                    # Square root feature (for positive values)
+                    # Square root feature
                     try:
                         if X_train[col].min() >= 0:
                             feature_name = f"{col}_sqrt"
@@ -1065,7 +1004,7 @@ class CTRFeatureEngineer:
                     except Exception:
                         pass
                     
-                    # Log feature (for positive values)
+                    # Log feature
                     try:
                         if X_train[col].min() > 0:
                             feature_name = f"{col}_log"
@@ -1098,22 +1037,18 @@ class CTRFeatureEngineer:
             from sklearn.cluster import KMeans
             from sklearn.preprocessing import StandardScaler
             
-            # Select features for clustering
             cluster_features = [col for col in self.numerical_features if col in X_train.columns][:10]
             
             if len(cluster_features) < 3:
                 return X_train, X_test
             
-            # Prepare data for clustering
             cluster_data_train = X_train[cluster_features].fillna(0)
             cluster_data_test = X_test[cluster_features].fillna(0)
             
-            # Scale data
             scaler = StandardScaler()
             cluster_data_train_scaled = scaler.fit_transform(cluster_data_train)
             cluster_data_test_scaled = scaler.transform(cluster_data_test)
             
-            # Apply K-means clustering with different k values
             for n_clusters in [5, 10, 15]:
                 try:
                     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
@@ -1125,7 +1060,6 @@ class CTRFeatureEngineer:
                     X_train[feature_name] = train_clusters
                     X_test[feature_name] = test_clusters
                     
-                    # Distance to cluster centers
                     train_distances = np.min(kmeans.transform(cluster_data_train_scaled), axis=1)
                     test_distances = np.min(kmeans.transform(cluster_data_test_scaled), axis=1)
                     
@@ -1155,18 +1089,15 @@ class CTRFeatureEngineer:
             
             logger.info("Creating advanced mathematical features")
             
-            # Select features for advanced operations
             math_features = [col for col in self.numerical_features if col in X_train.columns][:8]
             
             for i, col in enumerate(math_features):
                 try:
                     # Trigonometric features
                     if X_train[col].std() > 0:
-                        # Normalize to [0, 2π] range
                         col_normalized_train = (X_train[col] - X_train[col].min()) / (X_train[col].max() - X_train[col].min()) * 2 * np.pi
                         col_normalized_test = (X_test[col] - X_train[col].min()) / (X_train[col].max() - X_train[col].min()) * 2 * np.pi
                         
-                        # Sine and cosine features
                         X_train[f"{col}_sin"] = np.sin(col_normalized_train)
                         X_test[f"{col}_sin"] = np.sin(col_normalized_test)
                         
@@ -1175,8 +1106,8 @@ class CTRFeatureEngineer:
                         
                         self.advanced_features.extend([f"{col}_sin", f"{col}_cos"])
                     
-                    # Exponential features (with clipping for safety)
-                    if X_train[col].max() < 10:  # Only for reasonable values
+                    # Exponential features
+                    if X_train[col].max() < 10:
                         X_train[f"{col}_exp"] = np.exp(np.clip(X_train[col], -10, 10))
                         X_test[f"{col}_exp"] = np.exp(np.clip(X_test[col], -10, 10))
                         self.advanced_features.append(f"{col}_exp")
@@ -1209,7 +1140,6 @@ class CTRFeatureEngineer:
             logger.error(f"Advanced mathematical features failed: {e}")
             return X_train, X_test
     
-    # Keep all the original methods for backward compatibility
     def _create_target_encoding_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Original target encoding method for fallback"""
         return self._create_enhanced_target_encoding_features(X_train, X_test, y_train)
@@ -1249,17 +1179,14 @@ class CTRFeatureEngineer:
     def _encode_categorical_features_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame, y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Safe categorical feature encoding"""
         try:
-            # Get all categorical features including cross features
             all_categorical_features = self.categorical_features + self.cross_features
             
             for col in all_categorical_features:
                 if col in X_train.columns and col in X_test.columns:
                     try:
-                        # Safe label encoding with object conversion
                         train_str = X_train[col].astype('object').fillna('missing')
                         test_str = X_test[col].astype('object').fillna('missing')
                         
-                        # Get all unique values
                         all_values = sorted(set(train_str.unique()) | set(test_str.unique()))
                         value_map = {val: idx for idx, val in enumerate(all_values)}
                         
@@ -1282,7 +1209,6 @@ class CTRFeatureEngineer:
         try:
             for col in self.categorical_features:
                 if col in X_train.columns and col in X_test.columns:
-                    # Simple label encoding with object conversion
                     train_str = X_train[col].astype('object')
                     test_str = X_test[col].astype('object')
                     
@@ -1301,7 +1227,6 @@ class CTRFeatureEngineer:
     def _create_numeric_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Create numeric features"""
         try:
-            # Ensure all features are numeric
             for col in X_train.columns:
                 if col in X_test.columns:
                     try:
@@ -1331,17 +1256,15 @@ class CTRFeatureEngineer:
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Basic normalization failed: {e}")
+            logger.error(f"Basic numeric normalization failed: {e}")
             return X_train, X_test
     
     def _final_data_cleanup_enhanced(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Enhanced final data cleanup"""
         try:
-            # Replace infinite values
             X_train = X_train.replace([np.inf, -np.inf], 0)
             X_test = X_test.replace([np.inf, -np.inf], 0)
             
-            # Fill any remaining missing values
             X_train = X_train.fillna(0)
             X_test = X_test.fillna(0)
             
@@ -1356,7 +1279,7 @@ class CTRFeatureEngineer:
                 X_test = X_test.drop(columns=constant_features)
                 logger.info(f"Removed {len(constant_features)} constant features")
             
-            # Remove highly correlated features (optional, memory permitting)
+            # Remove highly correlated features
             if len(X_train.columns) > 100:
                 try:
                     corr_matrix = X_train.corr().abs()
@@ -1389,7 +1312,6 @@ class CTRFeatureEngineer:
     def _clean_final_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Clean final features for quick mode"""
         try:
-            # Basic cleanup
             X_train = X_train.replace([np.inf, -np.inf], 0)
             X_test = X_test.replace([np.inf, -np.inf], 0)
             
@@ -1407,7 +1329,6 @@ class CTRFeatureEngineer:
         try:
             self.final_feature_columns = list(X_train.columns)
             
-            # Update processing statistics
             self.processing_stats['processing_time'] = time.time() - self.processing_stats['start_time']
             self.processing_stats['feature_types_count'] = {
                 'original': len(self.original_feature_order),
@@ -1453,7 +1374,6 @@ class CTRFeatureEngineer:
         try:
             logger.info("Creating basic features only (fallback)")
             
-            # Extract target and features
             if target_col in train_df.columns:
                 X_train = train_df.drop(columns=[target_col]).copy()
             else:
@@ -1461,19 +1381,16 @@ class CTRFeatureEngineer:
             
             X_test = test_df.copy()
             
-            # Ensure consistent columns
             common_cols = sorted(set(X_train.columns) & set(X_test.columns))
             X_train = X_train[common_cols]
             X_test = X_test[common_cols]
             
-            # Basic preprocessing with safe categorical handling
             X_train = self._convert_categorical_to_object(X_train)
             X_test = self._convert_categorical_to_object(X_test)
             
             X_train = X_train.fillna(0)
             X_test = X_test.fillna(0)
             
-            # Convert to numeric
             for col in X_train.columns:
                 try:
                     X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0)
@@ -1494,7 +1411,6 @@ class CTRFeatureEngineer:
         try:
             logger.warning("Creating minimal features (emergency fallback)")
             
-            # Use first 10 numeric columns if available
             numeric_cols = train_df.select_dtypes(include=[np.number]).columns
             if target_col in numeric_cols:
                 numeric_cols = [col for col in numeric_cols if col != target_col]
@@ -1502,7 +1418,6 @@ class CTRFeatureEngineer:
             if len(numeric_cols) > 10:
                 numeric_cols = numeric_cols[:10]
             elif len(numeric_cols) == 0:
-                # If no numeric columns, create dummy features
                 X_train = pd.DataFrame({'feature_0': [0] * len(train_df)})
                 X_test = pd.DataFrame({'feature_0': [0] * len(test_df)})
                 return X_train, X_test
@@ -1516,7 +1431,6 @@ class CTRFeatureEngineer:
             
         except Exception as e:
             logger.error(f"Minimal features creation failed: {e}")
-            # Absolute emergency fallback
             X_train = pd.DataFrame({'feature_0': [0] * len(train_df)})
             X_test = pd.DataFrame({'feature_0': [0] * len(test_df)})
             return X_train, X_test
