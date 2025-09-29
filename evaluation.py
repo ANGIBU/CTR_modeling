@@ -372,6 +372,10 @@ class CTRAdvancedMetrics:
             logger.error(f"Enhanced weighted log loss calculation error: {str(e)}")
             return float('inf')
     
+    def combined_score(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
+        """Standard combined score - backward compatibility wrapper"""
+        return self.combined_score_enhanced(y_true, y_pred_proba)
+    
     def combined_score_enhanced(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> float:
         """Enhanced combined score with adaptive hierarchical bias correction"""
         try:
