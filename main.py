@@ -1,4 +1,5 @@
 # main.py
+# score : 0.3275
 
 import os
 import sys
@@ -311,7 +312,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             models_to_train = available_models
             logger.info(f"Full mode: Training all models {models_to_train}")
         
-        # Train models with VALIDATION DATA
+        # Train models
         trained_models = {}
         model_performances = {}
         
@@ -322,13 +323,13 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             force_memory_cleanup()
             
             try:
-                # Train model WITH VALIDATION DATA
+                # Train model
                 model, performance = trainer.train_model(
                     model_name=model_name,
                     X_train=X_train_split,
                     y_train=y_train_split,
-                    X_val=X_val_split,  # VALIDATION DATA PROVIDED
-                    y_val=y_val_split,  # VALIDATION DATA PROVIDED
+                    X_val=X_val_split,
+                    y_val=y_val_split,
                     quick_mode=quick_mode
                 )
                 
@@ -336,14 +337,10 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                     trained_models[model_name] = model
                     model_performances[model_name] = performance
                     
-                    # Add to ensemble
+                    # Add to ensemble - Fixed parameter order
                     ensemble_manager.add_base_model(model_name, model)
                     
                     logger.info(f"{model_name} model training completed successfully")
-                    
-                    # Log calibration status
-                    if hasattr(model, 'is_calibrated'):
-                        logger.info(f"{model_name} calibration status: {model.is_calibrated}")
                 else:
                     logger.error(f"{model_name} model training failed")
                     
@@ -366,7 +363,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             ensemble_enabled = False
         elif ensemble_enabled:
             try:
-                # Prepare ensemble with validation data
+                # Prepare ensemble
                 ensemble_manager.train_all_ensembles(X_val_split, y_val_split)
                 ensemble_used = True
                 logger.info("Ensemble preparation completed")
@@ -386,21 +383,22 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         # Generate predictions
         if ensemble_used and ensemble_manager.final_ensemble and ensemble_manager.final_ensemble.is_fitted:
             logger.info("Using ensemble for prediction")
+            # Get base model predictions
+            base_predictions = {}
+            for name, model in trained_models.items():
+                try:
+                    pred = model.predict_proba(X_test)
+                    base_predictions[name] = pred
+                except Exception as e:
+                    logger.warning(f"Prediction failed for {name}: {e}")
+                    base_predictions[name] = np.full(len(X_test), 0.0191)
+            
+            # Ensemble prediction
             try:
-                predictions, success = ensemble_manager.predict_with_best_ensemble(X_test)
-                
-                if not success:
-                    logger.warning("Ensemble prediction reported failure, using best single model")
-                    best_model_name = list(trained_models.keys())[0]
-                    best_model = trained_models[best_model_name]
-                    predictions = best_model.predict_proba(X_test)
-                    logger.info(f"Using fallback model: {best_model_name}")
+                predictions = ensemble_manager.final_ensemble.predict_proba(base_predictions)
             except Exception as e:
-                logger.error(f"Ensemble prediction failed: {e}")
-                best_model_name = list(trained_models.keys())[0]
-                best_model = trained_models[best_model_name]
-                predictions = best_model.predict_proba(X_test)
-                logger.info(f"Using fallback model: {best_model_name}")
+                logger.warning(f"Ensemble prediction failed: {e}")
+                predictions = np.mean(list(base_predictions.values()), axis=0)
         else:
             # Use single best model
             best_model_name = list(trained_models.keys())[0]
@@ -412,37 +410,25 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 logger.error(f"Single model prediction failed: {e}")
                 predictions = np.full(len(X_test), 0.0191)
         
-        # CTR correction check and application
-        current_ctr = predictions.mean()
-        target_ctr = 0.0191
-        
-        logger.info(f"Prediction CTR before correction: {current_ctr:.4f}")
-        
-        if abs(current_ctr - target_ctr) > 0.002:
-            logger.info(f"Applying CTR correction: {current_ctr:.4f} -> {target_ctr:.4f}")
-            correction_factor = target_ctr / current_ctr if current_ctr > 0 else 1.0
-            predictions = predictions * correction_factor
-            predictions = np.clip(predictions, 0.0001, 0.9999)
-            
-            corrected_ctr = predictions.mean()
-            logger.info(f"Prediction CTR after correction: {corrected_ctr:.4f}")
-        
         # Load sample submission to get proper ID format
         try:
             sample_submission = pd.read_csv('data/sample_submission.csv')
             if len(sample_submission) != len(predictions):
                 logger.warning(f"Sample submission length ({len(sample_submission)}) != predictions length ({len(predictions)})")
+                # Generate IDs in same format as sample
                 submission_df = pd.DataFrame({
                     'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
                     'clicked': predictions
                 })
             else:
+                # Use IDs from sample submission
                 submission_df = pd.DataFrame({
                     'ID': sample_submission['ID'].values,
                     'clicked': predictions
                 })
         except Exception as e:
             logger.warning(f"Could not load sample submission: {e}")
+            # Fallback: generate IDs in expected format
             submission_df = pd.DataFrame({
                 'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
                 'clicked': predictions
@@ -458,23 +444,16 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         
         execution_time = time.time() - start_time
         
-        # Check calibration status
-        calibration_applied = any(
-            hasattr(model, 'is_calibrated') and model.is_calibrated 
-            for model in trained_models.values()
-        )
-        
         results = {
             'quick_mode': quick_mode,
             'execution_time': execution_time,
             'successful_models': len(trained_models),
             'ensemble_enabled': ensemble_enabled,
             'ensemble_used': ensemble_used,
-            'calibration_applied': calibration_applied,
+            'calibration_applied': False,
             'submission_file': submission_path,
             'submission_rows': len(predictions),
-            'model_performances': model_performances,
-            'final_ctr': predictions.mean()
+            'model_performances': model_performances
         }
         
         logger.info(f"Mode: {'QUICK (50 samples)' if quick_mode else 'FULL dataset'}")
@@ -482,8 +461,6 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.info(f"Successful models: {len(trained_models)}")
         logger.info(f"Ensemble activated: {'Yes' if ensemble_enabled else 'No'}")
         logger.info(f"Ensemble actually used: {'Yes' if ensemble_used else 'No'}")
-        logger.info(f"Calibration applied: {'Yes' if calibration_applied else 'No'}")
-        logger.info(f"Final prediction CTR: {predictions.mean():.4f}")
         logger.info(f"Submission file: {len(predictions)} rows")
         
         # Final memory status
@@ -540,6 +517,7 @@ def run_performance_analysis(results: Dict[str, Any]) -> bool:
             
             try:
                 # Create dummy y_true and y_pred for analysis
+                # Using small sample for quick mode
                 n_samples = 50 if results.get('quick_mode', False) else 1000
                 y_true_dummy = np.random.binomial(1, 0.02, n_samples)
                 y_pred_dummy = np.random.uniform(0.001, 0.1, n_samples)
@@ -637,7 +615,6 @@ def main():
                 logger.info(f"Ensemble enabled: {results['ensemble_enabled']}")
                 logger.info(f"Ensemble used: {results['ensemble_used']}")
                 logger.info(f"Calibration applied: {results['calibration_applied']}")
-                logger.info(f"Final prediction CTR: {results.get('final_ctr', 0.0):.4f}")
                 
                 # Performance analysis for trained models
                 performance_results = None
@@ -720,7 +697,8 @@ def main():
         force_memory_cleanup()
         
     except KeyboardInterrupt:
-        logger.info("Execution interrupted by user")l
+        logger.info("Execution interrupted by user")
+        sys.exit(0)
     except Exception as e:
         logger.error(f"System execution failed: {e}")
         logger.error(f"Detailed error: {traceback.format_exc()}")
