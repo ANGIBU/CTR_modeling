@@ -12,7 +12,6 @@ from pathlib import Path
 import pickle
 from scipy.special import betaln
 
-# Safe imports
 try:
     from sklearn.linear_model import LogisticRegression
     from sklearn.calibration import CalibratedClassifierCV
@@ -55,15 +54,15 @@ class MemoryMonitor:
     
     def __init__(self):
         self.memory_thresholds = {
-            'warning': 15.0,    # GB
-            'critical': 10.0,   # GB  
-            'abort': 5.0       # GB
+            'warning': 15.0,
+            'critical': 10.0,
+            'abort': 5.0
         }
         
         self.quick_mode_thresholds = {
-            'warning': 4.0,    # GB
-            'critical': 2.0,   # GB
-            'abort': 1.0       # GB
+            'warning': 4.0,
+            'critical': 2.0,
+            'abort': 1.0
         }
         
         self.quick_mode = False
@@ -138,7 +137,7 @@ class MemoryMonitor:
 class CTRBiasCorrector:
     """CTR bias correction"""
     
-    def __init__(self, target_ctr: float = 0.0201):
+    def __init__(self, target_ctr: float = 0.0191):
         self.target_ctr = target_ctr
         self.correction_factor = 1.0
         self.additive_correction = 0.0
@@ -169,13 +168,8 @@ class CTRBiasCorrector:
             if not self.is_fitted:
                 return y_pred_proba
             
-            # Apply multiplicative correction
             corrected = y_pred_proba * self.correction_factor
-            
-            # Apply additive correction
             corrected = corrected + self.additive_correction * 0.1
-            
-            # Clip to valid range
             corrected = np.clip(corrected, 1e-15, 1 - 1e-15)
             
             return corrected
@@ -199,10 +193,8 @@ class EnhancedMultiMethodCalibrator:
     def fit(self, y_true: np.ndarray, y_pred_proba: np.ndarray, method: str = 'auto'):
         """Fit calibration models"""
         try:
-            # Fit CTR corrector first
             self.ctr_corrector.fit(y_true, y_pred_proba)
             
-            # Try isotonic calibration
             try:
                 isotonic = IsotonicRegression(out_of_bounds='clip')
                 isotonic.fit(y_pred_proba, y_true)
@@ -210,7 +202,6 @@ class EnhancedMultiMethodCalibrator:
             except Exception:
                 pass
             
-            # Try Platt scaling
             try:
                 platt = LogisticRegression()
                 platt.fit(y_pred_proba.reshape(-1, 1), y_true)
@@ -218,19 +209,16 @@ class EnhancedMultiMethodCalibrator:
             except Exception:
                 pass
             
-            # Try beta calibration if scipy available
             if SCIPY_AVAILABLE:
                 beta_params = self._fit_beta_calibration(y_true, y_pred_proba)
                 if beta_params:
                     self.calibration_models['beta'] = beta_params
             
-            # Select best method
             if method == 'auto':
                 self._select_best_method(y_true, y_pred_proba)
             else:
                 self.best_method = method if method in self.calibration_models else None
             
-            # Fit ensemble calibrator
             if len(self.calibration_models) >= 2:
                 self._fit_ensemble_calibrator(y_true, y_pred_proba)
             
@@ -248,7 +236,6 @@ class EnhancedMultiMethodCalibrator:
             if not self.is_fitted:
                 return self.ctr_corrector.transform(y_pred_proba)
             
-            # Use best method or ensemble
             if self.ensemble_calibrator and len(self.ensemble_calibrator) > 1:
                 calibrated = self._ensemble_predict(y_pred_proba)
             elif self.best_method:
@@ -256,7 +243,6 @@ class EnhancedMultiMethodCalibrator:
             else:
                 calibrated = y_pred_proba
             
-            # Apply CTR correction
             if calibrated is not None:
                 calibrated = self.ctr_corrector.transform(calibrated)
             else:
@@ -595,21 +581,21 @@ class BaseModel(ABC):
         pass
 
 class LogisticModel(BaseModel):
-    """Logistic Regression model with optimized sampling"""
+    """Logistic Regression model with increased sampling"""
     
     def __init__(self, name: str = "LogisticRegression", params: Dict[str, Any] = None):
         if not SKLEARN_AVAILABLE:
             raise ImportError("Scikit-learn is not installed.")
         
         default_params = {
-            'C': 0.5,
+            'C': 0.8,
             'penalty': 'l2',
             'solver': 'saga',
-            'max_iter': 4000,
+            'max_iter': 5000,
             'random_state': 42,
             'class_weight': 'balanced',
-            'n_jobs': 8,
-            'tol': 0.00005
+            'n_jobs': 10,
+            'tol': 0.00003
         }
         
         if params:
@@ -624,9 +610,9 @@ class LogisticModel(BaseModel):
     def _simplify_for_memory(self):
         """Simplify parameters"""
         simplified_params = {
-            'C': 0.5,
-            'max_iter': 2000,
-            'n_jobs': 4,
+            'C': 0.8,
+            'max_iter': 3000,
+            'n_jobs': 6,
             'tol': 0.0001
         }
         
@@ -637,7 +623,7 @@ class LogisticModel(BaseModel):
     def _apply_quick_mode_params(self):
         """Apply quick mode parameters"""
         quick_params = {
-            'C': 0.5,
+            'C': 0.8,
             'max_iter': 1000,
             'n_jobs': 2,
             'solver': 'saga',
@@ -649,7 +635,7 @@ class LogisticModel(BaseModel):
         logger.info(f"{self.name}: Quick mode parameters applied")
     
     def _safe_sampling(self, X_train: pd.DataFrame, y_train: pd.Series, target_size: int) -> Tuple[pd.DataFrame, pd.Series]:
-        """Safe stratified sampling - OPTIMIZED"""
+        """Safe stratified sampling - increased size"""
         try:
             current_size = len(X_train)
             
@@ -681,7 +667,7 @@ class LogisticModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Training with optimized sampling"""
+        """Training with increased sampling"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         start_time = time.time()
         
@@ -691,41 +677,32 @@ class LogisticModel(BaseModel):
             if self.quick_mode:
                 self._apply_quick_mode_params()
             
-            # OPTIMIZED: Memory-based sampling with higher thresholds
             memory_status = self.memory_monitor.get_memory_status()
             
-            # Increased sampling sizes for better model performance
             if memory_status['level'] == 'abort':
-                # Critical memory situation - minimal sampling
-                target_size = 100000
+                target_size = 300000
                 X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
             elif memory_status['level'] == 'critical':
-                # Use 500K samples (10x improvement from 50K)
-                target_size = 500000
+                target_size = 1200000
                 X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
-            elif memory_status['level'] == 'warning' and len(X_train) > 1000000:
-                # Use 750K samples for warning level
-                target_size = 750000
+            elif memory_status['level'] == 'warning' and len(X_train) > 2000000:
+                target_size = 2000000
                 X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
             else:
-                # Use full data or up to 1M samples
-                if len(X_train) > 1000000:
-                    target_size = 1000000
+                if len(X_train) > 3000000:
+                    target_size = 3000000
                     X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
                 else:
                     X_train_sample, y_train_sample = X_train, y_train
             
-            # Safe data preprocessing with scaling
             X_train_clean = self._safe_data_preprocessing(X_train_sample, fit_scaler=True)
             
-            # Fit model
             logger.info(f"{self.name}: Starting training")
             self.model.fit(X_train_clean, y_train_sample)
             
             logger.info(f"{self.name}: Training completed successfully")
             self.is_fitted = True
             
-            # Calculate validation score
             if X_val is not None and y_val is not None and len(X_val) > 0:
                 try:
                     val_pred = self.predict_proba_raw(X_val)
@@ -734,7 +711,6 @@ class LogisticModel(BaseModel):
                 except:
                     self.validation_score = 0.5
             
-            # Calibration
             if X_val is not None and y_val is not None and len(X_val) > 0:
                 calibration_success = self.apply_calibration(X_val, y_val, method='auto')
                 if calibration_success:
@@ -744,10 +720,8 @@ class LogisticModel(BaseModel):
             else:
                 logger.warning(f"{self.name}: No validation data - calibration skipped")
             
-            # Record training time
             self.training_time = time.time() - start_time
             
-            # Cleanup
             del X_train_clean
             gc.collect()
             
@@ -781,17 +755,17 @@ class LightGBMModel(BaseModel):
             'objective': 'binary',
             'metric': 'binary_logloss',
             'boosting_type': 'gbdt',
-            'num_leaves': 63,
-            'max_depth': 6,
-            'learning_rate': 0.05,
-            'n_estimators': 800,
-            'min_child_samples': 200,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'reg_alpha': 0.5,
-            'reg_lambda': 0.5,
+            'num_leaves': 95,
+            'max_depth': 7,
+            'learning_rate': 0.04,
+            'n_estimators': 1200,
+            'min_child_samples': 150,
+            'subsample': 0.85,
+            'colsample_bytree': 0.85,
+            'reg_alpha': 0.3,
+            'reg_lambda': 0.3,
             'random_state': 42,
-            'n_jobs': 8,
+            'n_jobs': 10,
             'verbose': -1,
             'is_unbalance': True
         }
@@ -822,7 +796,7 @@ class LightGBMModel(BaseModel):
                 self.model.fit(
                     X_train_clean, y_train,
                     eval_set=[(X_val_clean, y_val)],
-                    callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
+                    callbacks=[lgb.early_stopping(stopping_rounds=100, verbose=False)]
                 )
             else:
                 self.model = lgb.LGBMClassifier(**self.params)
@@ -874,17 +848,17 @@ class XGBoostModel(BaseModel):
         default_params = {
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
-            'max_depth': 6,
-            'learning_rate': 0.05,
-            'n_estimators': 600,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'min_child_weight': 10,
-            'gamma': 0.1,
-            'reg_alpha': 0.5,
-            'reg_lambda': 0.5,
+            'max_depth': 7,
+            'learning_rate': 0.04,
+            'n_estimators': 800,
+            'subsample': 0.85,
+            'colsample_bytree': 0.85,
+            'min_child_weight': 8,
+            'gamma': 0.08,
+            'reg_alpha': 0.3,
+            'reg_lambda': 0.3,
             'random_state': 42,
-            'n_jobs': 8,
+            'n_jobs': 10,
             'scale_pos_weight': 52.3,
             'tree_method': 'hist'
         }
@@ -915,7 +889,7 @@ class XGBoostModel(BaseModel):
                 self.model.fit(
                     X_train_clean, y_train,
                     eval_set=[(X_val_clean, y_val)],
-                    early_stopping_rounds=50,
+                    early_stopping_rounds=80,
                     verbose=False
                 )
             else:
@@ -1068,7 +1042,6 @@ class ModelFactory:
         else:
             return ModelFactory.get_available_models()
 
-# Model aliases
 FinalLightGBMModel = LightGBMModel
 FinalXGBoostModel = XGBoostModel  
 FinalLogisticModel = LogisticModel
