@@ -720,8 +720,7 @@ def main():
         force_memory_cleanup()
         
     except KeyboardInterrupt:
-        logger.info("Execution interrupted by user")
-        sys.exit(0)
+        logger.info("Execution interrupted by user")l
     except Exception as e:
         logger.error(f"System execution failed: {e}")
         logger.error(f"Detailed error: {traceback.format_exc()}")
