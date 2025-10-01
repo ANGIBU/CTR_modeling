@@ -1044,4 +1044,4 @@ class ModelFactory:
 
 FinalLightGBMModel = LightGBMModel
 FinalXGBoostModel = XGBoostModel  
-FinalLogisticModel = LogisticModel
+FinalLogisticModel = LogisticModel 
