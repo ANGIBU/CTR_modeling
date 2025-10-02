@@ -17,7 +17,6 @@ try:
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.isotonic import IsotonicRegression
     from sklearn.metrics import brier_score_loss, log_loss
-    from sklearn.preprocessing import StandardScaler
     from sklearn.model_selection import train_test_split
     SKLEARN_AVAILABLE = True
 except ImportError:
@@ -391,8 +390,7 @@ class BaseModel(ABC):
         self.calibration_applied = True
         self.memory_monitor = MemoryMonitor()
         self.quick_mode = False
-        self.scaler = StandardScaler()
-        self.use_scaling = True
+        self.use_scaling = False
         self.training_time = 0.0
         self.validation_score = 0.0
         
@@ -457,12 +455,6 @@ class BaseModel(ABC):
                 X_processed[col] = X_processed[col].fillna('missing')
             
             X_processed = X_processed.replace([np.inf, -np.inf], 0)
-            
-            if self.use_scaling and len(numeric_columns) > 0:
-                if fit_scaler:
-                    X_processed[numeric_columns] = self.scaler.fit_transform(X_processed[numeric_columns])
-                else:
-                    X_processed[numeric_columns] = self.scaler.transform(X_processed[numeric_columns])
             
             return X_processed
             
@@ -581,7 +573,7 @@ class BaseModel(ABC):
         pass
 
 class LogisticModel(BaseModel):
-    """Logistic Regression model with increased sampling"""
+    """Logistic Regression model"""
     
     def __init__(self, name: str = "LogisticRegression", params: Dict[str, Any] = None):
         if not SKLEARN_AVAILABLE:
@@ -605,7 +597,7 @@ class LogisticModel(BaseModel):
         self.model = LogisticRegression(**self.params)
         self.prediction_diversity_threshold = 2500
         self.sampling_logged = False
-        self.use_scaling = True
+        self.use_scaling = False
     
     def _simplify_for_memory(self):
         """Simplify parameters"""
@@ -635,7 +627,7 @@ class LogisticModel(BaseModel):
         logger.info(f"{self.name}: Quick mode parameters applied")
     
     def _safe_sampling(self, X_train: pd.DataFrame, y_train: pd.Series, target_size: int) -> Tuple[pd.DataFrame, pd.Series]:
-        """Safe stratified sampling - increased size"""
+        """Safe stratified sampling"""
         try:
             current_size = len(X_train)
             
@@ -667,7 +659,7 @@ class LogisticModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Training with increased sampling"""
+        """Training with memory optimization"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         start_time = time.time()
         
@@ -680,13 +672,13 @@ class LogisticModel(BaseModel):
             memory_status = self.memory_monitor.get_memory_status()
             
             if memory_status['level'] == 'abort':
-                target_size = 300000
+                target_size = 500000
                 X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
             elif memory_status['level'] == 'critical':
-                target_size = 1200000
+                target_size = 1500000
                 X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
-            elif memory_status['level'] == 'warning' and len(X_train) > 2000000:
-                target_size = 2000000
+            elif memory_status['level'] == 'warning' and len(X_train) > 2500000:
+                target_size = 2500000
                 X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
             else:
                 if len(X_train) > 3000000:
@@ -695,7 +687,7 @@ class LogisticModel(BaseModel):
                 else:
                     X_train_sample, y_train_sample = X_train, y_train
             
-            X_train_clean = self._safe_data_preprocessing(X_train_sample, fit_scaler=True)
+            X_train_clean = self._safe_data_preprocessing(X_train_sample, fit_scaler=False)
             
             logger.info(f"{self.name}: Starting training")
             self.model.fit(X_train_clean, y_train_sample)
@@ -872,7 +864,7 @@ class XGBoostModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Training"""
+        """Training with fixed early_stopping"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         start_time = time.time()
         
@@ -883,17 +875,18 @@ class XGBoostModel(BaseModel):
             
             logger.info(f"{self.name}: Starting XGBoost training")
             
+            self.model = xgb.XGBClassifier(**self.params)
+            
             if X_val is not None and y_val is not None and len(X_val) > 0:
                 X_val_clean = self._safe_data_preprocessing(X_val, fit_scaler=False)
-                self.model = xgb.XGBClassifier(**self.params)
+                
                 self.model.fit(
                     X_train_clean, y_train,
                     eval_set=[(X_val_clean, y_val)],
-                    early_stopping_rounds=80,
-                    verbose=False
+                    verbose=False,
+                    callbacks=[xgb.callback.EarlyStopping(rounds=80)]
                 )
             else:
-                self.model = xgb.XGBClassifier(**self.params)
                 self.model.fit(X_train_clean, y_train)
             
             logger.info(f"{self.name}: Training completed successfully")
@@ -926,15 +919,7 @@ class XGBoostModel(BaseModel):
             X_processed = self._ensure_feature_consistency(batch_X)
             X_processed = self._safe_data_preprocessing(X_processed, fit_scaler=False)
             
-            dtest = xgb.DMatrix(
-                X_processed, 
-                feature_names=list(X_processed.columns),
-                enable_categorical=False
-            )
-            proba = self.model.predict(dtest)
-            
-            del dtest
-            
+            proba = self.model.predict_proba(X_processed)[:, 1]
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
             return self._enhance_prediction_diversity(proba)
         
@@ -1044,4 +1029,4 @@ class ModelFactory:
 
 FinalLightGBMModel = LightGBMModel
 FinalXGBoostModel = XGBoostModel  
-FinalLogisticModel = LogisticModel 
+FinalLogisticModel = LogisticModel

@@ -277,8 +277,12 @@ class CTRHyperparameterOptimizer:
                     }
                     
                     model = xgb.XGBClassifier(**params)
-                    model.fit(X_train, y_train, eval_set=[(X_val, y_val)],
-                             early_stopping_rounds=50, verbose=False)
+                    model.fit(
+                        X_train, y_train, 
+                        eval_set=[(X_val, y_val)],
+                        verbose=False,
+                        callbacks=[xgb.callback.EarlyStopping(rounds=50)]
+                    )
                     
                 elif model_type.lower() == 'logistic':
                     params = {
