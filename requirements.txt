@@ -13,24 +13,6 @@ torch>=2.1.2
 torchvision>=0.16.2
 torchaudio>=2.1.2
 
-# RAPIDS and GPU acceleration (CUDA 12.x compatible)
-# Note: Install these separately using conda or from RAPIDS release
-# conda install -c rapidsai -c conda-forge -c nvidia \
-#     cudf=24.02 cuml=24.02 cugraph=24.02 cuspatial=24.02 \
-#     cuproj=24.02 cuxfilter=24.02 cucim=24.02 pylibraft=24.02 \
-#     raft-dask=24.02 python=3.11 cuda-version=12.0
-
-# If pip install is required (may not work on all systems):
-# cupy-cuda12x>=12.0.0  # Match your CUDA version
-# cudf-cu12>=24.02.0
-# cuml-cu12>=24.02.0
-
-# NVTabular and Merlin (requires RAPIDS)
-# Install via: pip install nvtabular merlin-core merlin-dataloader
-# nvtabular>=1.11.0
-# merlin-core>=0.13.0
-# merlin-dataloader>=0.0.4
-
 # Visualization
 matplotlib>=3.8.2
 seaborn>=0.13.0
