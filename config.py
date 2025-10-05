@@ -12,7 +12,7 @@ except ImportError:
     logging.warning("PyTorch not installed. GPU functions will be disabled.")
 
 class Config:
-    """Project-wide configuration management"""
+    """Project-wide configuration management - optimized for performance"""
     
     # Basic path settings
     BASE_DIR = Path(__file__).parent
@@ -56,74 +56,74 @@ class Config:
     USE_MIXED_PRECISION = True
     GPU_OPTIMIZATION_LEVEL = 3
     
-    # Memory settings - optimized for 64GB RAM
-    MAX_MEMORY_GB = 60
-    CHUNK_SIZE = 200000
-    BATCH_SIZE_GPU = 25600
-    BATCH_SIZE_CPU = 8192
-    PREFETCH_FACTOR = 8
-    NUM_WORKERS = 12
+    # Memory settings - OPTIMIZED for 64GB RAM system
+    MAX_MEMORY_GB = 58
+    CHUNK_SIZE = 150000
+    BATCH_SIZE_GPU = 20480
+    BATCH_SIZE_CPU = 6144
+    PREFETCH_FACTOR = 6
+    NUM_WORKERS = 10
     
-    # Memory thresholds - relaxed for better performance
-    MEMORY_WARNING_THRESHOLD = 52
-    MEMORY_CRITICAL_THRESHOLD = 56
-    MEMORY_ABORT_THRESHOLD = 60
+    # Memory thresholds - adjusted for better performance
+    MEMORY_WARNING_THRESHOLD = 48
+    MEMORY_CRITICAL_THRESHOLD = 53
+    MEMORY_ABORT_THRESHOLD = 58
     
     # Data size limits
     MAX_TRAIN_SIZE = 15000000
     MAX_TEST_SIZE = 2500000
-    MAX_INTERACTION_FEATURES = 80
+    MAX_INTERACTION_FEATURES = 60
     
     # Model training settings
     MODEL_TRAINING_CONFIG = {
         'lightgbm': {
-            'max_depth': 7,
-            'num_leaves': 95,
-            'min_data_in_leaf': 150,
-            'feature_fraction': 0.85,
-            'bagging_fraction': 0.85,
+            'max_depth': 6,
+            'num_leaves': 63,
+            'min_data_in_leaf': 200,
+            'feature_fraction': 0.8,
+            'bagging_fraction': 0.8,
             'bagging_freq': 5,
-            'lambda_l1': 0.3,
-            'lambda_l2': 0.3,
-            'min_gain_to_split': 0.015,
-            'max_cat_threshold': 48,
-            'cat_smooth': 15.0,
-            'cat_l2': 15.0,
-            'learning_rate': 0.04,
-            'num_iterations': 1200,
+            'lambda_l1': 0.5,
+            'lambda_l2': 0.5,
+            'min_gain_to_split': 0.02,
+            'max_cat_threshold': 32,
+            'cat_smooth': 10.0,
+            'cat_l2': 10.0,
+            'learning_rate': 0.05,
+            'num_iterations': 800,
             'scale_pos_weight': 52.3,
             'is_unbalance': True
         },
         'xgboost': {
-            'max_depth': 7,
-            'learning_rate': 0.04,
-            'n_estimators': 800,
-            'subsample': 0.85,
-            'colsample_bytree': 0.85,
-            'min_child_weight': 8,
-            'gamma': 0.08,
-            'alpha': 0.3,
-            'lambda': 0.3,
+            'max_depth': 6,
+            'learning_rate': 0.05,
+            'n_estimators': 600,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'min_child_weight': 10,
+            'gamma': 0.1,
+            'alpha': 0.5,
+            'lambda': 0.5,
             'scale_pos_weight': 52.3,
-            'reg_alpha': 0.3,
-            'reg_lambda': 0.3
+            'reg_alpha': 0.5,
+            'reg_lambda': 0.5
         },
         'logistic': {
-            'C': 0.8,
+            'C': 0.5,
             'penalty': 'l2',
             'solver': 'saga',
-            'max_iter': 5000,
+            'max_iter': 4000,
             'class_weight': 'balanced',
             'random_state': 42,
-            'tol': 0.00003,
-            'n_jobs': 10
+            'tol': 0.00005,
+            'n_jobs': 8
         }
     }
     
-    # Feature engineering settings - expanded
+    # Feature engineering settings - OPTIMIZED for memory efficiency
     FEATURE_ENGINEERING_CONFIG = {
         'enable_interaction_features': True,
-        'enable_polynomial_features': False,
+        'enable_polynomial_features': False,  # Disabled for memory
         'enable_binning': True,
         'enable_target_encoding': True,
         'enable_frequency_encoding': True,
@@ -131,24 +131,25 @@ class Config:
         'enable_cross_validation_encoding': True,
         'max_interaction_degree': 2,
         'binning_strategy': 'quantile',
-        'n_bins': 8,
-        'min_frequency': 8,
-        'target_encoding_smoothing': 25.0,
+        'n_bins': 6,
+        'min_frequency': 10,
+        'target_encoding_smoothing': 20.0,
         
-        # Increased feature count
-        'target_feature_count': 350,
-        'use_feature_selection': True,
-        'feature_selection_method': 'f_classif',
-        'feature_importance_threshold': 0.008,
+        # NEW: Feature count control
+        'target_feature_count': 250,  # Target final feature count
+        'use_feature_selection': True,  # Enable feature selection
+        'feature_selection_method': 'f_classif',  # Selection method
+        'feature_importance_threshold': 0.01,  # Importance threshold
         
-        # Expanded limits
-        'max_categorical_for_encoding': 20,
-        'max_numeric_for_interaction': 15,
-        'max_cross_combinations': 12,
-        'max_statistical_features': 12,
+        # NEW: Memory-optimized limits
+        'max_categorical_for_encoding': 15,  # Max categorical features for target encoding
+        'max_numeric_for_interaction': 10,  # Max numeric features for interactions
+        'max_cross_combinations': 9,  # Max cross feature combinations (3x3)
+        'max_statistical_features': 8,  # Max features for statistical operations
         
-        'cleanup_after_each_step': True,
-        'intermediate_storage': False
+        # NEW: Step-by-step memory cleanup
+        'cleanup_after_each_step': True,  # Force cleanup after each feature generation step
+        'intermediate_storage': False  # Don't store intermediate features
     }
     
     # Cross-validation settings
@@ -157,23 +158,22 @@ class Config:
     RANDOM_STATE = 42
     
     # Early stopping settings
-    EARLY_STOPPING_ROUNDS = 200
+    EARLY_STOPPING_ROUNDS = 150
     EARLY_STOPPING_TOLERANCE = 1e-5
     
-    # Hyperparameter tuning settings - activated
-    OPTUNA_N_TRIALS = 80
-    OPTUNA_TIMEOUT = 7200
+    # Hyperparameter tuning settings
+    OPTUNA_N_TRIALS = 150
+    OPTUNA_TIMEOUT = 3600
     OPTUNA_N_JOBS = 2
     OPTUNA_VERBOSITY = 1
-    ENABLE_OPTUNA = True
     
     # Ensemble settings
     ENSEMBLE_CONFIG = {
-        'voting_weights': {'lightgbm': 0.42, 'xgboost': 0.38, 'logistic': 0.2},
+        'voting_weights': {'lightgbm': 0.45, 'xgboost': 0.35, 'logistic': 0.2},
         'stacking_cv_folds': 5,
         'blending_ratio': 0.8,
-        'diversity_threshold': 0.025,
-        'performance_threshold': 0.18,
+        'diversity_threshold': 0.03,
+        'performance_threshold': 0.20,
         'enable_meta_features': True,
         'use_simple_average': False
     }
@@ -189,8 +189,8 @@ class Config:
         'wll_weight': 0.4,
         'target_combined_score': 0.34,
         'target_ctr': 0.0191,
-        'ctr_tolerance': 0.0008,
-        'bias_penalty_weight': 4.5,
+        'ctr_tolerance': 0.001,
+        'bias_penalty_weight': 5.0,
         'calibration_weight': 0.4,
         'pos_weight': 52.3,
         'neg_weight': 1.0,
@@ -202,12 +202,12 @@ class Config:
     CTR_BIAS_CORRECTION = {
         'enable': True,
         'target_ctr': 0.0191,
-        'correction_factor': 0.22,
+        'correction_factor': 0.25,
         'post_processing': True,
-        'clip_range': (0.0004, 0.12),
-        'bias_threshold': 0.0002,
-        'calibration_strength': 1.4,
-        'prediction_scaling': 0.48
+        'clip_range': (0.0005, 0.1),
+        'bias_threshold': 0.0003,
+        'calibration_strength': 1.5,
+        'prediction_scaling': 0.5
     }
     
     # Evaluation metrics
@@ -226,22 +226,22 @@ class Config:
     ENABLE_PARALLEL_PROCESSING = True
     ENABLE_MEMORY_MAPPING = False
     ENABLE_CACHING = True
-    CACHE_SIZE_MB = 3072
+    CACHE_SIZE_MB = 2048
     
-    # Large dataset specific settings
+    # Large dataset specific settings - OPTIMIZED
     LARGE_DATASET_MODE = True
     MEMORY_EFFICIENT_SAMPLING = True
-    AGGRESSIVE_SAMPLING_THRESHOLD = 0.72
-    MIN_SAMPLE_SIZE = 300000
-    MAX_SAMPLE_SIZE = 3000000
+    AGGRESSIVE_SAMPLING_THRESHOLD = 0.65  # Adjusted threshold
+    MIN_SAMPLE_SIZE = 100000  # Minimum sample size for extreme cases
+    MAX_SAMPLE_SIZE = 1000000  # Maximum sample size for normal cases
     
-    # Logistic regression sampling configuration - increased
+    # NEW: Logistic regression sampling configuration
     LOGISTIC_SAMPLING_CONFIG = {
-        'normal_size': 3000000,
-        'warning_size': 2000000,
-        'critical_size': 1200000,
-        'abort_size': 300000,
-        'enable_dynamic_sizing': True
+        'normal_size': 1000000,      # Use 1M samples in normal memory situation
+        'warning_size': 750000,       # Use 750K samples when memory warning
+        'critical_size': 500000,      # Use 500K samples when memory critical
+        'abort_size': 100000,         # Use 100K samples when memory abort level
+        'enable_dynamic_sizing': True # Enable dynamic sample size adjustment
     }
     
     # RTX 4060 Ti specific settings
@@ -386,11 +386,13 @@ class Config:
             }
         }
 
+# Backward compatibility
 def get_config():
     """Get configuration instance"""
     return Config()
 
 if __name__ == "__main__":
+    # Test configuration
     config = Config()
     
     print("=== Configuration Test ===")
