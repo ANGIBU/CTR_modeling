@@ -4,6 +4,10 @@ import os
 from pathlib import Path
 import logging
 
+# Set CUDA device before importing torch
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
+
 try:
     import torch
     TORCH_AVAILABLE = True
@@ -62,13 +66,43 @@ class Config:
         'typical_ctr_range': (0.005, 0.05)
     }
     
-    # GPU and hardware settings
+    # GPU and hardware settings - IMPROVED
     if TORCH_AVAILABLE:
-        DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        GPU_AVAILABLE = torch.cuda.is_available()
+        try:
+            # Test actual GPU availability
+            GPU_AVAILABLE = torch.cuda.is_available()
+            if GPU_AVAILABLE:
+                # Test GPU access
+                test_tensor = torch.zeros(1, device='cuda:0')
+                DEVICE = torch.device('cuda:0')
+                GPU_COUNT = torch.cuda.device_count()
+                GPU_NAME = torch.cuda.get_device_name(0)
+                GPU_MEMORY_GB = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                del test_tensor
+                torch.cuda.empty_cache()
+                
+                # Set GPU optimization flags
+                torch.backends.cudnn.benchmark = True
+                if hasattr(torch.backends.cudnn, 'allow_tf32'):
+                    torch.backends.cudnn.allow_tf32 = True
+            else:
+                DEVICE = torch.device('cpu')
+                GPU_COUNT = 0
+                GPU_NAME = "None"
+                GPU_MEMORY_GB = 0
+        except Exception as e:
+            GPU_AVAILABLE = False
+            DEVICE = torch.device('cpu')
+            GPU_COUNT = 0
+            GPU_NAME = "None"
+            GPU_MEMORY_GB = 0
+            logging.warning(f"GPU initialization failed: {e}")
     else:
         DEVICE = 'cpu'
         GPU_AVAILABLE = False
+        GPU_COUNT = 0
+        GPU_NAME = "None"
+        GPU_MEMORY_GB = 0
     
     # RAPIDS GPU settings
     RAPIDS_ENABLED = RAPIDS_AVAILABLE and GPU_AVAILABLE
@@ -123,7 +157,7 @@ class Config:
         [f'l_feat_{i}' for i in range(1, 28)]       # 27
     )
     
-    # Model training settings - optimized for 0.35+ score
+    # Model training settings - optimized for 0.35+ score with GPU
     MODEL_TRAINING_CONFIG = {
         'lightgbm': {
             'max_depth': 8,
@@ -163,13 +197,14 @@ class Config:
         },
         'xgboost_gpu': {
             'objective': 'binary:logistic',
-            'tree_method': 'gpu_hist',
+            'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
             'max_depth': 8,
             'learning_rate': 0.1,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
             'scale_pos_weight': 51.43,
-            'gpu_id': 0,
+            'gpu_id': 0 if GPU_AVAILABLE else -1,
+            'predictor': 'gpu_predictor' if GPU_AVAILABLE else 'cpu_predictor',
             'verbosity': 0,
             'seed': 42
         },
@@ -306,7 +341,7 @@ class Config:
     }
     
     # RTX 4060 Ti specific settings
-    RTX_4060_TI_OPTIMIZATION = True
+    RTX_4060_TI_OPTIMIZATION = GPU_AVAILABLE and GPU_NAME and "4060 Ti" in GPU_NAME
     
     @classmethod
     def setup_directories(cls):
@@ -368,23 +403,32 @@ class Config:
         status = {
             'torch_available': TORCH_AVAILABLE,
             'torch_gpu': cls.GPU_AVAILABLE if TORCH_AVAILABLE else False,
+            'gpu_count': cls.GPU_COUNT if cls.GPU_AVAILABLE else 0,
+            'gpu_name': cls.GPU_NAME if cls.GPU_AVAILABLE else "None",
+            'gpu_memory_gb': cls.GPU_MEMORY_GB if cls.GPU_AVAILABLE else 0,
             'rapids_available': RAPIDS_AVAILABLE,
             'nvtabular_available': NVTABULAR_AVAILABLE,
             'rapids_enabled': cls.RAPIDS_ENABLED,
-            'nvtabular_enabled': cls.NVTABULAR_ENABLED
+            'nvtabular_enabled': cls.NVTABULAR_ENABLED,
+            'rtx_4060_ti_optimization': cls.RTX_4060_TI_OPTIMIZATION
         }
         
         for key, value in status.items():
             print(f"  {key}: {value}")
         
-        if cls.GPU_AVAILABLE and TORCH_AVAILABLE:
-            try:
-                gpu_name = torch.cuda.get_device_name(0)
-                gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                print(f"  GPU: {gpu_name}")
-                print(f"  GPU Memory: {gpu_memory:.1f}GB")
-            except:
-                pass
+        if cls.GPU_AVAILABLE:
+            print(f"\n  GPU Details:")
+            print(f"    Device: {cls.DEVICE}")
+            print(f"    Name: {cls.GPU_NAME}")
+            print(f"    Memory: {cls.GPU_MEMORY_GB:.1f}GB")
+            print(f"    Count: {cls.GPU_COUNT}")
+            
+            # Show XGBoost GPU settings
+            xgb_gpu_params = cls.MODEL_TRAINING_CONFIG.get('xgboost_gpu', {})
+            print(f"\n  XGBoost GPU Settings:")
+            print(f"    tree_method: {xgb_gpu_params.get('tree_method')}")
+            print(f"    gpu_id: {xgb_gpu_params.get('gpu_id')}")
+            print(f"    predictor: {xgb_gpu_params.get('predictor')}")
         
         print("=== GPU Check Completed ===")
         return status
@@ -477,9 +521,12 @@ class Config:
                 'ctr_tolerance': cls.EVALUATION_CONFIG['ctr_tolerance']
             },
             'gpu_features': {
+                'gpu_available': cls.GPU_AVAILABLE,
+                'gpu_name': cls.GPU_NAME,
+                'gpu_memory_gb': cls.GPU_MEMORY_GB,
                 'rapids_enabled': cls.RAPIDS_ENABLED,
                 'nvtabular_enabled': cls.NVTABULAR_ENABLED,
-                'gpu_available': cls.GPU_AVAILABLE
+                'rtx_4060_ti_optimization': cls.RTX_4060_TI_OPTIMIZATION
             }
         }
 

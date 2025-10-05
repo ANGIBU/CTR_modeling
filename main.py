@@ -127,6 +127,31 @@ def validate_environment() -> bool:
         logger.error(f"Environment validation failed: {e}")
         return False
 
+def check_gpu_availability() -> Tuple[bool, str]:
+    """Check GPU availability and return status"""
+    try:
+        if not TORCH_AVAILABLE:
+            return False, "PyTorch not available"
+        
+        if not torch.cuda.is_available():
+            return False, "CUDA not available"
+        
+        # Try to actually use GPU
+        try:
+            device = torch.device('cuda:0')
+            test_tensor = torch.zeros(1, device=device)
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            del test_tensor
+            torch.cuda.empty_cache()
+            
+            return True, f"{gpu_name} ({gpu_memory:.1f}GB)"
+        except Exception as e:
+            return False, f"GPU test failed: {e}"
+            
+    except Exception as e:
+        return False, f"GPU check error: {e}"
+
 def safe_train_test_split(X, y, test_size=0.3, random_state=42):
     """Safe train test split with class imbalance handling"""
     try:
@@ -201,20 +226,28 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             logger.error(f"Config import failed: {e}")
             return None
         
+        # Check GPU availability properly
         gpu_optimization = False
+        gpu_info = "Not available"
         
-        if TORCH_AVAILABLE and torch.cuda.is_available():
-            gpu_name = torch.cuda.get_device_name(0)
-            logger.info(f"GPU detection: {gpu_name}")
+        gpu_available, gpu_status = check_gpu_availability()
+        if gpu_available:
+            gpu_optimization = True
+            gpu_info = gpu_status
+            logger.info(f"GPU detection: {gpu_info}")
+            logger.info("GPU optimization: Enabled")
             
-            if "4060 Ti" in gpu_name or "RTX" in gpu_name:
-                gpu_optimization = True
-                logger.info("RTX 4060 Ti optimization: True")
-                
-                torch.backends.cudnn.benchmark = True
-                if hasattr(torch.backends.cudnn, 'allow_tf32'):
-                    torch.backends.cudnn.allow_tf32 = True
-                logger.info("GPU optimizations enabled")
+            if TORCH_AVAILABLE:
+                try:
+                    torch.backends.cudnn.benchmark = True
+                    if hasattr(torch.backends.cudnn, 'allow_tf32'):
+                        torch.backends.cudnn.allow_tf32 = True
+                    logger.info("GPU settings applied")
+                except Exception as e:
+                    logger.warning(f"GPU settings failed: {e}")
+        else:
+            logger.warning(f"GPU not available: {gpu_status}")
+            logger.info("Using CPU mode")
         
         try:
             from data_loader import LargeDataLoader
@@ -309,7 +342,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             logger.info(f"Quick mode: Training only {models_to_train}")
         else:
             # Priority: XGBoost GPU for target score
-            if 'xgboost_gpu' in available_models:
+            if 'xgboost_gpu' in available_models and gpu_optimization:
                 models_to_train = ['xgboost_gpu']
                 logger.info(f"Full mode: Training XGBoost GPU for 0.35+ target score")
             else:
@@ -382,33 +415,74 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.info("Submission file generation started")
         logger.info(f"Test data size: {len(X_test)} rows")
         
-        # Generate predictions
+        # Generate predictions in batches
+        batch_size = 50000
+        all_predictions = []
+        
         if ensemble_used and ensemble_manager.final_ensemble and ensemble_manager.final_ensemble.is_fitted:
             logger.info("Using ensemble for prediction")
-            base_predictions = {}
-            for name, model in trained_models.items():
-                try:
-                    pred = model.predict_proba(X_test)
-                    base_predictions[name] = pred
-                except Exception as e:
-                    logger.warning(f"Prediction failed for {name}: {e}")
-                    base_predictions[name] = np.full(len(X_test), 0.0191)
             
-            try:
-                predictions = ensemble_manager.final_ensemble.predict_proba(base_predictions)
-            except Exception as e:
-                logger.warning(f"Ensemble prediction failed: {e}")
-                predictions = np.mean(list(base_predictions.values()), axis=0)
+            for i in range(0, len(X_test), batch_size):
+                end_idx = min(i + batch_size, len(X_test))
+                batch_X = X_test.iloc[i:end_idx]
+                
+                # Get base model predictions for this batch
+                base_predictions = {}
+                for name, model in trained_models.items():
+                    try:
+                        pred = model.predict_proba(batch_X)
+                        base_predictions[name] = pred
+                    except Exception as e:
+                        logger.warning(f"Prediction failed for {name}: {e}")
+                        base_predictions[name] = np.full(len(batch_X), 0.0191)
+                
+                try:
+                    batch_pred = ensemble_manager.final_ensemble.predict_proba(base_predictions)
+                except Exception as e:
+                    logger.warning(f"Ensemble prediction failed: {e}")
+                    batch_pred = np.mean(list(base_predictions.values()), axis=0)
+                
+                all_predictions.append(batch_pred)
+                
+                logger.info(f"Batch {i//batch_size + 1} completed ({i:,}~{end_idx:,})")
+                
+                if i % (batch_size * 5) == 0:
+                    gc.collect()
+            
+            predictions = np.concatenate(all_predictions)
+            
         else:
-            # Use single best model
+            # Use single best model with batch processing
             best_model_name = list(trained_models.keys())[0]
             logger.info(f"Using single model: {best_model_name}")
             best_model = trained_models[best_model_name]
-            try:
-                predictions = best_model.predict_proba(X_test)
-            except Exception as e:
-                logger.error(f"Single model prediction failed: {e}")
-                predictions = np.full(len(X_test), 0.0191)
+            
+            for i in range(0, len(X_test), batch_size):
+                end_idx = min(i + batch_size, len(X_test))
+                batch_X = X_test.iloc[i:end_idx]
+                
+                try:
+                    batch_pred = best_model.predict_proba(batch_X)
+                except Exception as e:
+                    logger.error(f"Single model prediction failed: {e}")
+                    batch_pred = np.full(len(batch_X), 0.0191)
+                
+                all_predictions.append(batch_pred)
+                
+                logger.info(f"Batch {i//batch_size + 1} completed ({i:,}~{end_idx:,})")
+                
+                if i % (batch_size * 5) == 0:
+                    gc.collect()
+            
+            predictions = np.concatenate(all_predictions)
+        
+        # Ensure predictions are valid
+        predictions = np.clip(predictions, 1e-7, 1 - 1e-7)
+        
+        # Check if predictions are all zeros
+        if np.allclose(predictions, 0.0):
+            logger.warning("All predictions are zero! Using default CTR")
+            predictions = np.full(len(predictions), 0.0191)
         
         # Load sample submission to get proper ID format
         try:
@@ -434,7 +508,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         submission_path = 'submission.csv'
         submission_df.to_csv(submission_path, index=False)
         logger.info(f"Submission file saved: {submission_path}")
-        logger.info(f"Submission statistics: mean={predictions.mean():.4f}, std={predictions.std():.4f}")
+        logger.info(f"Submission statistics: mean={predictions.mean():.4f}, std={predictions.std():.4f}, min={predictions.min():.4f}, max={predictions.max():.4f}")
         
         # Phase 6: Final Results
         logger.info("=== Pipeline completed ===")
@@ -452,7 +526,14 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             'submission_rows': len(predictions),
             'model_performances': model_performances,
             'target_score': 0.35,
-            'gpu_used': gpu_optimization
+            'gpu_used': gpu_optimization,
+            'gpu_info': gpu_info,
+            'prediction_stats': {
+                'mean': float(predictions.mean()),
+                'std': float(predictions.std()),
+                'min': float(predictions.min()),
+                'max': float(predictions.max())
+            }
         }
         
         logger.info(f"Mode: {'QUICK (50 samples)' if quick_mode else 'FULL dataset (0.35+ target)'}")
@@ -460,6 +541,8 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.info(f"Successful models: {len(trained_models)}")
         logger.info(f"Ensemble activated: {'Yes' if ensemble_enabled else 'No'}")
         logger.info(f"GPU optimization: {'Yes' if gpu_optimization else 'No'}")
+        if gpu_optimization:
+            logger.info(f"GPU info: {gpu_info}")
         logger.info(f"Submission file: {len(predictions)} rows")
         
         # Final memory status
@@ -520,7 +603,17 @@ def main():
                 logger.info(f"Execution time: {results['execution_time']:.2f}s")
                 logger.info(f"Successful models: {results['successful_models']}")
                 logger.info(f"GPU optimization: {results['gpu_used']}")
+                if results['gpu_used']:
+                    logger.info(f"GPU info: {results['gpu_info']}")
                 logger.info(f"Target score: {results['target_score']}")
+                
+                # Print prediction statistics
+                pred_stats = results.get('prediction_stats', {})
+                logger.info(f"Prediction statistics:")
+                logger.info(f"  Mean: {pred_stats.get('mean', 0):.4f}")
+                logger.info(f"  Std: {pred_stats.get('std', 0):.4f}")
+                logger.info(f"  Min: {pred_stats.get('min', 0):.4f}")
+                logger.info(f"  Max: {pred_stats.get('max', 0):.4f}")
                 
                 # Print model performances
                 if results.get('model_performances'):

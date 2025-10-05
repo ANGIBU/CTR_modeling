@@ -145,7 +145,7 @@ class MemoryMonitor:
             pass
 
 class CTRBiasCorrector:
-    """CTR bias correction"""
+    """CTR bias correction - FIXED VERSION"""
     
     def __init__(self, target_ctr: float = 0.0191):
         self.target_ctr = target_ctr
@@ -154,14 +154,23 @@ class CTRBiasCorrector:
         self.is_fitted = False
         
     def fit(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Fit bias corrector"""
+        """Fit bias corrector with proper bounds"""
         try:
             actual_ctr = np.mean(y_true)
             predicted_ctr = np.mean(y_pred_proba)
             
-            if predicted_ctr > 0:
-                self.correction_factor = actual_ctr / predicted_ctr
-                self.additive_correction = actual_ctr - predicted_ctr
+            # Calculate correction factor with safety bounds
+            if predicted_ctr > 0.001:  # Minimum threshold
+                raw_factor = actual_ctr / predicted_ctr
+                # Bound correction factor between 0.5 and 2.0
+                self.correction_factor = np.clip(raw_factor, 0.5, 2.0)
+            else:
+                self.correction_factor = 1.0
+            
+            # Calculate additive correction with bounds
+            raw_additive = actual_ctr - predicted_ctr
+            # Bound additive correction to prevent extreme shifts
+            self.additive_correction = np.clip(raw_additive, -0.01, 0.01)
             
             self.is_fitted = True
             logger.info(f"CTR bias corrector fitted: factor={self.correction_factor:.4f}, additive={self.additive_correction:.6f}")
@@ -173,14 +182,19 @@ class CTRBiasCorrector:
             self.is_fitted = False
     
     def transform(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """Apply bias correction"""
+        """Apply bias correction with safety checks"""
         try:
             if not self.is_fitted:
                 return y_pred_proba
             
+            # Apply multiplicative correction first
             corrected = y_pred_proba * self.correction_factor
+            
+            # Apply small additive correction
             corrected = corrected + self.additive_correction * 0.1
-            corrected = np.clip(corrected, 1e-15, 1 - 1e-15)
+            
+            # Ensure predictions stay in valid range
+            corrected = np.clip(corrected, 1e-7, 1 - 1e-7)
             
             return corrected
             
@@ -244,7 +258,7 @@ class EnhancedMultiMethodCalibrator:
                 calibrated = self._predict_with_method(y_pred_proba, self.best_method)
                 if calibrated is not None:
                     calibrated = self.ctr_corrector.transform(calibrated)
-                    return np.clip(calibrated, 1e-15, 1 - 1e-15)
+                    return np.clip(calibrated, 1e-7, 1 - 1e-7)
             
             return self.ctr_corrector.transform(y_pred_proba)
             
@@ -431,7 +445,7 @@ class BaseModel(ABC):
                     noise = np.random.laplace(0, noise_scale * 0.7, len(predictions))
                 
                 enhanced_predictions = predictions + noise
-                return np.clip(enhanced_predictions, 1e-15, 1 - 1e-15)
+                return np.clip(enhanced_predictions, 1e-7, 1 - 1e-7)
             
             return predictions
         except Exception:
@@ -594,7 +608,7 @@ class XGBoostGPUModel(BaseModel):
             
             del dtest
             
-            proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            proba = np.clip(proba, 1e-7, 1 - 1e-7)
             return self._enhance_prediction_diversity(proba)
         
         return self._memory_safe_predict(_predict_internal, X, batch_size=50000)
@@ -666,7 +680,7 @@ class LogisticModel(BaseModel):
             X_processed = self._ensure_feature_consistency(batch_X)
             
             proba = self.model.predict_proba(X_processed)[:, 1]
-            proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            proba = np.clip(proba, 1e-7, 1 - 1e-7)
             return self._enhance_prediction_diversity(proba)
         
         return self._memory_safe_predict(_predict_internal, X, batch_size=50000)
