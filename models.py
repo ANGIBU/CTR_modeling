@@ -10,14 +10,12 @@ import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
 import pickle
-from scipy.special import betaln
 
 try:
     from sklearn.linear_model import LogisticRegression
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.isotonic import IsotonicRegression
     from sklearn.metrics import brier_score_loss, log_loss
-    from sklearn.preprocessing import StandardScaler
     from sklearn.model_selection import train_test_split
     SKLEARN_AVAILABLE = True
 except ImportError:
@@ -42,7 +40,7 @@ except ImportError:
     PSUTIL_AVAILABLE = False
 
 try:
-    from scipy.optimize import minimize_scalar, minimize
+    from scipy.optimize import minimize_scalar
     SCIPY_AVAILABLE = True
 except ImportError:
     SCIPY_AVAILABLE = False
@@ -136,7 +134,7 @@ class MemoryMonitor:
                 cp.get_default_memory_pool().free_all_blocks()
             except:
                 pass
-        
+    
     def log_memory_status(self, context: str = "", force: bool = False):
         """Log memory status"""
         try:
@@ -196,9 +194,6 @@ class EnhancedMultiMethodCalibrator:
     def __init__(self):
         self.calibration_models = {}
         self.best_method = None
-        self.ensemble_calibrator = {}
-        self.bias_correction = 0.0
-        self.multiplicative_correction = 1.0
         self.ctr_corrector = CTRBiasCorrector()
         self.is_fitted = False
         
@@ -231,9 +226,6 @@ class EnhancedMultiMethodCalibrator:
             else:
                 self.best_method = method if method in self.calibration_models else None
             
-            if len(self.calibration_models) >= 2:
-                self._fit_ensemble_calibrator(y_true, y_pred_proba)
-            
             self.is_fitted = True
             logger.info(f"Calibration fitted: {len(self.calibration_models)} methods available")
             return True
@@ -248,19 +240,13 @@ class EnhancedMultiMethodCalibrator:
             if not self.is_fitted:
                 return self.ctr_corrector.transform(y_pred_proba)
             
-            if self.ensemble_calibrator and len(self.ensemble_calibrator) > 1:
-                calibrated = self._ensemble_predict(y_pred_proba)
-            elif self.best_method:
+            if self.best_method and self.best_method in self.calibration_models:
                 calibrated = self._predict_with_method(y_pred_proba, self.best_method)
-            else:
-                calibrated = y_pred_proba
+                if calibrated is not None:
+                    calibrated = self.ctr_corrector.transform(calibrated)
+                    return np.clip(calibrated, 1e-15, 1 - 1e-15)
             
-            if calibrated is not None:
-                calibrated = self.ctr_corrector.transform(calibrated)
-            else:
-                calibrated = self.ctr_corrector.transform(y_pred_proba)
-            
-            return np.clip(calibrated, 1e-15, 1 - 1e-15)
+            return self.ctr_corrector.transform(y_pred_proba)
             
         except Exception as e:
             logger.warning(f"Calibration prediction failed: {e}")
@@ -311,39 +297,6 @@ class EnhancedMultiMethodCalibrator:
         except Exception:
             return None
     
-    def _fit_ensemble_calibrator(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Fit ensemble calibrator"""
-        try:
-            method_predictions = {}
-            for method in self.calibration_models.keys():
-                pred = self._predict_with_method(y_pred_proba, method)
-                if pred is not None:
-                    method_predictions[method] = pred
-            
-            if len(method_predictions) < 2:
-                return
-            
-            weights = {}
-            total_score = 0
-            
-            for method, pred in method_predictions.items():
-                try:
-                    score = -log_loss(y_true, pred)
-                    weights[method] = max(0, score)
-                    total_score += weights[method]
-                except:
-                    weights[method] = 0
-            
-            if total_score > 0:
-                for method in weights:
-                    weights[method] /= total_score
-                
-                self.ensemble_calibrator = weights
-                logger.info(f"Ensemble calibrator fitted with weights: {weights}")
-            
-        except Exception as e:
-            logger.warning(f"Ensemble calibrator fitting failed: {e}")
-    
     def _predict_with_method(self, y_pred_proba: np.ndarray, method: str) -> Optional[np.ndarray]:
         """Predict with specific method"""
         try:
@@ -364,29 +317,6 @@ class EnhancedMultiMethodCalibrator:
                 
         except Exception:
             return None
-    
-    def _ensemble_predict(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """Ensemble prediction"""
-        try:
-            predictions = []
-            weights = []
-            
-            for method, weight in self.ensemble_calibrator.items():
-                pred = self._predict_with_method(y_pred_proba, method)
-                if pred is not None and weight > 0:
-                    predictions.append(pred)
-                    weights.append(weight)
-            
-            if predictions:
-                weights = np.array(weights)
-                weights = weights / weights.sum()
-                ensemble_pred = np.average(predictions, axis=0, weights=weights)
-                return ensemble_pred
-            else:
-                return y_pred_proba
-                
-        except Exception:
-            return y_pred_proba
     
     def get_calibration_summary(self) -> Dict[str, Any]:
         """Get calibration summary"""
@@ -412,8 +342,6 @@ class BaseModel(ABC):
         self.calibration_applied = True
         self.memory_monitor = MemoryMonitor()
         self.quick_mode = False
-        self.scaler = StandardScaler()
-        self.use_scaling = True
         self.training_time = 0.0
         self.validation_score = 0.0
         
@@ -435,8 +363,7 @@ class BaseModel(ABC):
                 logger.error(f"{self.name}: Insufficient memory for training")
                 return None
             elif memory_status['level'] == 'critical':
-                self._simplify_for_memory()
-                logger.warning(f"{self.name}: Memory critical - simplified parameters")
+                logger.warning(f"{self.name}: Memory critical")
             
             return fit_function(*args, **kwargs)
             
@@ -464,32 +391,6 @@ class BaseModel(ABC):
         except Exception as e:
             logger.error(f"{self.name}: Memory safe prediction failed: {e}")
             return np.array([])
-    
-    def _safe_data_preprocessing(self, X: pd.DataFrame, fit_scaler: bool = False) -> pd.DataFrame:
-        """Safe data preprocessing"""
-        try:
-            X_processed = X.copy()
-            
-            numeric_columns = X_processed.select_dtypes(include=[np.number]).columns
-            X_processed[numeric_columns] = X_processed[numeric_columns].fillna(0)
-            
-            categorical_columns = X_processed.select_dtypes(include=['object', 'category']).columns
-            for col in categorical_columns:
-                X_processed[col] = X_processed[col].fillna('missing')
-            
-            X_processed = X_processed.replace([np.inf, -np.inf], 0)
-            
-            if self.use_scaling and len(numeric_columns) > 0:
-                if fit_scaler:
-                    X_processed[numeric_columns] = self.scaler.fit_transform(X_processed[numeric_columns])
-                else:
-                    X_processed[numeric_columns] = self.scaler.transform(X_processed[numeric_columns])
-            
-            return X_processed
-            
-        except Exception as e:
-            logger.warning(f"{self.name}: Data preprocessing failed: {e}")
-            return X
     
     def _ensure_feature_consistency(self, X: pd.DataFrame) -> pd.DataFrame:
         """Ensure feature consistency"""
@@ -520,10 +421,8 @@ class BaseModel(ABC):
             
             if unique_predictions < self.prediction_diversity_threshold:
                 base_noise_scale = max(np.std(predictions) * 0.002, 1e-6)
-                
                 pred_range = np.max(predictions) - np.min(predictions)
                 range_factor = max(0.5, min(2.0, pred_range * 100))
-                
                 noise_scale = base_noise_scale * range_factor
                 
                 if np.random.random() > 0.5:
@@ -596,10 +495,6 @@ class BaseModel(ABC):
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
         """Raw probability predictions"""
         pass
-    
-    def _simplify_for_memory(self):
-        """Simplify for memory"""
-        pass
 
 class XGBoostGPUModel(BaseModel):
     """XGBoost model with GPU acceleration"""
@@ -608,6 +503,7 @@ class XGBoostGPUModel(BaseModel):
         if not XGBOOST_AVAILABLE:
             raise ImportError("XGBoost is not installed.")
         
+        # Optimized parameters for 0.35+ score
         default_params = {
             'objective': 'binary:logistic',
             'tree_method': 'gpu_hist',
@@ -626,7 +522,6 @@ class XGBoostGPUModel(BaseModel):
         
         super().__init__(name, default_params)
         self.model = None
-        self.use_scaling = False
         self.best_iteration = 0
         
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
@@ -638,15 +533,12 @@ class XGBoostGPUModel(BaseModel):
         def _fit_internal():
             self.feature_names = list(X_train.columns)
             
-            X_train_clean = self._safe_data_preprocessing(X_train, fit_scaler=False)
-            
             logger.info(f"{self.name}: Starting XGBoost GPU training")
             
-            dtrain = xgb.DMatrix(X_train_clean, label=y_train)
+            dtrain = xgb.DMatrix(X_train, label=y_train)
             
             if X_val is not None and y_val is not None and len(X_val) > 0:
-                X_val_clean = self._safe_data_preprocessing(X_val, fit_scaler=False)
-                dval = xgb.DMatrix(X_val_clean, label=y_val)
+                dval = xgb.DMatrix(X_val, label=y_val)
                 
                 self.model = xgb.train(
                     self.params,
@@ -680,7 +572,7 @@ class XGBoostGPUModel(BaseModel):
             
             self.training_time = time.time() - start_time
             
-            del X_train_clean, dtrain
+            del dtrain
             if 'dval' in locals():
                 del dval
             gc.collect()
@@ -696,7 +588,6 @@ class XGBoostGPUModel(BaseModel):
         
         def _predict_internal(batch_X):
             X_processed = self._ensure_feature_consistency(batch_X)
-            X_processed = self._safe_data_preprocessing(X_processed, fit_scaler=False)
             
             dtest = xgb.DMatrix(X_processed, feature_names=list(X_processed.columns))
             proba = self.model.predict(dtest)
@@ -733,111 +624,21 @@ class LogisticModel(BaseModel):
         self.model = LogisticRegression(**self.params)
         self.prediction_diversity_threshold = 2500
         self.sampling_logged = False
-        self.use_scaling = True
-    
-    def _simplify_for_memory(self):
-        """Simplify parameters"""
-        simplified_params = {
-            'C': 0.5,
-            'max_iter': 2000,
-            'n_jobs': 4,
-            'tol': 0.0001
-        }
-        
-        self.params.update(simplified_params)
-        self.model = LogisticRegression(**self.params)
-        logger.info(f"{self.name}: Parameters simplified for memory")
-    
-    def _apply_quick_mode_params(self):
-        """Apply quick mode parameters"""
-        quick_params = {
-            'C': 0.5,
-            'max_iter': 1000,
-            'n_jobs': 2,
-            'solver': 'saga',
-            'tol': 0.001
-        }
-        
-        self.params.update(quick_params)
-        self.model = LogisticRegression(**self.params)
-        logger.info(f"{self.name}: Quick mode parameters applied")
-    
-    def _safe_sampling(self, X_train: pd.DataFrame, y_train: pd.Series, target_size: int) -> Tuple[pd.DataFrame, pd.Series]:
-        """Safe stratified sampling"""
-        try:
-            current_size = len(X_train)
-            
-            if current_size <= target_size:
-                return X_train, y_train
-            
-            unique_labels = np.unique(y_train)
-            if len(unique_labels) > 1:
-                X_sampled, _, y_sampled, _ = train_test_split(
-                    X_train, y_train,
-                    train_size=target_size,
-                    random_state=42,
-                    stratify=y_train
-                )
-            else:
-                indices = np.random.choice(current_size, target_size, replace=False)
-                X_sampled = X_train.iloc[indices]
-                y_sampled = y_train.iloc[indices]
-            
-            if not self.sampling_logged:
-                logger.info(f"{self.name}: Data sampling applied - {current_size} -> {target_size} samples")
-                self.sampling_logged = True
-            
-            return X_sampled, y_sampled
-            
-        except Exception as e:
-            logger.warning(f"{self.name}: Sampling failed: {e}")
-            return X_train, y_train
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Training with sampling"""
+        """Training"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         start_time = time.time()
         
         def _fit_internal():
             self.feature_names = list(X_train.columns)
             
-            if self.quick_mode:
-                self._apply_quick_mode_params()
-            
-            memory_status = self.memory_monitor.get_memory_status()
-            
-            if memory_status['level'] == 'abort':
-                target_size = 100000
-                X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
-            elif memory_status['level'] == 'critical':
-                target_size = 500000
-                X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
-            elif memory_status['level'] == 'warning' and len(X_train) > 1000000:
-                target_size = 750000
-                X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
-            else:
-                if len(X_train) > 1000000:
-                    target_size = 1000000
-                    X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
-                else:
-                    X_train_sample, y_train_sample = X_train, y_train
-            
-            X_train_clean = self._safe_data_preprocessing(X_train_sample, fit_scaler=True)
-            
             logger.info(f"{self.name}: Starting training")
-            self.model.fit(X_train_clean, y_train_sample)
+            self.model.fit(X_train, y_train)
             
             logger.info(f"{self.name}: Training completed successfully")
             self.is_fitted = True
-            
-            if X_val is not None and y_val is not None and len(X_val) > 0:
-                try:
-                    val_pred = self.predict_proba_raw(X_val)
-                    from sklearn.metrics import roc_auc_score
-                    self.validation_score = roc_auc_score(y_val, val_pred)
-                except:
-                    self.validation_score = 0.5
             
             if X_val is not None and y_val is not None and len(X_val) > 0:
                 calibration_success = self.apply_calibration(X_val, y_val, method='auto')
@@ -850,101 +651,6 @@ class LogisticModel(BaseModel):
             
             self.training_time = time.time() - start_time
             
-            del X_train_clean
-            gc.collect()
-            
-            return self
-        
-        return self._memory_safe_fit(_fit_internal)
-    
-    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """Raw predictions before calibration"""
-        if not self.is_fitted:
-            raise ValueError("Model is not fitted.")
-        
-        def _predict_internal(batch_X):
-            X_processed = self._ensure_feature_consistency(batch_X)
-            X_processed = self._safe_data_preprocessing(X_processed, fit_scaler=False)
-            
-            proba = self.model.predict_proba(X_processed)[:, 1]
-            proba = np.clip(proba, 1e-15, 1 - 1e-15)
-            return self._enhance_prediction_diversity(proba)
-        
-        return self._memory_safe_predict(_predict_internal, X, batch_size=50000)
-
-class LightGBMModel(BaseModel):
-    """LightGBM model"""
-    
-    def __init__(self, name: str = "LightGBM", params: Dict[str, Any] = None):
-        if not LIGHTGBM_AVAILABLE:
-            raise ImportError("LightGBM is not installed.")
-        
-        default_params = {
-            'objective': 'binary',
-            'metric': 'binary_logloss',
-            'boosting_type': 'gbdt',
-            'num_leaves': 63,
-            'max_depth': 6,
-            'learning_rate': 0.05,
-            'n_estimators': 800,
-            'min_child_samples': 200,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'reg_alpha': 0.5,
-            'reg_lambda': 0.5,
-            'random_state': 42,
-            'n_jobs': 8,
-            'verbose': -1,
-            'is_unbalance': True
-        }
-        
-        if params:
-            default_params.update(params)
-        
-        super().__init__(name, default_params)
-        self.model = None
-        self.use_scaling = False
-    
-    def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
-            X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Training"""
-        logger.info(f"{self.name} model training started (data: {len(X_train):,})")
-        start_time = time.time()
-        
-        def _fit_internal():
-            self.feature_names = list(X_train.columns)
-            
-            X_train_clean = self._safe_data_preprocessing(X_train, fit_scaler=False)
-            
-            logger.info(f"{self.name}: Starting LightGBM training")
-            
-            if X_val is not None and y_val is not None and len(X_val) > 0:
-                X_val_clean = self._safe_data_preprocessing(X_val, fit_scaler=False)
-                self.model = lgb.LGBMClassifier(**self.params)
-                self.model.fit(
-                    X_train_clean, y_train,
-                    eval_set=[(X_val_clean, y_val)],
-                    callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
-                )
-            else:
-                self.model = lgb.LGBMClassifier(**self.params)
-                self.model.fit(X_train_clean, y_train)
-            
-            logger.info(f"{self.name}: Training completed successfully")
-            self.is_fitted = True
-            
-            if X_val is not None and y_val is not None and len(X_val) > 0:
-                calibration_success = self.apply_calibration(X_val, y_val, method='auto')
-                if calibration_success:
-                    logger.info(f"{self.name}: Calibration completed")
-                else:
-                    logger.warning(f"{self.name}: Calibration skipped")
-            else:
-                logger.warning(f"{self.name}: No validation data - calibration skipped")
-            
-            self.training_time = time.time() - start_time
-            
-            del X_train_clean
             gc.collect()
             
             return self
@@ -958,115 +664,12 @@ class LightGBMModel(BaseModel):
         
         def _predict_internal(batch_X):
             X_processed = self._ensure_feature_consistency(batch_X)
-            X_processed = self._safe_data_preprocessing(X_processed, fit_scaler=False)
             
             proba = self.model.predict_proba(X_processed)[:, 1]
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
             return self._enhance_prediction_diversity(proba)
         
         return self._memory_safe_predict(_predict_internal, X, batch_size=50000)
-
-class XGBoostModel(BaseModel):
-    """XGBoost model (CPU fallback)"""
-    
-    def __init__(self, name: str = "XGBoost", params: Dict[str, Any] = None):
-        if not XGBOOST_AVAILABLE:
-            raise ImportError("XGBoost is not installed.")
-        
-        default_params = {
-            'objective': 'binary:logistic',
-            'eval_metric': 'logloss',
-            'max_depth': 6,
-            'learning_rate': 0.05,
-            'n_estimators': 600,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'min_child_weight': 10,
-            'gamma': 0.1,
-            'reg_alpha': 0.5,
-            'reg_lambda': 0.5,
-            'random_state': 42,
-            'n_jobs': 8,
-            'scale_pos_weight': 52.3,
-            'tree_method': 'hist'
-        }
-        
-        if params:
-            default_params.update(params)
-        
-        super().__init__(name, default_params)
-        self.model = None
-        self.use_scaling = False
-    
-    def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
-            X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Training"""
-        logger.info(f"{self.name} model training started (data: {len(X_train):,})")
-        start_time = time.time()
-        
-        def _fit_internal():
-            self.feature_names = list(X_train.columns)
-            
-            X_train_clean = self._safe_data_preprocessing(X_train, fit_scaler=False)
-            
-            logger.info(f"{self.name}: Starting XGBoost training")
-            
-            if X_val is not None and y_val is not None and len(X_val) > 0:
-                X_val_clean = self._safe_data_preprocessing(X_val, fit_scaler=False)
-                self.model = xgb.XGBClassifier(**self.params)
-                self.model.fit(
-                    X_train_clean, y_train,
-                    eval_set=[(X_val_clean, y_val)],
-                    early_stopping_rounds=50,
-                    verbose=False
-                )
-            else:
-                self.model = xgb.XGBClassifier(**self.params)
-                self.model.fit(X_train_clean, y_train)
-            
-            logger.info(f"{self.name}: Training completed successfully")
-            self.is_fitted = True
-            
-            if X_val is not None and y_val is not None and len(X_val) > 0:
-                calibration_success = self.apply_calibration(X_val, y_val, method='auto')
-                if calibration_success:
-                    logger.info(f"{self.name}: Calibration completed")
-                else:
-                    logger.warning(f"{self.name}: Calibration skipped")
-            else:
-                logger.warning(f"{self.name}: No validation data - calibration skipped")
-            
-            self.training_time = time.time() - start_time
-            
-            del X_train_clean
-            gc.collect()
-            
-            return self
-        
-        return self._memory_safe_fit(_fit_internal)
-    
-    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """Raw predictions"""
-        if not self.is_fitted:
-            raise ValueError("Model is not fitted.")
-        
-        def _predict_internal(batch_X):
-            X_processed = self._ensure_feature_consistency(batch_X)
-            X_processed = self._safe_data_preprocessing(X_processed, fit_scaler=False)
-            
-            dtest = xgb.DMatrix(
-                X_processed, 
-                feature_names=list(X_processed.columns),
-                enable_categorical=False
-            )
-            proba = self.model.predict(dtest)
-            
-            del dtest
-            
-            proba = np.clip(proba, 1e-15, 1 - 1e-15)
-            return self._enhance_prediction_diversity(proba)
-        
-        return self._memory_safe_predict(_predict_internal, X, batch_size=25000)
 
 class ModelFactory:
     """Model factory"""
@@ -1080,30 +683,12 @@ class ModelFactory:
             if not ModelFactory._factory_logged:
                 memory_monitor = MemoryMonitor()
                 logger.info(f"Creating model: {model_type}")
-                
-                if kwargs.get('quick_mode', False):
-                    thresholds = memory_monitor.quick_mode_thresholds
-                    logger.info(f"Quick mode thresholds - warning: {thresholds['warning']:.1f}GB, critical: {thresholds['critical']:.1f}GB")
-                else:
-                    thresholds = memory_monitor.memory_thresholds
-                    logger.info(f"Memory thresholds - warning: {thresholds['warning']:.1f}GB, critical: {thresholds['critical']:.1f}GB")
-                
                 ModelFactory._factory_logged = True
             
             quick_mode = kwargs.get('quick_mode', False)
             
             if model_type.lower() == 'xgboost_gpu':
                 model = XGBoostGPUModel(params=kwargs.get('params'))
-                
-            elif model_type.lower() == 'lightgbm':
-                if not LIGHTGBM_AVAILABLE:
-                    raise ImportError("LightGBM is not installed.")
-                model = LightGBMModel(params=kwargs.get('params'))
-                
-            elif model_type.lower() == 'xgboost':
-                if not XGBOOST_AVAILABLE:
-                    raise ImportError("XGBoost is not installed.")
-                model = XGBoostModel(params=kwargs.get('params'))
                 
             elif model_type.lower() == 'logistic':
                 model = LogisticModel(params=kwargs.get('params'))
@@ -1124,61 +709,13 @@ class ModelFactory:
     @staticmethod
     def get_available_models() -> List[str]:
         """List of available model types"""
-        available = []
-        
-        available.append('logistic')
+        available = ['logistic']
         
         if XGBOOST_AVAILABLE:
-            available.append('xgboost')
             available.append('xgboost_gpu')
-        
-        if LIGHTGBM_AVAILABLE:
-            available.append('lightgbm')
         
         logger.info(f"Available models: {available}")
         return available
-    
-    @staticmethod
-    def get_model_priority() -> List[str]:
-        """Model priority list"""
-        priority_order = []
-        
-        if XGBOOST_AVAILABLE:
-            priority_order.append('xgboost_gpu')
-        
-        if LIGHTGBM_AVAILABLE:
-            priority_order.append('lightgbm')
-        
-        if XGBOOST_AVAILABLE:
-            priority_order.append('xgboost')
-            
-        if SKLEARN_AVAILABLE:
-            priority_order.append('logistic')
-        
-        return priority_order
-    
-    @staticmethod
-    def select_models_by_memory_status() -> List[str]:
-        """Select models based on memory status"""
-        memory_monitor = MemoryMonitor()
-        memory_status = memory_monitor.get_memory_status()
-        
-        if memory_status['level'] == 'abort':
-            return ['logistic']
-        elif memory_status['level'] == 'critical':
-            models = ['logistic']
-            if LIGHTGBM_AVAILABLE:
-                models.append('lightgbm')
-            return models
-        elif memory_status['level'] == 'warning':
-            models = ['lightgbm', 'logistic']
-            if XGBOOST_AVAILABLE:
-                models.append('xgboost')
-            return models
-        else:
-            return ModelFactory.get_available_models()
 
-FinalLightGBMModel = LightGBMModel
-FinalXGBoostModel = XGBoostModel  
-FinalLogisticModel = LogisticModel
 FinalXGBoostGPUModel = XGBoostGPUModel
+FinalLogisticModel = LogisticModel

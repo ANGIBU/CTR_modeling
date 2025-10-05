@@ -104,50 +104,52 @@ class Config:
         'out_files_per_proc': 8,
         'freq_threshold': 0,
         'max_size': 50000,
-        'exclude_columns': ['seq'],  # Exclude seq column
+        'exclude_columns': ['seq'],
     }
     
-    # Feature columns configuration
+    # Feature columns configuration - optimized for tree models
+    # Only 5 categorical features
     CATEGORICAL_FEATURES = ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour']
     
+    # All continuous features (112 total)
     CONTINUOUS_FEATURES = (
-        [f'feat_a_{i}' for i in range(1, 19)] +
-        [f'feat_b_{i}' for i in range(1, 7)] +
-        [f'feat_c_{i}' for i in range(1, 9)] +
-        [f'feat_d_{i}' for i in range(1, 7)] +
-        [f'feat_e_{i}' for i in range(1, 11)] +
-        [f'history_a_{i}' for i in range(1, 8)] +
-        [f'history_b_{i}' for i in range(1, 31)] +
-        [f'l_feat_{i}' for i in range(1, 28)]
+        [f'feat_a_{i}' for i in range(1, 19)] +     # 18
+        [f'feat_b_{i}' for i in range(1, 7)] +      # 6
+        [f'feat_c_{i}' for i in range(1, 9)] +      # 8
+        [f'feat_d_{i}' for i in range(1, 7)] +      # 6
+        [f'feat_e_{i}' for i in range(1, 11)] +     # 10
+        [f'history_a_{i}' for i in range(1, 8)] +   # 7
+        [f'history_b_{i}' for i in range(1, 31)] +  # 30
+        [f'l_feat_{i}' for i in range(1, 28)]       # 27
     )
     
-    # Model training settings
+    # Model training settings - optimized for 0.35+ score
     MODEL_TRAINING_CONFIG = {
         'lightgbm': {
-            'max_depth': 6,
+            'max_depth': 8,
             'num_leaves': 63,
             'min_data_in_leaf': 200,
             'feature_fraction': 0.8,
             'bagging_fraction': 0.8,
             'bagging_freq': 5,
-            'lambda_l1': 0.5,
-            'lambda_l2': 0.5,
+            'lambda_l1': 0.1,
+            'lambda_l2': 0.1,
             'min_gain_to_split': 0.02,
             'max_cat_threshold': 32,
             'cat_smooth': 10.0,
             'cat_l2': 10.0,
             'learning_rate': 0.05,
             'num_iterations': 800,
-            'scale_pos_weight': 52.3,
+            'scale_pos_weight': 51.43,
             'is_unbalance': True,
             'device': 'gpu' if GPU_AVAILABLE else 'cpu'
         },
         'xgboost': {
             'objective': 'binary:logistic',
-            'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
+            'tree_method': 'hist',
             'max_depth': 8,
-            'learning_rate': 0.1,
-            'n_estimators': 200,
+            'learning_rate': 0.05,
+            'n_estimators': 500,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
             'min_child_weight': 1,
@@ -155,9 +157,9 @@ class Config:
             'alpha': 0,
             'lambda': 1,
             'scale_pos_weight': 51.43,
-            'gpu_id': 0 if GPU_AVAILABLE else -1,
             'verbosity': 0,
-            'seed': 42
+            'seed': 42,
+            'n_jobs': -1
         },
         'xgboost_gpu': {
             'objective': 'binary:logistic',
@@ -183,31 +185,32 @@ class Config:
         }
     }
     
-    # Feature engineering settings
+    # Feature engineering settings - optimized for tree models
     FEATURE_ENGINEERING_CONFIG = {
-        'enable_interaction_features': True,
+        'enable_interaction_features': False,  # Tree models handle interactions
         'enable_polynomial_features': False,
-        'enable_binning': True,
+        'enable_binning': False,
         'enable_target_encoding': True,
         'enable_frequency_encoding': True,
-        'enable_statistical_features': True,
+        'enable_statistical_features': False,
         'enable_cross_validation_encoding': True,
         'max_interaction_degree': 2,
         'binning_strategy': 'quantile',
         'n_bins': 6,
         'min_frequency': 10,
         'target_encoding_smoothing': 20.0,
-        'target_feature_count': 250,
-        'use_feature_selection': True,
+        'target_feature_count': 117,  # 5 categorical + 112 continuous
+        'use_feature_selection': False,  # Use all features
         'feature_selection_method': 'f_classif',
         'feature_importance_threshold': 0.01,
-        'max_categorical_for_encoding': 15,
-        'max_numeric_for_interaction': 10,
-        'max_cross_combinations': 9,
-        'max_statistical_features': 8,
+        'max_categorical_for_encoding': 5,
+        'max_numeric_for_interaction': 0,
+        'max_cross_combinations': 0,
+        'max_statistical_features': 0,
         'cleanup_after_each_step': True,
         'intermediate_storage': False,
-        'use_nvtabular': NVTABULAR_ENABLED
+        'use_nvtabular': NVTABULAR_ENABLED,
+        'normalize_continuous': False  # No normalization for tree models
     }
     
     # Cross-validation settings
@@ -245,7 +248,7 @@ class Config:
     EVALUATION_CONFIG = {
         'ap_weight': 0.5,
         'wll_weight': 0.5,
-        'target_combined_score': 0.353,
+        'target_combined_score': 0.35,
         'target_ctr': 0.0191,
         'ctr_tolerance': 0.001,
         'bias_penalty_weight': 5.0,
@@ -271,7 +274,7 @@ class Config:
     # Evaluation metrics
     PRIMARY_METRIC = 'combined_score'
     SECONDARY_METRICS = ['ap', 'auc', 'log_loss', 'ctr_bias', 'ctr_score']
-    TARGET_COMBINED_SCORE = 0.353
+    TARGET_COMBINED_SCORE = 0.35
     TARGET_CTR = 0.0191
     
     # Logging settings

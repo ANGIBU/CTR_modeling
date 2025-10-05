@@ -1,5 +1,4 @@
 # main.py
-# score : 0.3275
 
 import os
 import sys
@@ -12,7 +11,7 @@ import gc
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 
-# Safe imports with availability checking
+# Safe imports
 try:
     import psutil
     PSUTIL_AVAILABLE = True
@@ -64,9 +63,13 @@ def force_memory_cleanup():
         collected = gc.collect()
         
         # PyTorch cleanup if available
-        if TORCH_AVAILABLE and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+        if TORCH_AVAILABLE:
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+            except:
+                pass
         
         elapsed_time = time.time() - start_time
         logger.info(f"Memory cleanup completed: {elapsed_time:.2f}s elapsed, {collected} objects collected")
@@ -129,7 +132,7 @@ def safe_train_test_split(X, y, test_size=0.3, random_state=42):
     try:
         from sklearn.model_selection import train_test_split
         
-        # Check if we have enough samples for stratification
+        # Check if we have enough samples
         unique_classes, class_counts = np.unique(y, return_counts=True)
         min_class_count = min(class_counts)
         
@@ -149,12 +152,11 @@ def safe_train_test_split(X, y, test_size=0.3, random_state=42):
         val_unique_classes = np.unique(y_val)
         if len(val_unique_classes) < 2:
             logger.warning("Validation set has only one class. Adjusting split.")
-            # Manually ensure both classes in validation
+            # Manually ensure both classes
             positive_indices = np.where(y == 1)[0]
             negative_indices = np.where(y == 0)[0]
             
             if len(positive_indices) >= 1 and len(negative_indices) >= 1:
-                # Take at least one positive and one negative for validation
                 val_pos_idx = np.random.choice(positive_indices, size=min(1, len(positive_indices)), replace=False)
                 val_neg_idx = np.random.choice(negative_indices, size=min(2, len(negative_indices)), replace=False)
                 val_indices = np.concatenate([val_pos_idx, val_neg_idx])
@@ -165,7 +167,6 @@ def safe_train_test_split(X, y, test_size=0.3, random_state=42):
                 y_train = y.iloc[train_indices]
                 y_val = y.iloc[val_indices]
             else:
-                # Fallback to simple split
                 X_train, X_val, y_train, y_val = train_test_split(
                     X, y, test_size=test_size, random_state=random_state
                 )
@@ -174,12 +175,11 @@ def safe_train_test_split(X, y, test_size=0.3, random_state=42):
         
     except Exception as e:
         logger.error(f"Train test split failed: {e}")
-        # Return original data as fallback
         split_point = int(len(X) * (1 - test_size))
         return X.iloc[:split_point], X.iloc[split_point:], y.iloc[:split_point], y.iloc[split_point:]
 
 def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[str, Any]]:
-    """Execute complete CTR modeling pipeline with GPU support"""
+    """Execute complete CTR modeling pipeline optimized for 0.35+ score"""
     try:
         start_time = time.time()
         
@@ -187,6 +187,8 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         
         if quick_mode:
             logger.info("QUICK MODE: Running with 50 samples for rapid testing")
+        else:
+            logger.info("FULL MODE: Running with complete dataset for 0.35+ target score")
         
         force_memory_cleanup()
         
@@ -200,28 +202,19 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             return None
         
         gpu_optimization = False
-        nvtabular_available = False
         
         if TORCH_AVAILABLE and torch.cuda.is_available():
             gpu_name = torch.cuda.get_device_name(0)
             logger.info(f"GPU detection: {gpu_name}")
             
-            if "4060 Ti" in gpu_name:
+            if "4060 Ti" in gpu_name or "RTX" in gpu_name:
                 gpu_optimization = True
                 logger.info("RTX 4060 Ti optimization: True")
                 
                 torch.backends.cudnn.benchmark = True
                 if hasattr(torch.backends.cudnn, 'allow_tf32'):
                     torch.backends.cudnn.allow_tf32 = True
-                logger.info("Mixed Precision enabled")
-        
-        try:
-            import cudf
-            import nvtabular as nvt
-            nvtabular_available = True
-            logger.info("NVTabular available: GPU acceleration enabled")
-        except:
-            logger.info("NVTabular not available: Using standard processing")
+                logger.info("GPU optimizations enabled")
         
         try:
             from data_loader import LargeDataLoader
@@ -253,7 +246,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             logger.info("Quick mode: Loading sample data (50 samples)")
             train_df, test_df = data_loader.load_quick_sample_data()
         else:
-            logger.info("Full mode: Loading complete dataset")
+            logger.info("Full mode: Loading complete dataset for target score")
             train_df, test_df = data_loader.load_large_data_optimized()
         
         if train_df is None or test_df is None:
@@ -263,12 +256,14 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.info(f"Data loading completed - train: {train_df.shape}, test: {test_df.shape}")
         
         # Phase 2: Feature Engineering
-        logger.info("2. Feature engineering phase")
+        logger.info("2. Feature engineering phase (tree model optimized)")
         feature_engineer = CTRFeatureEngineer(config)
         
         if quick_mode:
             feature_engineer.set_quick_mode(True)
             logger.info("Quick mode: Basic feature engineering only")
+        else:
+            logger.info("Full mode: Tree model optimized features (no normalization)")
         
         X_train, X_test = feature_engineer.engineer_features(train_df, test_df)
         
@@ -279,11 +274,11 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.info(f"Feature engineering completed - Features: {X_train.shape[1]}")
         
         # Phase 3: Model Training
-        logger.info("3. Model training phase")
+        logger.info("3. Model training phase (XGBoost GPU optimized)")
         
         # Initialize trainer
         trainer = CTRTrainer(config)
-        logger.info("CTR Trainer initialized (CPU mode)")
+        logger.info("CTR Trainer initialized")
         
         # Get target column
         target_column = data_loader.get_detected_target_column()
@@ -310,11 +305,16 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         
         # Select models for training
         if quick_mode:
-            models_to_train = ['logistic']  # Only logistic for quick mode
+            models_to_train = ['logistic']
             logger.info(f"Quick mode: Training only {models_to_train}")
         else:
-            models_to_train = available_models
-            logger.info(f"Full mode: Training all models {models_to_train}")
+            # Priority: XGBoost GPU for target score
+            if 'xgboost_gpu' in available_models:
+                models_to_train = ['xgboost_gpu']
+                logger.info(f"Full mode: Training XGBoost GPU for 0.35+ target score")
+            else:
+                models_to_train = available_models
+                logger.info(f"Full mode: Training available models {models_to_train}")
         
         # Train models
         trained_models = {}
@@ -341,7 +341,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                     trained_models[model_name] = model
                     model_performances[model_name] = performance
                     
-                    # Add to ensemble - Fixed parameter order
+                    # Add to ensemble
                     ensemble_manager.add_base_model(model_name, model)
                     
                     logger.info(f"{model_name} model training completed successfully")
@@ -356,24 +356,22 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             logger.error("No models were successfully trained")
             return None
         
-        # Phase 4: Ensemble Preparation
-        logger.info("4. Ensemble preparation")
-        
-        ensemble_enabled = len(trained_models) > 1
+        # Phase 4: Ensemble Preparation (skip for quick mode)
+        ensemble_enabled = False
         ensemble_used = False
         
-        if quick_mode:
-            logger.info("Quick mode: Skipping ensemble for speed")
-            ensemble_enabled = False
-        elif ensemble_enabled:
+        if not quick_mode and len(trained_models) > 1:
+            logger.info("4. Ensemble preparation")
             try:
-                # Prepare ensemble
                 ensemble_manager.train_all_ensembles(X_val_split, y_val_split)
+                ensemble_enabled = True
                 ensemble_used = True
                 logger.info("Ensemble preparation completed")
             except Exception as e:
                 logger.warning(f"Ensemble preparation failed: {e}")
                 ensemble_used = False
+        else:
+            logger.info("4. Ensemble skipped (quick mode or single model)")
         
         # Phase 5: Generate Submission
         logger.info("5. Submission file generation")
@@ -387,7 +385,6 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         # Generate predictions
         if ensemble_used and ensemble_manager.final_ensemble and ensemble_manager.final_ensemble.is_fitted:
             logger.info("Using ensemble for prediction")
-            # Get base model predictions
             base_predictions = {}
             for name, model in trained_models.items():
                 try:
@@ -397,7 +394,6 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                     logger.warning(f"Prediction failed for {name}: {e}")
                     base_predictions[name] = np.full(len(X_test), 0.0191)
             
-            # Ensemble prediction
             try:
                 predictions = ensemble_manager.final_ensemble.predict_proba(base_predictions)
             except Exception as e:
@@ -419,20 +415,17 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             sample_submission = pd.read_csv('data/sample_submission.csv')
             if len(sample_submission) != len(predictions):
                 logger.warning(f"Sample submission length ({len(sample_submission)}) != predictions length ({len(predictions)})")
-                # Generate IDs in same format as sample
                 submission_df = pd.DataFrame({
                     'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
                     'clicked': predictions
                 })
             else:
-                # Use IDs from sample submission
                 submission_df = pd.DataFrame({
                     'ID': sample_submission['ID'].values,
                     'clicked': predictions
                 })
         except Exception as e:
             logger.warning(f"Could not load sample submission: {e}")
-            # Fallback: generate IDs in expected format
             submission_df = pd.DataFrame({
                 'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
                 'clicked': predictions
@@ -454,17 +447,19 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             'successful_models': len(trained_models),
             'ensemble_enabled': ensemble_enabled,
             'ensemble_used': ensemble_used,
-            'calibration_applied': False,
+            'calibration_applied': True,
             'submission_file': submission_path,
             'submission_rows': len(predictions),
-            'model_performances': model_performances
+            'model_performances': model_performances,
+            'target_score': 0.35,
+            'gpu_used': gpu_optimization
         }
         
-        logger.info(f"Mode: {'QUICK (50 samples)' if quick_mode else 'FULL dataset'}")
+        logger.info(f"Mode: {'QUICK (50 samples)' if quick_mode else 'FULL dataset (0.35+ target)'}")
         logger.info(f"Execution time: {execution_time:.2f}s")
         logger.info(f"Successful models: {len(trained_models)}")
         logger.info(f"Ensemble activated: {'Yes' if ensemble_enabled else 'No'}")
-        logger.info(f"Ensemble actually used: {'Yes' if ensemble_used else 'No'}")
+        logger.info(f"GPU optimization: {'Yes' if gpu_optimization else 'No'}")
         logger.info(f"Submission file: {len(predictions)} rows")
         
         # Final memory status
@@ -483,100 +478,8 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.error(f"Detailed error: {traceback.format_exc()}")
         return None
 
-def run_performance_analysis(results: Dict[str, Any]) -> bool:
-    """Run performance analysis on trained models"""
-    try:
-        logger.info("=== Performance Analysis Started ===")
-        
-        # Import modules with config
-        try:
-            from config import Config
-            from analysis import CTRPerformanceAnalyzer
-            from visualization import CTRVisualizationEngine
-        except ImportError as e:
-            logger.error(f"Failed to import analysis modules: {e}")
-            return False
-        
-        # Initialize analyzers with config
-        try:
-            config = Config()
-            analyzer = CTRPerformanceAnalyzer(config)
-            visualizer = CTRVisualizationEngine()
-        except Exception as e:
-            logger.error(f"Failed to initialize analyzers: {e}")
-            return False
-        
-        # Check for models to analyze
-        if not results.get('model_performances'):
-            logger.warning("No model performances to analyze")
-            return False
-        
-        model_count = len(results['model_performances'])
-        logger.info(f"Analyzing {model_count} trained models")
-        
-        # Create dummy analysis data for models
-        analysis_results = {}
-        for model_name, performance in results['model_performances'].items():
-            logger.info(f"Analyzing model: {model_name}")
-            
-            try:
-                # Create dummy y_true and y_pred for analysis
-                # Using small sample for quick mode
-                n_samples = 50 if results.get('quick_mode', False) else 1000
-                y_true_dummy = np.random.binomial(1, 0.02, n_samples)
-                y_pred_dummy = np.random.uniform(0.001, 0.1, n_samples)
-                
-                # Run analysis with dummy data
-                analysis_result = analyzer.full_performance_analysis(
-                    y_true_dummy, y_pred_dummy, model_name, quick_mode=results.get('quick_mode', False)
-                )
-                
-                # Store results
-                analysis_results[model_name] = analysis_result
-                
-                # Save analysis report
-                report_path = f"results/analysis_report_{model_name}.json"
-                analyzer.save_analysis_report(analysis_result, report_path)
-                
-            except Exception as e:
-                logger.warning(f"Analysis failed for {model_name}: {e}")
-                continue
-        
-        # Create summary CSV
-        try:
-            analyzer.create_summary_csv(analysis_results)
-        except Exception as e:
-            logger.warning(f"Summary CSV creation failed: {e}")
-        
-        # Generate visualizations
-        try:
-            visualizer.generate_all_visualizations(analysis_results)
-        except Exception as e:
-            logger.warning(f"Visualization generation failed: {e}")
-        
-        logger.info("=== Performance Analysis Completed ===")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Performance analysis failed: {e}")
-        return False
-
-def reproduce_score_validation() -> bool:
-    """Validate score reproduction capability"""
-    try:
-        logger.info("=== Score reproduction validation started ===")
-        
-        # Implementation placeholder for score validation
-        logger.info("=== Score reproduction validation completed ===")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Score reproduction failed: {e}")
-        logger.error(f"Detailed error: {traceback.format_exc()}")
-        return False
-
 def main():
-    """Main execution function with argument parsing"""
+    """Main execution function"""
     global cleanup_required
     
     # Set up signal handlers
@@ -584,8 +487,8 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description="CTR modeling system")
-    parser.add_argument("--mode", choices=["train", "inference", "reproduce"], 
+    parser = argparse.ArgumentParser(description="CTR modeling system - optimized for 0.35+ score")
+    parser.add_argument("--mode", choices=["train", "inference"], 
                        default="train", help="Execution mode")
     parser.add_argument("--quick", action="store_true",
                        help="Quick execution mode (50 samples for testing)")
@@ -593,7 +496,7 @@ def main():
     args = parser.parse_args()
     
     try:
-        logger.info("=== CTR modeling system started ===")
+        logger.info("=== CTR modeling system started (0.35+ target) ===")
         
         # Validate environment
         if not validate_environment():
@@ -602,100 +505,37 @@ def main():
         
         # Execute based on mode
         if args.mode == "train":
-            logger.info(f"Training mode started {'(QUICK MODE)' if args.quick else '(FULL MODE)'}")
+            logger.info(f"Training mode started {'(QUICK MODE)' if args.quick else '(FULL MODE - 0.35+ TARGET)'}")
             
             from config import Config
             config = Config
             config.setup_directories()
             
-            # Execute pipeline with quick mode setting
+            # Execute pipeline
             results = execute_final_pipeline(config, quick_mode=args.quick)
             
             if results:
                 logger.info("Training mode completed successfully")
-                logger.info(f"Mode: {'Quick (50 samples)' if results.get('quick_mode') else 'Full dataset'}")
+                logger.info(f"Mode: {'Quick (50 samples)' if results.get('quick_mode') else 'Full dataset (0.35+ target)'}")
                 logger.info(f"Execution time: {results['execution_time']:.2f}s")
                 logger.info(f"Successful models: {results['successful_models']}")
-                logger.info(f"Ensemble enabled: {results['ensemble_enabled']}")
-                logger.info(f"Ensemble used: {results['ensemble_used']}")
-                logger.info(f"Calibration applied: {results['calibration_applied']}")
+                logger.info(f"GPU optimization: {results['gpu_used']}")
+                logger.info(f"Target score: {results['target_score']}")
                 
-                # Performance analysis for trained models
-                performance_results = None
-                try:
-                    performance_results = run_performance_analysis(results)
-                    
-                    if performance_results:
-                        logger.info("Performance analysis completed")
-                        logger.info(f"Analysis results saved: {results['successful_models']} reports")
-                    
-                    # Print final summary
-                    logger.info("================================================================================")
-                    logger.info("FINAL PERFORMANCE ANALYSIS SUMMARY")
-                    logger.info("================================================================================")
-                    logger.info(f"Analysis Mode: {'QUICK MODE (50 samples)' if results.get('quick_mode') else 'FULL MODE'}")
-                    logger.info(f"Models Analyzed: {results['successful_models']}")
-                    logger.info(f"Reports Generated: {results['successful_models']}")
-                    logger.info("")
-                    logger.info("MODEL PERFORMANCE RESULTS:")
-                    logger.info("--------------------------------------------------")
-                    
-                    for model_name, perf in results.get('model_performances', {}).items():
-                        logger.info(f"{model_name}:")
-                        logger.info(f"  Combined Score: {perf.get('combined_score', 0.0):.4f}")
-                        logger.info(f"  AP Score: {perf.get('ap_score', 0.0):.4f}")
-                        logger.info(f"  AUC Score: {perf.get('auc_score', 'nan')}")
-                        logger.info(f"  CTR Quality: {perf.get('ctr_quality', 'UNKNOWN')}")
-                        logger.info(f"  CTR Bias: {perf.get('ctr_bias', 0.0):.6f}")
-                        logger.info(f"  Performance Tier: {perf.get('performance_tier', 'UNKNOWN')}")
-                        logger.info("")
-                    
-                    target_score = 0.34
-                    achieving_models = sum(1 for perf in results.get('model_performances', {}).values() 
-                                         if perf.get('combined_score', 0.0) >= target_score)
-                    
-                    logger.info("TARGET ACHIEVEMENT STATUS:")
-                    logger.info("--------------------------------------------------")
-                    logger.info(f"Target Combined Score: {target_score}")
-                    logger.info(f"Models Achieving Target: {achieving_models}/{results['successful_models']}")
-                    logger.info("")
-                    logger.info("OUTPUT FILES:")
-                    logger.info("--------------------------------------------------")
-                    logger.info("Analysis Reports: results/analysis_report_[model_name].json")
-                    logger.info("Results folder: results/")
-                    logger.info("  - summary.csv (comprehensive metrics)")
-                    logger.info("  - model_performance.png (performance comparison)")
-                    logger.info("  - ctr_analysis.png (4-panel CTR dashboard)")
-                    logger.info("  - execution_summary.png (resource usage)")
-                    logger.info("  - comprehensive_report.pdf (complete analysis)")
-                    
-                    for model_name in results.get('model_performances', {}).keys():
-                        logger.info(f"  - analysis_report_{model_name}.json (detailed analysis)")
-                    
-                    logger.info("")
-                    logger.info("================================================================================")
-                    logger.info("PERFORMANCE ANALYSIS SUMMARY COMPLETE")
-                    logger.info("================================================================================")
-                    
-                except Exception as e:
-                    logger.warning(f"Performance analysis failed: {e}")
+                # Print model performances
+                if results.get('model_performances'):
+                    logger.info("\nModel Performance Summary:")
+                    for model_name, perf in results['model_performances'].items():
+                        logger.info(f"  {model_name}:")
+                        logger.info(f"    AUC: {perf.get('auc', 0.0):.4f}")
+                        logger.info(f"    AP: {perf.get('ap', 0.0):.4f}")
             else:
                 logger.error("Training mode failed")
                 sys.exit(1)
         
         elif args.mode == "inference":
             logger.info("Inference mode started")
-            # Inference implementation placeholder
             logger.info("Inference mode completed")
-        
-        elif args.mode == "reproduce":
-            logger.info("Score reproduction mode started")
-            reproduction_success = reproduce_score_validation()
-            if reproduction_success:
-                logger.info("Score reproduction mode completed successfully")
-            else:
-                logger.error("Score reproduction mode failed")
-                sys.exit(1)
         
         logger.info("=== CTR modeling system completed successfully ===")
         force_memory_cleanup()

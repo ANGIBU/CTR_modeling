@@ -13,16 +13,23 @@ torch>=2.1.2
 torchvision>=0.16.2
 torchaudio>=2.1.2
 
-# NVIDIA Merlin ecosystem (GPU acceleration)
-# Note: Install via conda for best compatibility
-# conda install -c rapidsai -c nvidia -c conda-forge nvtabular cudf cupy xgboost
-nvtabular>=23.08.00
-cudf-cu11>=23.10.0
-cupy-cuda11x>=13.6.0
+# RAPIDS and GPU acceleration (CUDA 12.x compatible)
+# Note: Install these separately using conda or from RAPIDS release
+# conda install -c rapidsai -c conda-forge -c nvidia \
+#     cudf=24.02 cuml=24.02 cugraph=24.02 cuspatial=24.02 \
+#     cuproj=24.02 cuxfilter=24.02 cucim=24.02 pylibraft=24.02 \
+#     raft-dask=24.02 python=3.11 cuda-version=12.0
 
-# Dask for distributed computing
-dask>=2023.9.2
-distributed>=2023.9.2
+# If pip install is required (may not work on all systems):
+# cupy-cuda12x>=12.0.0  # Match your CUDA version
+# cudf-cu12>=24.02.0
+# cuml-cu12>=24.02.0
+
+# NVTabular and Merlin (requires RAPIDS)
+# Install via: pip install nvtabular merlin-core merlin-dataloader
+# nvtabular>=1.11.0
+# merlin-core>=0.13.0
+# merlin-dataloader>=0.0.4
 
 # Visualization
 matplotlib>=3.8.2
@@ -31,7 +38,6 @@ seaborn>=0.13.0
 # System monitoring
 psutil>=5.9.6
 GPUtil>=1.4.0
-pynvml>=11.5.0
 
 # Utilities
 tqdm>=4.66.1
@@ -66,6 +72,3 @@ pyyaml>=6.0.1
 
 # Caching for inference optimization (optional)
 cachetools>=5.3.2
-
-# RAPIDS memory management
-rmm-cu11>=23.10.0
