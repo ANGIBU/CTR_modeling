@@ -11,8 +11,23 @@ except ImportError:
     TORCH_AVAILABLE = False
     logging.warning("PyTorch not installed. GPU functions will be disabled.")
 
+try:
+    import cudf
+    import cupy as cp
+    RAPIDS_AVAILABLE = True
+except ImportError:
+    RAPIDS_AVAILABLE = False
+    logging.warning("RAPIDS not installed. GPU acceleration disabled.")
+
+try:
+    import nvtabular as nvt
+    NVTABULAR_AVAILABLE = True
+except ImportError:
+    NVTABULAR_AVAILABLE = False
+    logging.warning("NVTabular not installed. Merlin features disabled.")
+
 class Config:
-    """Project-wide configuration management - optimized for performance"""
+    """Project-wide configuration management"""
     
     # Basic path settings
     BASE_DIR = Path(__file__).parent
@@ -27,6 +42,10 @@ class Config:
     TEST_PATH = DATA_DIR / "test.parquet"
     SUBMISSION_PATH = DATA_DIR / "sample_submission.csv"
     SUBMISSION_TEMPLATE_PATH = DATA_DIR / "sample_submission.csv"
+    
+    # NVTabular processed data paths
+    NVT_PROCESSED_DIR = DATA_DIR / "nvt_processed"
+    NVT_WORKFLOW_DIR = NVT_PROCESSED_DIR / "workflow"
     
     # Target column settings
     TARGET_COLUMN_CANDIDATES = [
@@ -51,12 +70,16 @@ class Config:
         DEVICE = 'cpu'
         GPU_AVAILABLE = False
     
+    # RAPIDS GPU settings
+    RAPIDS_ENABLED = RAPIDS_AVAILABLE and GPU_AVAILABLE
+    NVTABULAR_ENABLED = NVTABULAR_AVAILABLE and RAPIDS_ENABLED
+    
     GPU_MEMORY_LIMIT = 14
     CUDA_VISIBLE_DEVICES = "0"
     USE_MIXED_PRECISION = True
     GPU_OPTIMIZATION_LEVEL = 3
     
-    # Memory settings - OPTIMIZED for 64GB RAM system
+    # Memory settings
     MAX_MEMORY_GB = 58
     CHUNK_SIZE = 150000
     BATCH_SIZE_GPU = 20480
@@ -64,7 +87,7 @@ class Config:
     PREFETCH_FACTOR = 6
     NUM_WORKERS = 10
     
-    # Memory thresholds - adjusted for better performance
+    # Memory thresholds
     MEMORY_WARNING_THRESHOLD = 48
     MEMORY_CRITICAL_THRESHOLD = 53
     MEMORY_ABORT_THRESHOLD = 58
@@ -73,6 +96,30 @@ class Config:
     MAX_TRAIN_SIZE = 15000000
     MAX_TEST_SIZE = 2500000
     MAX_INTERACTION_FEATURES = 60
+    
+    # NVTabular settings
+    NVT_CONFIG = {
+        'part_size': '32MB',
+        'shuffle': 'PER_PARTITION',
+        'out_files_per_proc': 8,
+        'freq_threshold': 0,
+        'max_size': 50000,
+        'exclude_columns': ['seq'],  # Exclude seq column
+    }
+    
+    # Feature columns configuration
+    CATEGORICAL_FEATURES = ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour']
+    
+    CONTINUOUS_FEATURES = (
+        [f'feat_a_{i}' for i in range(1, 19)] +
+        [f'feat_b_{i}' for i in range(1, 7)] +
+        [f'feat_c_{i}' for i in range(1, 9)] +
+        [f'feat_d_{i}' for i in range(1, 7)] +
+        [f'feat_e_{i}' for i in range(1, 11)] +
+        [f'history_a_{i}' for i in range(1, 8)] +
+        [f'history_b_{i}' for i in range(1, 31)] +
+        [f'l_feat_{i}' for i in range(1, 28)]
+    )
     
     # Model training settings
     MODEL_TRAINING_CONFIG = {
@@ -92,21 +139,37 @@ class Config:
             'learning_rate': 0.05,
             'num_iterations': 800,
             'scale_pos_weight': 52.3,
-            'is_unbalance': True
+            'is_unbalance': True,
+            'device': 'gpu' if GPU_AVAILABLE else 'cpu'
         },
         'xgboost': {
-            'max_depth': 6,
-            'learning_rate': 0.05,
-            'n_estimators': 600,
+            'objective': 'binary:logistic',
+            'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
+            'max_depth': 8,
+            'learning_rate': 0.1,
+            'n_estimators': 200,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
-            'min_child_weight': 10,
-            'gamma': 0.1,
-            'alpha': 0.5,
-            'lambda': 0.5,
-            'scale_pos_weight': 52.3,
-            'reg_alpha': 0.5,
-            'reg_lambda': 0.5
+            'min_child_weight': 1,
+            'gamma': 0,
+            'alpha': 0,
+            'lambda': 1,
+            'scale_pos_weight': 51.43,
+            'gpu_id': 0 if GPU_AVAILABLE else -1,
+            'verbosity': 0,
+            'seed': 42
+        },
+        'xgboost_gpu': {
+            'objective': 'binary:logistic',
+            'tree_method': 'gpu_hist',
+            'max_depth': 8,
+            'learning_rate': 0.1,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'scale_pos_weight': 51.43,
+            'gpu_id': 0,
+            'verbosity': 0,
+            'seed': 42
         },
         'logistic': {
             'C': 0.5,
@@ -120,10 +183,10 @@ class Config:
         }
     }
     
-    # Feature engineering settings - OPTIMIZED for memory efficiency
+    # Feature engineering settings
     FEATURE_ENGINEERING_CONFIG = {
         'enable_interaction_features': True,
-        'enable_polynomial_features': False,  # Disabled for memory
+        'enable_polynomial_features': False,
         'enable_binning': True,
         'enable_target_encoding': True,
         'enable_frequency_encoding': True,
@@ -134,22 +197,17 @@ class Config:
         'n_bins': 6,
         'min_frequency': 10,
         'target_encoding_smoothing': 20.0,
-        
-        # NEW: Feature count control
-        'target_feature_count': 250,  # Target final feature count
-        'use_feature_selection': True,  # Enable feature selection
-        'feature_selection_method': 'f_classif',  # Selection method
-        'feature_importance_threshold': 0.01,  # Importance threshold
-        
-        # NEW: Memory-optimized limits
-        'max_categorical_for_encoding': 15,  # Max categorical features for target encoding
-        'max_numeric_for_interaction': 10,  # Max numeric features for interactions
-        'max_cross_combinations': 9,  # Max cross feature combinations (3x3)
-        'max_statistical_features': 8,  # Max features for statistical operations
-        
-        # NEW: Step-by-step memory cleanup
-        'cleanup_after_each_step': True,  # Force cleanup after each feature generation step
-        'intermediate_storage': False  # Don't store intermediate features
+        'target_feature_count': 250,
+        'use_feature_selection': True,
+        'feature_selection_method': 'f_classif',
+        'feature_importance_threshold': 0.01,
+        'max_categorical_for_encoding': 15,
+        'max_numeric_for_interaction': 10,
+        'max_cross_combinations': 9,
+        'max_statistical_features': 8,
+        'cleanup_after_each_step': True,
+        'intermediate_storage': False,
+        'use_nvtabular': NVTABULAR_ENABLED
     }
     
     # Cross-validation settings
@@ -158,7 +216,7 @@ class Config:
     RANDOM_STATE = 42
     
     # Early stopping settings
-    EARLY_STOPPING_ROUNDS = 150
+    EARLY_STOPPING_ROUNDS = 20
     EARLY_STOPPING_TOLERANCE = 1e-5
     
     # Hyperparameter tuning settings
@@ -185,14 +243,14 @@ class Config:
     
     # Evaluation configuration
     EVALUATION_CONFIG = {
-        'ap_weight': 0.6,
-        'wll_weight': 0.4,
-        'target_combined_score': 0.34,
+        'ap_weight': 0.5,
+        'wll_weight': 0.5,
+        'target_combined_score': 0.353,
         'target_ctr': 0.0191,
         'ctr_tolerance': 0.001,
         'bias_penalty_weight': 5.0,
         'calibration_weight': 0.4,
-        'pos_weight': 52.3,
+        'pos_weight': 51.43,
         'neg_weight': 1.0,
         'wll_normalization_factor': 1.8,
         'ctr_bias_multiplier': 6.0
@@ -213,7 +271,7 @@ class Config:
     # Evaluation metrics
     PRIMARY_METRIC = 'combined_score'
     SECONDARY_METRICS = ['ap', 'auc', 'log_loss', 'ctr_bias', 'ctr_score']
-    TARGET_COMBINED_SCORE = 0.34
+    TARGET_COMBINED_SCORE = 0.353
     TARGET_CTR = 0.0191
     
     # Logging settings
@@ -228,20 +286,20 @@ class Config:
     ENABLE_CACHING = True
     CACHE_SIZE_MB = 2048
     
-    # Large dataset specific settings - OPTIMIZED
+    # Large dataset specific settings
     LARGE_DATASET_MODE = True
     MEMORY_EFFICIENT_SAMPLING = True
-    AGGRESSIVE_SAMPLING_THRESHOLD = 0.65  # Adjusted threshold
-    MIN_SAMPLE_SIZE = 100000  # Minimum sample size for extreme cases
-    MAX_SAMPLE_SIZE = 1000000  # Maximum sample size for normal cases
+    AGGRESSIVE_SAMPLING_THRESHOLD = 0.65
+    MIN_SAMPLE_SIZE = 100000
+    MAX_SAMPLE_SIZE = 1000000
     
-    # NEW: Logistic regression sampling configuration
+    # Logistic regression sampling configuration
     LOGISTIC_SAMPLING_CONFIG = {
-        'normal_size': 1000000,      # Use 1M samples in normal memory situation
-        'warning_size': 750000,       # Use 750K samples when memory warning
-        'critical_size': 500000,      # Use 500K samples when memory critical
-        'abort_size': 100000,         # Use 100K samples when memory abort level
-        'enable_dynamic_sizing': True # Enable dynamic sample size adjustment
+        'normal_size': 1000000,
+        'warning_size': 750000,
+        'critical_size': 500000,
+        'abort_size': 100000,
+        'enable_dynamic_sizing': True
     }
     
     # RTX 4060 Ti specific settings
@@ -255,7 +313,9 @@ class Config:
             cls.MODEL_DIR, 
             cls.LOG_DIR, 
             cls.OUTPUT_DIR,
-            cls.RESULTS_DIR
+            cls.RESULTS_DIR,
+            cls.NVT_PROCESSED_DIR,
+            cls.NVT_WORKFLOW_DIR
         ]
         created_dirs = []
         
@@ -296,6 +356,35 @@ class Config:
             print(f"{name}: {path} (exists: {exists}{size_info})")
         
         print("=== Validation completed ===")
+    
+    @classmethod
+    def verify_gpu_availability(cls):
+        """GPU availability check"""
+        print("=== GPU Availability Check ===")
+        
+        status = {
+            'torch_available': TORCH_AVAILABLE,
+            'torch_gpu': cls.GPU_AVAILABLE if TORCH_AVAILABLE else False,
+            'rapids_available': RAPIDS_AVAILABLE,
+            'nvtabular_available': NVTABULAR_AVAILABLE,
+            'rapids_enabled': cls.RAPIDS_ENABLED,
+            'nvtabular_enabled': cls.NVTABULAR_ENABLED
+        }
+        
+        for key, value in status.items():
+            print(f"  {key}: {value}")
+        
+        if cls.GPU_AVAILABLE and TORCH_AVAILABLE:
+            try:
+                gpu_name = torch.cuda.get_device_name(0)
+                gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                print(f"  GPU: {gpu_name}")
+                print(f"  GPU Memory: {gpu_memory:.1f}GB")
+            except:
+                pass
+        
+        print("=== GPU Check Completed ===")
+        return status
     
     @classmethod
     def verify_data_requirements(cls):
@@ -383,21 +472,25 @@ class Config:
                 'target_combined_score': cls.TARGET_COMBINED_SCORE,
                 'target_ctr': cls.TARGET_CTR,
                 'ctr_tolerance': cls.EVALUATION_CONFIG['ctr_tolerance']
+            },
+            'gpu_features': {
+                'rapids_enabled': cls.RAPIDS_ENABLED,
+                'nvtabular_enabled': cls.NVTABULAR_ENABLED,
+                'gpu_available': cls.GPU_AVAILABLE
             }
         }
 
-# Backward compatibility
 def get_config():
     """Get configuration instance"""
     return Config()
 
 if __name__ == "__main__":
-    # Test configuration
     config = Config()
     
     print("=== Configuration Test ===")
     config.setup_directories()
     config.verify_paths()
+    config.verify_gpu_availability()
     config.verify_data_requirements()
     
     print("\n=== Optimization Summary ===")

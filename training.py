@@ -1,8 +1,4 @@
 # training.py
-"""
-CTR Model Training Module
-Training pipeline for Click-Through Rate prediction models
-"""
 
 import os
 import gc
@@ -20,10 +16,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, average_precision_score, log_loss
-from sklearn.preprocessing import StandardScaler
-from sklearn.calibration import CalibratedClassifierCV
 
-# Safe imports
 try:
     import lightgbm as lgb
     LIGHTGBM_AVAILABLE = True
@@ -55,6 +48,12 @@ try:
     GPUTIL_AVAILABLE = True
 except ImportError:
     GPUTIL_AVAILABLE = False
+
+try:
+    import cupy as cp
+    CUPY_AVAILABLE = True
+except ImportError:
+    CUPY_AVAILABLE = False
 
 from config import Config
 
@@ -92,7 +91,6 @@ class LargeDataMemoryTracker:
                 allocated = torch.cuda.memory_allocated() / (1024**3)
                 cached = torch.cuda.memory_reserved() / (1024**3)
                 
-                # RTX 4060 Ti optimization check
                 gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else ""
                 rtx_4060_ti = "4060 Ti" in gpu_name
                 
@@ -116,6 +114,12 @@ class LargeDataMemoryTracker:
                 torch.cuda.synchronize()
             except Exception:
                 pass
+        
+        if CUPY_AVAILABLE:
+            try:
+                cp.get_default_memory_pool().free_all_blocks()
+            except:
+                pass
     
     def force_cleanup(self):
         """Force memory cleanup"""
@@ -124,6 +128,11 @@ class LargeDataMemoryTracker:
             try:
                 torch.cuda.empty_cache()
             except Exception:
+                pass
+        if CUPY_AVAILABLE:
+            try:
+                cp.get_default_memory_pool().free_all_blocks()
+            except:
                 pass
 
 class CTRHyperparameterOptimizer:
@@ -141,7 +150,27 @@ class CTRHyperparameterOptimizer:
     def _get_default_params(self, model_type: str) -> Dict[str, Any]:
         """Get default parameters for each model type"""
         
-        if model_type.lower() == 'lightgbm':
+        if model_type.lower() == 'xgboost_gpu':
+            params = {
+                'objective': 'binary:logistic',
+                'tree_method': 'gpu_hist',
+                'max_depth': 8,
+                'learning_rate': 0.1,
+                'subsample': 0.8,
+                'colsample_bytree': 0.8,
+                'scale_pos_weight': 51.43,
+                'gpu_id': 0,
+                'verbosity': 0,
+                'seed': 42
+            }
+            
+            if self.quick_mode:
+                params['learning_rate'] = 0.3
+                params['max_depth'] = 6
+            
+            return params
+        
+        elif model_type.lower() == 'lightgbm':
             if self.quick_mode:
                 return {
                     'objective': 'binary',
@@ -289,18 +318,14 @@ class CTRModelTrainer:
         try:
             start_time = time.time()
             
-            # Initialize if needed
             self.initialize_trainer()
             
-            # Memory cleanup
             self.memory_tracker.force_cleanup()
             logger.info("GPU memory cache cleared")
             
-            # Memory status check
             memory_status = self.memory_tracker.get_memory_status()
             logger.info(f"Pre-training memory: {memory_status['available_gb']:.1f}GB available")
             
-            # Prepare validation data
             if X_val is None or y_val is None:
                 X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
                     X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
@@ -309,7 +334,6 @@ class CTRModelTrainer:
                 X_train_split, y_train_split = X_train, y_train
                 X_val_split, y_val_split = X_val, y_val
             
-            # Get optimized parameters
             best_params = self.hyperparameter_optimizer._get_default_params(model_name)
             if not best_params:
                 logger.warning(f"Using default parameters for {model_name}")
@@ -317,20 +341,17 @@ class CTRModelTrainer:
             else:
                 logger.info(f"Using default parameters for {model_name}")
             
-            # Train final model
             logger.info(f"Training final {model_name} model")
             model = model_class()
             
             if hasattr(model, 'set_quick_mode'):
                 model.set_quick_mode(self.quick_mode)
             
-            # Train model
             if hasattr(model, 'fit_with_params'):
                 model.fit_with_params(X_train_split, y_train_split, **best_params)
             else:
                 model.fit(X_train_split, y_train_split)
             
-            # Calculate performance
             try:
                 if hasattr(model, 'predict_proba'):
                     y_pred_proba = model.predict_proba(X_val_split)
@@ -339,7 +360,6 @@ class CTRModelTrainer:
                 else:
                     y_pred_proba = model.predict(X_val_split)
                 
-                # Calculate metrics
                 auc = roc_auc_score(y_val_split, y_pred_proba) if len(np.unique(y_val_split)) > 1 else 0.5
                 ap = average_precision_score(y_val_split, y_pred_proba)
                 logloss = log_loss(y_val_split, np.clip(y_pred_proba, 1e-15, 1-1e-15))
@@ -356,7 +376,6 @@ class CTRModelTrainer:
                 logger.warning(f"Performance calculation failed for {model_name}: {e}")
                 self.model_performance[model_name] = {'error': str(e)}
             
-            # Store trained model
             self.trained_models[model_name] = {
                 'model': model,
                 'params': best_params,
@@ -465,15 +484,12 @@ class CTRTrainingPipeline:
         logger.info("=== CTR Training Pipeline Started ===")
         
         try:
-            # Memory optimization
             self.memory_tracker.optimize_gpu_memory()
             
-            # Train models
             trained_models = self.trainer.train_multiple_models(
                 model_configs, X_train, y_train, X_val, y_val
             )
             
-            # Get training summary
             training_summary = self.trainer.get_training_summary()
             
             pipeline_results = {
@@ -496,8 +512,6 @@ class CTRTrainingPipeline:
                 'quick_mode': self.quick_mode
             }
 
-# Main trainer classes for compatibility with main.py
-
 class CTRTrainer(CTRModelTrainer):
     """Basic CTR trainer class for compatibility"""
     
@@ -510,11 +524,12 @@ class CTRTrainer(CTRModelTrainer):
         """Get list of available models"""
         available_models = ['logistic']
         
-        if LIGHTGBM_AVAILABLE:
-            available_models.append('lightgbm')
-        
         if XGBOOST_AVAILABLE:
             available_models.append('xgboost')
+            available_models.append('xgboost_gpu')
+        
+        if LIGHTGBM_AVAILABLE:
+            available_models.append('lightgbm')
         
         return available_models
     
@@ -533,27 +548,29 @@ class CTRTrainer(CTRModelTrainer):
         logger.info(f"Starting {model_name} model training")
         
         try:
-            # Set quick mode
             if quick_mode:
                 self.set_quick_mode(True)
             
-            # Memory cleanup
             self.memory_tracker.force_cleanup()
             logger.info("GPU memory cache cleared")
             logger.info("Trainer initialization completed")
             
-            # Memory status
             memory_status = self.memory_tracker.get_memory_status()
             logger.info(f"Pre-training memory: {memory_status['available_gb']:.1f}GB available")
             
-            # Get model parameters
             params = self.get_default_params_by_model_type(model_name)
             logger.info(f"Using default parameters for {model_name}")
             
-            # Train model based on type
             logger.info(f"Training final {model_name} model")
             
-            if model_name == 'logistic':
+            if model_name == 'xgboost_gpu':
+                from models import XGBoostGPUModel
+                model = XGBoostGPUModel()
+                if hasattr(model, 'set_quick_mode'):
+                    model.set_quick_mode(quick_mode)
+                logger.info(f"{model_name}: GPU mode enabled")
+                    
+            elif model_name == 'logistic':
                 from models import LogisticModel
                 model = LogisticModel()
                 if hasattr(model, 'set_quick_mode'):
@@ -572,22 +589,19 @@ class CTRTrainer(CTRModelTrainer):
                 if hasattr(model, 'set_quick_mode'):
                     model.set_quick_mode(quick_mode)
             else:
-                # Fallback to LogisticRegression
                 model = LogisticRegression(**params)
             
             logger.info(f"{model_name} model training started (data: {len(X_train)})")
             logger.info(f"{model_name}: Quick mode parameters applied")
             logger.info(f"{model_name}: Starting training")
             
-            # Train the model
             if hasattr(model, 'fit_with_params'):
                 model.fit_with_params(X_train, y_train, **params)
             else:
-                model.fit(X_train, y_train)
+                model.fit(X_train, y_train, X_val, y_val)
             
             logger.info(f"{model_name}: Training completed successfully")
             
-            # Calculate performance
             try:
                 if hasattr(model, 'predict_proba'):
                     y_pred_proba = model.predict_proba(X_val)
@@ -596,7 +610,6 @@ class CTRTrainer(CTRModelTrainer):
                 else:
                     y_pred_proba = model.predict(X_val)
                 
-                # Calculate metrics
                 auc = roc_auc_score(y_val, y_pred_proba) if len(np.unique(y_val)) > 1 else 0.5
                 ap = average_precision_score(y_val, y_pred_proba)
                 
@@ -621,14 +634,13 @@ class CTRTrainer(CTRModelTrainer):
                 X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
             )
         
-        # Use LogisticRegression as default model
         model = LogisticRegression(**self.get_default_params_by_model_type('logistic'))
         model.fit(X_train, y_train)
         
         return model
 
 class CTRTrainerGPU(CTRModelTrainer):
-    """GPU-optimized CTR trainer class"""
+    """GPU trainer class"""
     
     def __init__(self, config: Config = Config):
         super().__init__(config)
@@ -643,11 +655,12 @@ class CTRTrainerGPU(CTRModelTrainer):
         """Get list of available models"""
         available_models = ['logistic']
         
+        if XGBOOST_AVAILABLE:
+            available_models.append('xgboost_gpu')
+            available_models.append('xgboost')
+        
         if LIGHTGBM_AVAILABLE:
             available_models.append('lightgbm')
-        
-        if XGBOOST_AVAILABLE:
-            available_models.append('xgboost')
         
         return available_models
     
@@ -666,25 +679,20 @@ class CTRTrainerGPU(CTRModelTrainer):
         logger.info(f"Starting {model_name} model training")
         
         try:
-            # Enable GPU optimization
             self.enable_gpu_optimization()
             
-            # Set quick mode
             if quick_mode:
                 self.set_quick_mode(True)
             
-            # Use parent class method but with GPU optimizations
             return super().train_model(model_name, X_train, y_train, X_val, y_val, quick_mode)
             
         except Exception as e:
             logger.error(f"GPU {model_name} training failed, falling back to CPU: {e}")
             
-            # Fallback to CPU training
             params = self.get_default_params_by_model_type(model_name)
             model = LogisticRegression(**params)
             model.fit(X_train, y_train)
             
-            # Simple performance calculation
             try:
                 y_pred_proba = model.predict_proba(X_val)[:, 1]
                 auc = roc_auc_score(y_val, y_pred_proba) if len(np.unique(y_val)) > 1 else 0.5
@@ -702,14 +710,11 @@ class CTRTrainerGPU(CTRModelTrainer):
                 X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
             )
         
-        # Use GPU-optimized parameters if available
         if self.gpu_available:
-            # Try to use GPU-accelerated model if available
             try:
-                # Default to logistic regression with GPU-friendly settings
                 params = self.get_default_params_by_model_type('logistic')
                 params.update({
-                    'n_jobs': -1,  # Use all available cores
+                    'n_jobs': -1,
                     'max_iter': 2000 if not self.quick_mode else 100
                 })
                 model = LogisticRegression(**params)
@@ -719,22 +724,18 @@ class CTRTrainerGPU(CTRModelTrainer):
             except Exception as e:
                 logger.warning(f"GPU training failed, falling back to CPU: {e}")
         
-        # Fallback to CPU training
         model = LogisticRegression(**self.get_default_params_by_model_type('logistic'))
         model.fit(X_train, y_train)
         
         return model
 
-# Legacy aliases for backward compatibility
 ModelTrainer = CTRModelTrainer
 TrainingPipeline = CTRTrainingPipeline
 
 if __name__ == "__main__":
-    # Test code for development
     logging.basicConfig(level=logging.INFO)
     
     try:
-        # Create dummy data for testing
         X_train = pd.DataFrame({
             'feature_1': np.random.randn(100),
             'feature_2': np.random.randn(100),
@@ -751,7 +752,6 @@ if __name__ == "__main__":
         
         config = Config()
         
-        # Test basic trainer
         print("Testing CTRTrainer...")
         trainer = CTRTrainer(config)
         trainer.set_quick_mode(True)
@@ -761,7 +761,6 @@ if __name__ == "__main__":
         model = trainer.train(X_train, y_train, X_val, y_val)
         print(f"Basic trainer completed: {type(model)}")
         
-        # Test GPU trainer
         print("Testing CTRTrainerGPU...")
         gpu_trainer = CTRTrainerGPU(config)
         gpu_trainer.set_quick_mode(True)

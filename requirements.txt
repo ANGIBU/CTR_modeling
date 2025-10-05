@@ -13,6 +13,17 @@ torch>=2.1.2
 torchvision>=0.16.2
 torchaudio>=2.1.2
 
+# NVIDIA Merlin ecosystem (GPU acceleration)
+# Note: Install via conda for best compatibility
+# conda install -c rapidsai -c nvidia -c conda-forge nvtabular cudf cupy xgboost
+nvtabular>=23.08.00
+cudf-cu11>=23.10.0
+cupy-cuda11x>=13.6.0
+
+# Dask for distributed computing
+dask>=2023.9.2
+distributed>=2023.9.2
+
 # Visualization
 matplotlib>=3.8.2
 seaborn>=0.13.0
@@ -20,6 +31,7 @@ seaborn>=0.13.0
 # System monitoring
 psutil>=5.9.6
 GPUtil>=1.4.0
+pynvml>=11.5.0
 
 # Utilities
 tqdm>=4.66.1
@@ -54,3 +66,6 @@ pyyaml>=6.0.1
 
 # Caching for inference optimization (optional)
 cachetools>=5.3.2
+
+# RAPIDS memory management
+rmm-cu11>=23.10.0

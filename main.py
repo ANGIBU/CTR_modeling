@@ -179,7 +179,7 @@ def safe_train_test_split(X, y, test_size=0.3, random_state=42):
         return X.iloc[:split_point], X.iloc[split_point:], y.iloc[:split_point], y.iloc[split_point:]
 
 def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[str, Any]]:
-    """Execute complete CTR modeling pipeline"""
+    """Execute complete CTR modeling pipeline with GPU support"""
     try:
         start_time = time.time()
         
@@ -188,13 +188,10 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         if quick_mode:
             logger.info("QUICK MODE: Running with 50 samples for rapid testing")
         
-        # Initial memory cleanup
         force_memory_cleanup()
         
-        # Import modules only when needed
         logger.info("Essential module import started")
         
-        # Try to import modules progressively
         try:
             from config import Config
             logger.info("Basic module import successful")
@@ -202,8 +199,9 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             logger.error(f"Config import failed: {e}")
             return None
         
-        # GPU detection and optimization
         gpu_optimization = False
+        nvtabular_available = False
+        
         if TORCH_AVAILABLE and torch.cuda.is_available():
             gpu_name = torch.cuda.get_device_name(0)
             logger.info(f"GPU detection: {gpu_name}")
@@ -212,13 +210,19 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 gpu_optimization = True
                 logger.info("RTX 4060 Ti optimization: True")
                 
-                # Enable mixed precision for RTX 4060 Ti
                 torch.backends.cudnn.benchmark = True
                 if hasattr(torch.backends.cudnn, 'allow_tf32'):
                     torch.backends.cudnn.allow_tf32 = True
                 logger.info("Mixed Precision enabled")
         
-        # Import remaining modules
+        try:
+            import cudf
+            import nvtabular as nvt
+            nvtabular_available = True
+            logger.info("NVTabular available: GPU acceleration enabled")
+        except:
+            logger.info("NVTabular not available: Using standard processing")
+        
         try:
             from data_loader import LargeDataLoader
             from feature_engineering import CTRFeatureEngineer
