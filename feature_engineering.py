@@ -186,9 +186,20 @@ class CTRFeatureEngineer:
             for col in self.true_categorical:
                 if col in X_train.columns and col in X_test.columns:
                     try:
-                        # Convert to string
-                        train_str = X_train[col].fillna('missing').astype(str)
-                        test_str = X_test[col].fillna('missing').astype(str)
+                        # Convert to string first, handling all types safely
+                        X_train_copy = X_train[col].copy()
+                        X_test_copy = X_test[col].copy()
+                        
+                        # Handle different data types
+                        if pd.api.types.is_categorical_dtype(X_train_copy):
+                            train_str = X_train_copy.astype(str)
+                        else:
+                            train_str = X_train_copy.fillna('missing').astype(str)
+                        
+                        if pd.api.types.is_categorical_dtype(X_test_copy):
+                            test_str = X_test_copy.astype(str)
+                        else:
+                            test_str = X_test_copy.fillna('missing').astype(str)
                         
                         # Create category mapping
                         all_categories = sorted(set(train_str.unique()) | set(test_str.unique()))
