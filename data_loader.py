@@ -54,9 +54,9 @@ class MemoryMonitor:
     
     def __init__(self):
         self.memory_thresholds = {
-            'warning': 10.0,
+            'warning': 8.0,
             'critical': 5.0,
-            'abort': 2.0
+            'abort': 3.0
         }
     
     def get_memory_usage(self) -> float:
@@ -134,7 +134,7 @@ class MemoryMonitor:
         """Log current memory status with context"""
         if PSUTIL_AVAILABLE:
             vm = psutil.virtual_memory()
-            if force or vm.percent > 80:
+            if force or vm.percent > 70:
                 logger.info(f"Memory status ({context}): {vm.percent:.1f}% used, "
                            f"{vm.available/(1024**3):.1f}GB available")
     

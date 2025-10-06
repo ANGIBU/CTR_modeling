@@ -58,13 +58,13 @@ class MemoryMonitor:
     
     def __init__(self):
         self.memory_thresholds = {
-            'warning': 15.0,
-            'critical': 10.0,  
-            'abort': 5.0
+            'warning': 10.0,
+            'critical': 5.0,  
+            'abort': 3.0
         }
         
         self.quick_mode_thresholds = {
-            'warning': 4.0,
+            'warning': 3.0,
             'critical': 2.0,
             'abort': 1.0
         }
@@ -145,7 +145,7 @@ class MemoryMonitor:
             pass
 
 class CTRBiasCorrector:
-    """CTR bias correction - FIXED VERSION"""
+    """CTR bias correction with strict bounds"""
     
     def __init__(self, target_ctr: float = 0.0191):
         self.target_ctr = target_ctr
@@ -154,23 +154,19 @@ class CTRBiasCorrector:
         self.is_fitted = False
         
     def fit(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Fit bias corrector with proper bounds"""
+        """Fit bias corrector with strict bounds"""
         try:
             actual_ctr = np.mean(y_true)
             predicted_ctr = np.mean(y_pred_proba)
             
-            # Calculate correction factor with safety bounds
-            if predicted_ctr > 0.001:  # Minimum threshold
+            if predicted_ctr > 0.001:
                 raw_factor = actual_ctr / predicted_ctr
-                # Bound correction factor between 0.5 and 2.0
-                self.correction_factor = np.clip(raw_factor, 0.5, 2.0)
+                self.correction_factor = np.clip(raw_factor, 0.8, 1.2)
             else:
                 self.correction_factor = 1.0
             
-            # Calculate additive correction with bounds
             raw_additive = actual_ctr - predicted_ctr
-            # Bound additive correction to prevent extreme shifts
-            self.additive_correction = np.clip(raw_additive, -0.01, 0.01)
+            self.additive_correction = np.clip(raw_additive, -0.003, 0.003)
             
             self.is_fitted = True
             logger.info(f"CTR bias corrector fitted: factor={self.correction_factor:.4f}, additive={self.additive_correction:.6f}")
@@ -187,13 +183,8 @@ class CTRBiasCorrector:
             if not self.is_fitted:
                 return y_pred_proba
             
-            # Apply multiplicative correction first
             corrected = y_pred_proba * self.correction_factor
-            
-            # Apply small additive correction
-            corrected = corrected + self.additive_correction * 0.1
-            
-            # Ensure predictions stay in valid range
+            corrected = corrected + self.additive_correction * 0.05
             corrected = np.clip(corrected, 1e-7, 1 - 1e-7)
             
             return corrected
@@ -434,7 +425,7 @@ class BaseModel(ABC):
             unique_predictions = len(np.unique(predictions))
             
             if unique_predictions < self.prediction_diversity_threshold:
-                base_noise_scale = max(np.std(predictions) * 0.002, 1e-6)
+                base_noise_scale = max(np.std(predictions) * 0.001, 1e-7)
                 pred_range = np.max(predictions) - np.min(predictions)
                 range_factor = max(0.5, min(2.0, pred_range * 100))
                 noise_scale = base_noise_scale * range_factor
@@ -517,7 +508,6 @@ class XGBoostGPUModel(BaseModel):
         if not XGBOOST_AVAILABLE:
             raise ImportError("XGBoost is not installed.")
         
-        # Optimized parameters for 0.35+ score
         default_params = {
             'objective': 'binary:logistic',
             'tree_method': 'gpu_hist',
@@ -611,7 +601,7 @@ class XGBoostGPUModel(BaseModel):
             proba = np.clip(proba, 1e-7, 1 - 1e-7)
             return self._enhance_prediction_diversity(proba)
         
-        return self._memory_safe_predict(_predict_internal, X, batch_size=50000)
+        return self._memory_safe_predict(_predict_internal, X, batch_size=30000)
 
 class LogisticModel(BaseModel):
     """Logistic Regression model with sampling"""
@@ -683,7 +673,7 @@ class LogisticModel(BaseModel):
             proba = np.clip(proba, 1e-7, 1 - 1e-7)
             return self._enhance_prediction_diversity(proba)
         
-        return self._memory_safe_predict(_predict_internal, X, batch_size=50000)
+        return self._memory_safe_predict(_predict_internal, X, batch_size=30000)
 
 class ModelFactory:
     """Model factory"""

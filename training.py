@@ -51,8 +51,8 @@ class LargeDataMemoryTracker:
     
     def __init__(self):
         self.gpu_available = XGBOOST_AVAILABLE
-        self.memory_threshold = 0.85
-        self.cleanup_threshold = 0.90
+        self.memory_threshold = 0.80
+        self.cleanup_threshold = 0.85
         
     def get_memory_status(self) -> Dict[str, Any]:
         """Get current memory status"""
@@ -143,7 +143,6 @@ class CTRHyperparameterOptimizer:
         """Get default parameters optimized for 0.35+ score"""
         
         if model_type.lower() == 'xgboost_gpu':
-            # Optimized for target score
             params = {
                 'objective': 'binary:logistic',
                 'tree_method': 'gpu_hist',
