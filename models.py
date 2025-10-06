@@ -144,15 +144,15 @@ class CTRBiasCorrector:
             predicted_ctr = np.mean(y_pred_proba)
             
             if predicted_ctr > 0.001:
-                self.correction_factor = actual_ctr / predicted_ctr
-                self.scale_factor = self.target_ctr / actual_ctr if actual_ctr > 0 else 1.0
-                self.scale_factor = np.clip(self.scale_factor, 0.05, 5.0)
+                # Strong correction to target CTR
+                self.correction_factor = self.target_ctr / predicted_ctr
+                self.scale_factor = 1.0
             else:
                 self.correction_factor = 1.0
                 self.scale_factor = 1.0
             
             self.is_fitted = True
-            logger.info(f"CTR bias corrector fitted: factor={self.correction_factor:.4f}, scale={self.scale_factor:.4f}")
+            logger.info(f"CTR bias corrector fitted: factor={self.correction_factor:.4f}, target={self.target_ctr:.4f}")
             
         except Exception as e:
             logger.warning(f"CTR bias correction fitting failed: {e}")
@@ -166,14 +166,13 @@ class CTRBiasCorrector:
             if not self.is_fitted:
                 return y_pred_proba
             
-            # First correction
+            # Direct scaling to target CTR
             corrected = y_pred_proba * self.correction_factor
-            corrected = corrected * self.scale_factor
             corrected = np.clip(corrected, 1e-7, 0.5)
             
-            # Force alignment to target CTR
+            # Verify and adjust if needed
             corrected_ctr = np.mean(corrected)
-            if abs(corrected_ctr - self.target_ctr) > 0.001:
+            if abs(corrected_ctr - self.target_ctr) > 0.002:
                 final_scale = self.target_ctr / corrected_ctr if corrected_ctr > 0 else 1.0
                 corrected = corrected * final_scale
                 corrected = np.clip(corrected, 1e-7, 0.5)
@@ -236,12 +235,15 @@ class EnhancedMultiMethodCalibrator:
             if not self.is_fitted:
                 return self.ctr_corrector.transform(y_pred_proba)
             
+            # Apply best calibration method if available
             if self.best_method and self.best_method in self.calibration_models:
                 calibrated = self._predict_with_method(y_pred_proba, self.best_method)
                 if calibrated is not None:
+                    # Always apply CTR correction after calibration
                     calibrated = self.ctr_corrector.transform(calibrated)
                     return np.clip(calibrated, 1e-7, 0.5)
             
+            # Fallback to CTR correction only
             return self.ctr_corrector.transform(y_pred_proba)
             
         except Exception as e:
