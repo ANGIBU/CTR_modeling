@@ -30,7 +30,6 @@ except ImportError as e:
     print(f"Essential package import failed: {e}")
     sys.exit(1)
 
-# Create logs directory before logging setup
 os.makedirs('logs', exist_ok=True)
 
 logging.basicConfig(
@@ -196,12 +195,10 @@ def align_final_ctr(predictions: np.ndarray, target_ctr: float = 0.0191) -> np.n
         current_ctr = np.mean(predictions)
         
         if current_ctr > 0.001:
-            # Direct scaling to target CTR
             scale_factor = target_ctr / current_ctr
             aligned = predictions * scale_factor
             aligned = np.clip(aligned, 1e-7, 0.5)
             
-            # Verify and adjust
             final_ctr = np.mean(aligned)
             if abs(final_ctr - target_ctr) > 0.0005:
                 additional_scale = target_ctr / final_ctr if final_ctr > 0 else 1.0
@@ -586,7 +583,6 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 
                 predictions = np.concatenate(all_predictions)
         
-        # Apply final CTR alignment
         predictions = align_final_ctr(predictions, target_ctr=0.0191)
         
         predictions = np.clip(predictions, 1e-7, 1 - 1e-7)
@@ -642,7 +638,10 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 'std': float(predictions.std()),
                 'min': float(predictions.min()),
                 'max': float(predictions.max())
-            }
+            },
+            'trained_models': trained_models,
+            'y_val': y_val_split,
+            'X_val': X_val_split
         }
         
         logger.info(f"Mode: {'QUICK (50 samples)' if quick_mode else 'FULL dataset (0.35+ target)'}")
@@ -660,6 +659,47 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             logger.info(f"Final memory status: available {available_memory:.1f}GB")
         
         force_memory_cleanup()
+        
+        logger.info("6. Performance analysis and visualization")
+        try:
+            from analysis import CTRPerformanceAnalyzer
+            from visualization import create_all_visualizations
+            
+            analyzer = CTRPerformanceAnalyzer(config)
+            
+            analysis_results = {}
+            for model_name, model in trained_models.items():
+                try:
+                    y_pred = model.predict_proba(X_val_split)
+                    analysis = analyzer.full_performance_analysis(
+                        y_val_split.values, 
+                        y_pred,
+                        model_name=model_name,
+                        quick_mode=quick_mode
+                    )
+                    analysis_results[model_name] = analysis
+                    
+                    report_path = f"results/{model_name}_analysis.json"
+                    analyzer.save_analysis_report(analysis, report_path)
+                    
+                except Exception as e:
+                    logger.warning(f"Analysis failed for {model_name}: {e}")
+            
+            if analysis_results:
+                csv_created = analyzer.create_summary_csv(analysis_results)
+                if csv_created:
+                    logger.info("Summary CSV created successfully")
+                
+                viz_success = create_all_visualizations(analysis_results)
+                if viz_success:
+                    logger.info("Visualizations created successfully")
+                else:
+                    logger.warning("Some visualizations failed")
+            
+            logger.info("Performance analysis completed")
+            
+        except Exception as e:
+            logger.warning(f"Performance analysis phase failed: {e}")
         
         return results
         

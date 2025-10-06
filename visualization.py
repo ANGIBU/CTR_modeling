@@ -11,10 +11,9 @@ import gc
 import os
 warnings.filterwarnings('ignore')
 
-# Safe imports for visualization libraries
 try:
     import matplotlib
-    matplotlib.use('Agg')  # Use non-GUI backend
+    matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     import matplotlib.backends.backend_pdf
     plt.rcParams['font.family'] = ['DejaVu Sans', 'Arial', 'sans-serif']
@@ -47,8 +46,8 @@ class CTRVisualizationEngine:
         self.results_dir.mkdir(exist_ok=True)
         self.figures = {}
         self.performance_data = []
+        self.created_png_files = []
         
-        # Professional color schemes
         if MATPLOTLIB_AVAILABLE:
             self.colors = {
                 'primary_gradient': plt.cm.Blues(np.linspace(0.4, 0.9, 10)),
@@ -96,7 +95,6 @@ class CTRVisualizationEngine:
             
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
             
-            # Combined Score Chart
             models = summary_df['model_name'].tolist()
             scores = summary_df['combined_score'].tolist()
             colors = plt.cm.viridis(np.linspace(0.2, 0.8, len(models)))
@@ -107,13 +105,11 @@ class CTRVisualizationEngine:
             ax1.set_ylabel('Combined Score', fontsize=12, fontweight='bold')
             ax1.grid(True, alpha=0.3)
             
-            # Add value labels on bars
             for bar, score in zip(bars, scores):
                 height = bar.get_height()
                 ax1.text(bar.get_x() + bar.get_width()/2., height + 0.01,
                         f'{score:.3f}', ha='center', va='bottom', fontweight='bold')
             
-            # CTR Quality Chart
             ctr_quality_counts = summary_df['ctr_quality'].value_counts()
             colors_pie = ['#27ae60', '#f39c12', '#e74c3c', '#95a5a6'][:len(ctr_quality_counts)]
             
@@ -124,7 +120,6 @@ class CTRVisualizationEngine:
             
             ax2.set_title('CTR Quality Distribution', fontsize=16, fontweight='bold', pad=20)
             
-            # Style improvements
             for autotext in autotexts:
                 autotext.set_color('white')
                 autotext.set_fontweight('bold')
@@ -132,11 +127,11 @@ class CTRVisualizationEngine:
             
             plt.tight_layout()
             
-            # Save chart
             chart_path = self.results_dir / "model_performance.png"
             plt.savefig(chart_path, dpi=300, bbox_inches='tight', facecolor='white')
             plt.close(fig)
             
+            self.created_png_files.append(chart_path)
             logger.info(f"Model performance chart saved: {chart_path}")
             return True
             
@@ -160,7 +155,6 @@ class CTRVisualizationEngine:
             fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
             fig.suptitle('CTR Analysis Dashboard', fontsize=20, fontweight='bold', y=0.98)
             
-            # Panel 1: CTR Bias Analysis
             models = summary_df['model_name'].tolist()
             ctr_bias = summary_df['ctr_bias'].tolist()
             colors = ['#e74c3c' if bias > 0 else '#27ae60' for bias in ctr_bias]
@@ -171,13 +165,11 @@ class CTRVisualizationEngine:
             ax1.axvline(x=0, color='black', linestyle='--', alpha=0.5)
             ax1.grid(True, alpha=0.3)
             
-            # Panel 2: Actual vs Predicted CTR
             actual_ctr = summary_df['actual_ctr'].tolist()
             predicted_ctr = summary_df['predicted_ctr'].tolist()
             
             ax2.scatter(actual_ctr, predicted_ctr, s=100, alpha=0.7, c=range(len(models)), cmap='viridis')
             
-            # Perfect prediction line
             min_ctr = min(min(actual_ctr), min(predicted_ctr))
             max_ctr = max(max(actual_ctr), max(predicted_ctr))
             ax2.plot([min_ctr, max_ctr], [min_ctr, max_ctr], 'r--', alpha=0.8, linewidth=2)
@@ -187,7 +179,6 @@ class CTRVisualizationEngine:
             ax2.set_ylabel('Predicted CTR', fontsize=12)
             ax2.grid(True, alpha=0.3)
             
-            # Panel 3: Performance Tier Distribution
             tier_counts = summary_df['performance_tier'].value_counts()
             tier_colors = {'EXCELLENT': '#27ae60', 'GOOD': '#2ecc71', 'FAIR': '#f39c12', 'POOR': '#e74c3c'}
             colors = [tier_colors.get(tier, '#95a5a6') for tier in tier_counts.index]
@@ -197,7 +188,6 @@ class CTRVisualizationEngine:
             ax3.set_ylabel('Number of Models', fontsize=12)
             ax3.grid(True, alpha=0.3)
             
-            # Panel 4: Execution Time vs Performance
             exec_time = summary_df['execution_time_sec'].tolist()
             combined_scores = summary_df['combined_score'].tolist()
             
@@ -209,18 +199,17 @@ class CTRVisualizationEngine:
             ax4.set_ylabel('Combined Score', fontsize=12)
             ax4.grid(True, alpha=0.3)
             
-            # Add model labels
             for i, model in enumerate(models):
                 ax4.annotate(model, (exec_time[i], combined_scores[i]), 
                            xytext=(5, 5), textcoords='offset points', fontsize=8)
             
             plt.tight_layout()
             
-            # Save dashboard
             dashboard_path = self.results_dir / "ctr_analysis.png"
             plt.savefig(dashboard_path, dpi=300, bbox_inches='tight', facecolor='white')
             plt.close(fig)
             
+            self.created_png_files.append(dashboard_path)
             logger.info(f"CTR analysis dashboard saved: {dashboard_path}")
             return True
             
@@ -246,7 +235,6 @@ class CTRVisualizationEngine:
             
             models = summary_df['model_name'].tolist()
             
-            # Execution Time Chart
             exec_times = summary_df['execution_time_sec'].tolist()
             colors = plt.cm.Blues(np.linspace(0.4, 0.9, len(models)))
             
@@ -260,7 +248,6 @@ class CTRVisualizationEngine:
                 ax1.text(bar.get_x() + bar.get_width()/2., height + max(exec_times)*0.01,
                         f'{time_val:.1f}s', ha='center', va='bottom', fontweight='bold')
             
-            # Memory Usage Chart
             memory_usage = summary_df['memory_peak_gb'].tolist()
             colors2 = plt.cm.Oranges(np.linspace(0.4, 0.9, len(models)))
             
@@ -274,7 +261,6 @@ class CTRVisualizationEngine:
                 ax2.text(bar.get_x() + bar.get_width()/2., height + max(memory_usage)*0.01,
                         f'{mem_val:.1f}GB', ha='center', va='bottom', fontweight='bold')
             
-            # GPU Utilization Chart
             gpu_util = summary_df['gpu_utilization_pct'].tolist()
             colors3 = plt.cm.Greens(np.linspace(0.4, 0.9, len(models)))
             
@@ -290,7 +276,6 @@ class CTRVisualizationEngine:
             
             ax3.legend(loc='lower right')
             
-            # Style all charts
             for ax in [ax1, ax2, ax3]:
                 ax.spines['top'].set_visible(False)
                 ax.spines['right'].set_visible(False)
@@ -298,11 +283,11 @@ class CTRVisualizationEngine:
             
             plt.tight_layout()
             
-            # Save chart
             chart_path = self.results_dir / "execution_summary.png"
             plt.savefig(chart_path, dpi=300, bbox_inches='tight', facecolor='white')
             plt.close(fig)
             
+            self.created_png_files.append(chart_path)
             logger.info(f"Execution summary chart saved: {chart_path}")
             return True
             
@@ -327,8 +312,7 @@ class CTRVisualizationEngine:
             pdf_path = self.results_dir / "comprehensive_report.pdf"
             
             with matplotlib.backends.backend_pdf.PdfPages(pdf_path) as pdf:
-                # Cover page
-                fig_cover = plt.figure(figsize=(8.27, 11.69))  # A4 size
+                fig_cover = plt.figure(figsize=(8.27, 11.69))
                 fig_cover.text(0.5, 0.8, 'CTR Model Performance Analysis Report', 
                               ha='center', fontsize=24, fontweight='bold')
                 fig_cover.text(0.5, 0.7, 'Comprehensive Analysis and Recommendations', 
@@ -336,7 +320,6 @@ class CTRVisualizationEngine:
                 fig_cover.text(0.5, 0.6, f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', 
                               ha='center', fontsize=12, color='#7f8c8d')
                 
-                # Executive summary
                 best_model = summary_df.loc[summary_df['combined_score'].idxmax()]
                 deployment_ready_count = len(summary_df[summary_df['deployment_ready']])
                 avg_ctr_bias = summary_df['ctr_bias'].abs().mean()
@@ -351,12 +334,11 @@ class CTRVisualizationEngine:
                 pdf.savefig(fig_cover, bbox_inches='tight')
                 plt.close(fig_cover)
                 
-                # Add performance charts to PDF
                 charts = ['model_performance.png', 'ctr_analysis.png', 'execution_summary.png']
                 for chart_name in charts:
                     chart_path = self.results_dir / chart_name
                     if chart_path.exists():
-                        fig = plt.figure(figsize=(11.69, 8.27))  # A4 landscape
+                        fig = plt.figure(figsize=(11.69, 8.27))
                         img = plt.imread(str(chart_path))
                         plt.imshow(img)
                         plt.axis('off')
@@ -369,6 +351,29 @@ class CTRVisualizationEngine:
         except Exception as e:
             logger.error(f"PDF report creation failed: {e}")
             return False
+    
+    def cleanup_png_files(self):
+        """Delete PNG files after PDF creation"""
+        try:
+            deleted_count = 0
+            for png_path in self.created_png_files:
+                if png_path.exists():
+                    try:
+                        png_path.unlink()
+                        deleted_count += 1
+                        logger.info(f"Deleted PNG file: {png_path.name}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete {png_path.name}: {e}")
+            
+            if deleted_count > 0:
+                logger.info(f"PNG cleanup completed: {deleted_count} files deleted")
+            else:
+                logger.info("No PNG files to cleanup")
+                
+            self.created_png_files.clear()
+            
+        except Exception as e:
+            logger.warning(f"PNG cleanup failed: {e}")
     
     def print_console_summary(self, summary_df: Optional[pd.DataFrame] = None):
         """Print performance summary to console"""
@@ -385,7 +390,6 @@ class CTRVisualizationEngine:
             print("CTR PERFORMANCE ANALYSIS SUMMARY")
             print("="*85)
             
-            # Top models table
             top_models = summary_df.head(5)
             print(f"{'Model Name':<15} {'Combined Score':<15} {'CTR Quality':<12} {'Tier':<10}")
             print("-" * 85)
@@ -402,7 +406,6 @@ class CTRVisualizationEngine:
             
             print("-" * 85)
             
-            # Key metrics summary
             best_model = summary_df.loc[summary_df['combined_score'].idxmax()]
             deployment_ready_count = len(summary_df[summary_df['deployment_ready']])
             excellent_count = len(summary_df[summary_df['performance_tier'] == 'EXCELLENT'])
@@ -430,44 +433,47 @@ class CTRVisualizationEngine:
         try:
             logger.info("Starting comprehensive visualization generation")
             
-            # Load summary data
             summary_df = self.load_summary_data()
             
             success_count = 0
             total_tasks = 4
             created_files = []
             
-            # 1. Create model performance chart
             if self.create_model_performance_chart(summary_df):
                 success_count += 1
                 created_files.append("model_performance.png")
                 logger.info("Model performance chart created")
             
-            # 2. Create CTR analysis dashboard
             if self.create_ctr_analysis_dashboard(summary_df):
                 success_count += 1
                 created_files.append("ctr_analysis.png")
                 logger.info("CTR analysis dashboard created")
             
-            # 3. Create execution summary chart
             if self.create_execution_summary_chart(summary_df):
                 success_count += 1
                 created_files.append("execution_summary.png")
                 logger.info("Execution summary chart created")
             
-            # 4. Create comprehensive PDF report
+            pdf_created = False
             if self.create_comprehensive_pdf_report(summary_df, analysis_results):
                 success_count += 1
                 created_files.append("comprehensive_report.pdf")
+                pdf_created = True
                 logger.info("Comprehensive PDF report created")
             
-            # Print console summary
+            if pdf_created:
+                logger.info("PDF creation successful, cleaning up PNG files")
+                self.cleanup_png_files()
+            else:
+                logger.warning("PDF creation failed, keeping PNG files")
+            
             self.print_console_summary(summary_df)
             
-            # Log actual files created
             logger.info(f"Visualization generation completed: {success_count}/{total_tasks} successful")
             if created_files:
-                logger.info(f"Files created: {', '.join(created_files)}")
+                final_files = [f for f in created_files if f.endswith('.pdf') or f.endswith('.csv') or f.endswith('.json')]
+                if final_files:
+                    logger.info(f"Final files in results folder: PDF, JSON reports, CSV summary")
             
             return success_count > 0
             
@@ -478,12 +484,12 @@ class CTRVisualizationEngine:
     def clear_visualizations(self):
         """Clear all visualization data and figures"""
         try:
-            # Close all matplotlib figures
             if MATPLOTLIB_AVAILABLE:
                 plt.close('all')
             
             self.figures.clear()
             self.performance_data.clear()
+            self.created_png_files.clear()
             gc.collect()
             
             logger.info("Visualization data cleared")
@@ -499,7 +505,6 @@ def create_all_visualizations(analysis_results: Dict[str, Any]) -> bool:
         visualizer = CTRVisualizationEngine()
         success = visualizer.generate_all_visualizations(analysis_results)
         
-        # Cleanup
         visualizer.clear_visualizations()
         
         return success
