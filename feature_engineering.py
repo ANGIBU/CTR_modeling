@@ -33,15 +33,14 @@ class CTRFeatureEngineer:
         self.numerical_features = []
         self.categorical_features = []
         self.target_encoding_features = []
+        self.interaction_features = []
         self.removed_columns = []
         self.original_feature_order = []
         self.final_feature_columns = []
         self.target_column = None
         
-        # Only 5 categorical features for tree models (keep inventory_id)
         self.true_categorical = ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour']
         
-        # All continuous features (112 total)
         self.all_continuous = (
             [f'feat_a_{i}' for i in range(1, 19)] +
             [f'feat_b_{i}' for i in range(1, 7)] +
@@ -102,7 +101,6 @@ class CTRFeatureEngineer:
             
             X_train, X_test, y_train = self._prepare_basic_data(train_df, test_df, target_col)
             
-            # Keep only necessary features
             available_features = list(set(self.true_categorical + self.all_continuous) & set(X_train.columns))
             X_train = X_train[available_features]
             X_test = X_test[available_features]
@@ -135,28 +133,28 @@ class CTRFeatureEngineer:
             X_train, X_test, y_train = self._prepare_basic_data(train_df, test_df, target_col)
             self._force_memory_cleanup()
             
-            # Keep only predefined features
             available_features = list(set(self.true_categorical + self.all_continuous) & set(X_train.columns))
             logger.info(f"Available features: {len(available_features)} (5 categorical + {len(available_features)-5} continuous)")
             
             X_train = X_train[available_features]
             X_test = X_test[available_features]
             
-            # Encode categorical features
             X_train, X_test = self._encode_categorical_minimal(X_train, X_test)
             self._force_memory_cleanup()
             
-            # Fill missing values with memory efficiency
             X_train, X_test = self._fill_missing_values_efficient(X_train, X_test)
             self._force_memory_cleanup()
             
-            # Optional: target encoding for categorical features
             memory_status = self.memory_monitor.get_memory_status()
             if memory_status['available_gb'] > 8 and not self.quick_mode:
                 X_train, X_test = self._create_target_encoding_minimal(X_train, X_test, y_train)
                 self._force_memory_cleanup()
             
-            # Ensure float32 dtype
+            memory_status = self.memory_monitor.get_memory_status()
+            if memory_status['available_gb'] > 10 and not self.quick_mode:
+                X_train, X_test = self._create_interaction_features(X_train, X_test)
+                self._force_memory_cleanup()
+            
             X_train, X_test = self._ensure_float32(X_train, X_test)
             self._force_memory_cleanup()
             
@@ -186,11 +184,9 @@ class CTRFeatureEngineer:
             for col in self.true_categorical:
                 if col in X_train.columns and col in X_test.columns:
                     try:
-                        # Convert to string first, handling all types safely
                         X_train_copy = X_train[col].copy()
                         X_test_copy = X_test[col].copy()
                         
-                        # Handle different data types
                         if pd.api.types.is_categorical_dtype(X_train_copy):
                             train_str = X_train_copy.astype(str)
                         else:
@@ -201,11 +197,9 @@ class CTRFeatureEngineer:
                         else:
                             test_str = X_test_copy.fillna('missing').astype(str)
                         
-                        # Create category mapping
                         all_categories = sorted(set(train_str.unique()) | set(test_str.unique()))
                         category_map = {cat: idx for idx, cat in enumerate(all_categories)}
                         
-                        # Encode
                         X_train[col] = train_str.map(category_map).fillna(0).astype('float32')
                         X_test[col] = test_str.map(category_map).fillna(0).astype('float32')
                         
@@ -243,21 +237,18 @@ class CTRFeatureEngineer:
         try:
             logger.info("Filling missing values efficiently")
             
-            # Process in chunks to avoid memory issues
             chunk_size = 10
             train_cols = list(X_train.columns)
             
             for i in range(0, len(train_cols), chunk_size):
                 chunk_cols = train_cols[i:i+chunk_size]
                 
-                # Fill train chunk
                 for col in chunk_cols:
                     if X_train[col].isna().any():
                         X_train[col] = X_train[col].fillna(0)
                     if np.isinf(X_train[col]).any():
                         X_train[col] = X_train[col].replace([np.inf, -np.inf], 0)
                 
-                # Fill test chunk
                 for col in chunk_cols:
                     if col in X_test.columns:
                         if X_test[col].isna().any():
@@ -273,7 +264,6 @@ class CTRFeatureEngineer:
             
         except Exception as e:
             logger.error(f"Efficient missing value filling failed: {e}")
-            # Fallback to simple method
             try:
                 X_train = X_train.fillna(0)
                 X_test = X_test.fillna(0)
@@ -308,7 +298,7 @@ class CTRFeatureEngineer:
         try:
             logger.info("Creating target encoding features")
             
-            for col in self.categorical_features[:3]:  # Only top 3 categorical
+            for col in self.categorical_features[:3]:
                 if col in X_train.columns:
                     try:
                         kf = KFold(n_splits=3, shuffle=True, random_state=42)
@@ -339,6 +329,70 @@ class CTRFeatureEngineer:
             
         except Exception as e:
             logger.error(f"Target encoding features failed: {e}")
+            return X_train, X_test
+    
+    def _create_interaction_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Create interaction features between continuous variables"""
+        try:
+            logger.info("Creating interaction features")
+            
+            continuous_cols = [col for col in X_train.columns if col in self.all_continuous]
+            
+            if len(continuous_cols) < 2:
+                logger.warning("Not enough continuous features for interactions")
+                return X_train, X_test
+            
+            important_features = []
+            for prefix in ['feat_e', 'feat_d', 'history_a']:
+                important_features.extend([col for col in continuous_cols if col.startswith(prefix)])
+            
+            important_features = important_features[:15]
+            
+            interaction_count = 0
+            max_interactions = self.config.FEATURE_ENGINEERING_CONFIG['max_numeric_for_interaction']
+            
+            for i in range(len(important_features)):
+                for j in range(i + 1, len(important_features)):
+                    if interaction_count >= max_interactions:
+                        break
+                    
+                    col1 = important_features[i]
+                    col2 = important_features[j]
+                    
+                    try:
+                        mult_name = f"{col1}_x_{col2}"
+                        X_train[mult_name] = (X_train[col1] * X_train[col2]).astype('float32')
+                        X_test[mult_name] = (X_test[col1] * X_test[col2]).astype('float32')
+                        self.interaction_features.append(mult_name)
+                        interaction_count += 1
+                        
+                        if interaction_count >= max_interactions:
+                            break
+                        
+                        ratio_name = f"{col1}_div_{col2}"
+                        denominator_train = X_train[col2].replace(0, 1e-10)
+                        denominator_test = X_test[col2].replace(0, 1e-10)
+                        X_train[ratio_name] = (X_train[col1] / denominator_train).astype('float32')
+                        X_test[ratio_name] = (X_test[col1] / denominator_test).astype('float32')
+                        
+                        X_train[ratio_name] = X_train[ratio_name].replace([np.inf, -np.inf], 0).fillna(0)
+                        X_test[ratio_name] = X_test[ratio_name].replace([np.inf, -np.inf], 0).fillna(0)
+                        
+                        self.interaction_features.append(ratio_name)
+                        interaction_count += 1
+                        
+                    except Exception as e:
+                        logger.warning(f"Interaction creation failed for {col1} and {col2}: {e}")
+                        continue
+                
+                if interaction_count >= max_interactions:
+                    break
+            
+            logger.info(f"Interaction features created: {len(self.interaction_features)} features")
+            return X_train, X_test
+            
+        except Exception as e:
+            logger.error(f"Interaction feature creation failed: {e}")
             return X_train, X_test
     
     def _initialize_processing(self, train_df: pd.DataFrame, test_df: pd.DataFrame, target_col: str):
@@ -402,7 +456,6 @@ class CTRFeatureEngineer:
             
             X_test = test_df.copy()
             
-            # Remove only 'seq' column - keep inventory_id as categorical
             id_cols = [col for col in X_train.columns if col == 'seq']
             if id_cols:
                 X_train = X_train.drop(columns=id_cols, errors='ignore')
@@ -426,10 +479,11 @@ class CTRFeatureEngineer:
                 'original': len(self.original_feature_order),
                 'categorical': len(self.categorical_features),
                 'target_encoding': len(self.target_encoding_features),
+                'interaction': len(self.interaction_features),
                 'final': len(self.final_feature_columns)
             }
             
-            total_generated = len(self.target_encoding_features)
+            total_generated = len(self.target_encoding_features) + len(self.interaction_features)
             self.processing_stats['total_features_generated'] = total_generated
             
             logger.info(f"Feature engineering finalized - {len(self.final_feature_columns)} features in {self.processing_stats['processing_time']:.2f}s")

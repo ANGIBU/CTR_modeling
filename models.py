@@ -144,7 +144,6 @@ class CTRBiasCorrector:
             predicted_ctr = np.mean(y_pred_proba)
             
             if predicted_ctr > 0.001:
-                # Strong correction to target CTR
                 self.correction_factor = self.target_ctr / predicted_ctr
                 self.scale_factor = 1.0
             else:
@@ -166,11 +165,9 @@ class CTRBiasCorrector:
             if not self.is_fitted:
                 return y_pred_proba
             
-            # Direct scaling to target CTR
             corrected = y_pred_proba * self.correction_factor
             corrected = np.clip(corrected, 1e-7, 0.5)
             
-            # Verify and adjust if needed
             corrected_ctr = np.mean(corrected)
             if abs(corrected_ctr - self.target_ctr) > 0.002:
                 final_scale = self.target_ctr / corrected_ctr if corrected_ctr > 0 else 1.0
@@ -235,15 +232,12 @@ class EnhancedMultiMethodCalibrator:
             if not self.is_fitted:
                 return self.ctr_corrector.transform(y_pred_proba)
             
-            # Apply best calibration method if available
             if self.best_method and self.best_method in self.calibration_models:
                 calibrated = self._predict_with_method(y_pred_proba, self.best_method)
                 if calibrated is not None:
-                    # Always apply CTR correction after calibration
                     calibrated = self.ctr_corrector.transform(calibrated)
                     return np.clip(calibrated, 1e-7, 0.5)
             
-            # Fallback to CTR correction only
             return self.ctr_corrector.transform(y_pred_proba)
             
         except Exception as e:
@@ -504,15 +498,19 @@ class XGBoostGPUModel(BaseModel):
         default_params = {
             'objective': 'binary:logistic',
             'tree_method': 'hist',
-            'max_depth': 6,
-            'learning_rate': 0.1,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
+            'max_depth': 9,
+            'learning_rate': 0.08,
+            'subsample': 0.85,
+            'colsample_bytree': 0.85,
             'scale_pos_weight': 51.43,
-            'max_bin': 256,
+            'min_child_weight': 3,
+            'gamma': 0.1,
+            'reg_alpha': 0.05,
+            'reg_lambda': 1.5,
+            'max_bin': 512,
             'verbosity': 0,
             'seed': 42,
-            'n_jobs': 4
+            'n_jobs': -1
         }
         
         if params:
@@ -540,15 +538,18 @@ class XGBoostGPUModel(BaseModel):
             
             dtrain = xgb.DMatrix(X_train, label=y_train)
             
+            num_boost_round = 100 if self.quick_mode else 300
+            early_stopping = 15 if self.quick_mode else 30
+            
             if X_val is not None and y_val is not None and len(X_val) > 0:
                 dval = xgb.DMatrix(X_val, label=y_val)
                 
                 self.model = xgb.train(
                     self.params,
                     dtrain,
-                    num_boost_round=100,
+                    num_boost_round=num_boost_round,
                     evals=[(dval, 'val')],
-                    early_stopping_rounds=15,
+                    early_stopping_rounds=early_stopping,
                     verbose_eval=False
                 )
                 
@@ -558,7 +559,7 @@ class XGBoostGPUModel(BaseModel):
                 self.model = xgb.train(
                     self.params,
                     dtrain,
-                    num_boost_round=100
+                    num_boost_round=num_boost_round
                 )
             
             logger.info(f"{self.name}: Training completed successfully")

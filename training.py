@@ -79,20 +79,25 @@ class CTRHyperparameterOptimizer:
             params = {
                 'objective': 'binary:logistic',
                 'tree_method': 'hist',
-                'max_depth': 6,
-                'learning_rate': 0.1,
-                'subsample': 0.8,
-                'colsample_bytree': 0.8,
+                'max_depth': 9,
+                'learning_rate': 0.08,
+                'subsample': 0.85,
+                'colsample_bytree': 0.85,
                 'scale_pos_weight': 51.43,
-                'max_bin': 256,
+                'min_child_weight': 3,
+                'gamma': 0.1,
+                'reg_alpha': 0.05,
+                'reg_lambda': 1.5,
+                'max_bin': 512,
                 'verbosity': 0,
                 'seed': 42,
-                'n_jobs': 4
+                'n_jobs': -1
             }
             
             if self.quick_mode:
                 params['learning_rate'] = 0.3
                 params['max_depth'] = 4
+                params['max_bin'] = 256
             
             return params
         
@@ -146,11 +151,10 @@ class CTRModelTrainer:
     
     def _sample_for_memory(self, X_train: pd.DataFrame, y_train: pd.Series, 
                           max_samples: int = 5000000) -> Tuple[pd.DataFrame, pd.Series]:
-        """Sample data to fit in memory - increased limit"""
+        """Sample data to fit in memory"""
         memory_status = self.memory_tracker.get_memory_status()
         available_gb = memory_status['available_gb']
         
-        # Only sample if memory is critical
         if len(X_train) > max_samples and available_gb < 8:
             logger.info(f"Sampling data due to memory constraint: {len(X_train)} -> {max_samples}")
             
@@ -166,7 +170,6 @@ class CTRModelTrainer:
                 indices = np.random.choice(len(X_train), size=max_samples, replace=False)
                 return X_train.iloc[indices], y_train.iloc[indices]
         
-        # Use full data if memory allows
         return X_train, y_train
     
     def train_model(self,
@@ -190,7 +193,6 @@ class CTRModelTrainer:
             memory_status = self.memory_tracker.get_memory_status()
             logger.info(f"Pre-training memory: {memory_status['available_gb']:.1f}GB available")
             
-            # Apply sampling only if necessary
             X_train_sampled, y_train_sampled = self._sample_for_memory(X_train, y_train, max_samples=5000000)
             
             if X_val is None or y_val is None:
@@ -359,7 +361,6 @@ class CTRTrainer(CTRModelTrainer):
             memory_status = self.memory_tracker.get_memory_status()
             logger.info(f"Pre-training memory: {memory_status['available_gb']:.1f}GB available")
             
-            # Apply sampling only if memory is critical
             if memory_status['available_gb'] < 8:
                 logger.warning(f"Low memory detected, sampling data")
                 X_train, y_train = self._sample_for_memory(X_train, y_train, max_samples=2000000)

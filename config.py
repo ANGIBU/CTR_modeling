@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 import logging
 
-# Set CUDA device before importing torch
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 
@@ -33,7 +32,6 @@ except ImportError:
 class Config:
     """Project-wide configuration management"""
     
-    # Basic path settings
     BASE_DIR = Path(__file__).parent
     DATA_DIR = BASE_DIR / "data"
     MODEL_DIR = BASE_DIR / "models"
@@ -41,23 +39,19 @@ class Config:
     OUTPUT_DIR = BASE_DIR / "output"
     RESULTS_DIR = BASE_DIR / "results"
     
-    # Data file paths
     TRAIN_PATH = DATA_DIR / "train.parquet"
     TEST_PATH = DATA_DIR / "test.parquet"
     SUBMISSION_PATH = DATA_DIR / "sample_submission.csv"
     SUBMISSION_TEMPLATE_PATH = DATA_DIR / "sample_submission.csv"
     
-    # NVTabular processed data paths
     NVT_PROCESSED_DIR = DATA_DIR / "nvt_processed"
     NVT_WORKFLOW_DIR = NVT_PROCESSED_DIR / "workflow"
     
-    # Target column settings
     TARGET_COLUMN_CANDIDATES = [
         'clicked', 'click', 'is_click', 'target', 'label', 'y',
         'ctr', 'response', 'conversion', 'action'
     ]
     
-    # Target column detection settings
     TARGET_DETECTION_CONFIG = {
         'binary_values': {0, 1},
         'min_ctr': 0.001,
@@ -66,13 +60,10 @@ class Config:
         'typical_ctr_range': (0.005, 0.05)
     }
     
-    # GPU and hardware settings
     if TORCH_AVAILABLE:
         try:
-            # Test actual GPU availability
             GPU_AVAILABLE = torch.cuda.is_available()
             if GPU_AVAILABLE:
-                # Test GPU access
                 test_tensor = torch.zeros(1, device='cuda:0')
                 DEVICE = torch.device('cuda:0')
                 GPU_COUNT = torch.cuda.device_count()
@@ -81,7 +72,6 @@ class Config:
                 del test_tensor
                 torch.cuda.empty_cache()
                 
-                # Set GPU optimization flags
                 torch.backends.cudnn.benchmark = True
                 if hasattr(torch.backends.cudnn, 'allow_tf32'):
                     torch.backends.cudnn.allow_tf32 = True
@@ -107,7 +97,6 @@ class Config:
         GPU_NAME = "None"
         GPU_MEMORY_GB = 0
     
-    # RAPIDS GPU settings
     RAPIDS_ENABLED = RAPIDS_AVAILABLE and GPU_AVAILABLE
     NVTABULAR_ENABLED = NVTABULAR_AVAILABLE and RAPIDS_ENABLED
     
@@ -116,25 +105,21 @@ class Config:
     USE_MIXED_PRECISION = True
     GPU_OPTIMIZATION_LEVEL = 3
     
-    # Memory settings (adjusted for 64GB RAM)
-    MAX_MEMORY_GB = 45  # Use up to 45GB of 64GB
+    MAX_MEMORY_GB = 45
     CHUNK_SIZE = 150000
     BATCH_SIZE_GPU = 20480
     BATCH_SIZE_CPU = 6144
     PREFETCH_FACTOR = 6
     NUM_WORKERS = 10
     
-    # Memory thresholds (adjusted for 64GB system)
-    MEMORY_WARNING_THRESHOLD = 50  # GB
-    MEMORY_CRITICAL_THRESHOLD = 55  # GB
-    MEMORY_ABORT_THRESHOLD = 58  # GB
+    MEMORY_WARNING_THRESHOLD = 50
+    MEMORY_CRITICAL_THRESHOLD = 55
+    MEMORY_ABORT_THRESHOLD = 58
     
-    # Data size limits
     MAX_TRAIN_SIZE = 15000000
     MAX_TEST_SIZE = 2500000
     MAX_INTERACTION_FEATURES = 60
     
-    # NVTabular settings
     NVT_CONFIG = {
         'part_size': '32MB',
         'shuffle': 'PER_PARTITION',
@@ -144,23 +129,19 @@ class Config:
         'exclude_columns': ['seq'],
     }
     
-    # Feature columns configuration - optimized for tree models
-    # Only 5 categorical features (keep inventory_id)
     CATEGORICAL_FEATURES = ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour']
     
-    # All continuous features (112 total)
     CONTINUOUS_FEATURES = (
-        [f'feat_a_{i}' for i in range(1, 19)] +     # 18
-        [f'feat_b_{i}' for i in range(1, 7)] +      # 6
-        [f'feat_c_{i}' for i in range(1, 9)] +      # 8
-        [f'feat_d_{i}' for i in range(1, 7)] +      # 6
-        [f'feat_e_{i}' for i in range(1, 11)] +     # 10
-        [f'history_a_{i}' for i in range(1, 8)] +   # 7
-        [f'history_b_{i}' for i in range(1, 31)] +  # 30
-        [f'l_feat_{i}' for i in range(1, 28)]       # 27
+        [f'feat_a_{i}' for i in range(1, 19)] +
+        [f'feat_b_{i}' for i in range(1, 7)] +
+        [f'feat_c_{i}' for i in range(1, 9)] +
+        [f'feat_d_{i}' for i in range(1, 7)] +
+        [f'feat_e_{i}' for i in range(1, 11)] +
+        [f'history_a_{i}' for i in range(1, 8)] +
+        [f'history_b_{i}' for i in range(1, 31)] +
+        [f'l_feat_{i}' for i in range(1, 28)]
     )
     
-    # Model training settings - optimized for 0.35+ score with GPU
     MODEL_TRAINING_CONFIG = {
         'lightgbm': {
             'max_depth': 8,
@@ -200,32 +181,35 @@ class Config:
         },
         'xgboost_gpu': {
             'objective': 'binary:logistic',
-            'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
-            'max_depth': 8,
-            'learning_rate': 0.1,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
+            'tree_method': 'hist',
+            'max_depth': 9,
+            'learning_rate': 0.08,
+            'subsample': 0.85,
+            'colsample_bytree': 0.85,
             'scale_pos_weight': 51.43,
-            'gpu_id': 0 if GPU_AVAILABLE else -1,
-            'predictor': 'gpu_predictor' if GPU_AVAILABLE else 'cpu_predictor',
+            'min_child_weight': 3,
+            'gamma': 0.1,
+            'reg_alpha': 0.05,
+            'reg_lambda': 1.5,
+            'max_bin': 512,
             'verbosity': 0,
-            'seed': 42
+            'seed': 42,
+            'n_jobs': -1
         },
         'logistic': {
             'C': 0.5,
             'penalty': 'l2',
             'solver': 'saga',
-            'max_iter': 4000,
-            'class_weight': 'balanced',
+            'max_iter': 100,
             'random_state': 42,
-            'tol': 0.00005,
-            'n_jobs': 8
+            'n_jobs': 4,
+            'tol': 0.001,
+            'warm_start': True
         }
     }
     
-    # Feature engineering settings - optimized for tree models
     FEATURE_ENGINEERING_CONFIG = {
-        'enable_interaction_features': False,  # Tree models handle interactions
+        'enable_interaction_features': True,
         'enable_polynomial_features': False,
         'enable_binning': False,
         'enable_target_encoding': True,
@@ -237,36 +221,32 @@ class Config:
         'n_bins': 6,
         'min_frequency': 10,
         'target_encoding_smoothing': 20.0,
-        'target_feature_count': 117,  # 5 categorical + 112 continuous
-        'use_feature_selection': False,  # Use all features
+        'target_feature_count': 150,
+        'use_feature_selection': False,
         'feature_selection_method': 'f_classif',
         'feature_importance_threshold': 0.01,
         'max_categorical_for_encoding': 5,
-        'max_numeric_for_interaction': 0,
-        'max_cross_combinations': 0,
+        'max_numeric_for_interaction': 20,
+        'max_cross_combinations': 10,
         'max_statistical_features': 0,
         'cleanup_after_each_step': True,
         'intermediate_storage': False,
         'use_nvtabular': NVTABULAR_ENABLED,
-        'normalize_continuous': False  # No normalization for tree models
+        'normalize_continuous': False
     }
     
-    # Cross-validation settings
     CV_FOLDS = 5
     CV_SHUFFLE = True
     RANDOM_STATE = 42
     
-    # Early stopping settings
-    EARLY_STOPPING_ROUNDS = 20
+    EARLY_STOPPING_ROUNDS = 30
     EARLY_STOPPING_TOLERANCE = 1e-5
     
-    # Hyperparameter tuning settings
     OPTUNA_N_TRIALS = 150
     OPTUNA_TIMEOUT = 3600
     OPTUNA_N_JOBS = 2
     OPTUNA_VERBOSITY = 1
     
-    # Ensemble settings
     ENSEMBLE_CONFIG = {
         'voting_weights': {'lightgbm': 0.45, 'xgboost': 0.35, 'logistic': 0.2},
         'stacking_cv_folds': 5,
@@ -277,12 +257,10 @@ class Config:
         'use_simple_average': False
     }
     
-    # Calibration settings
     CALIBRATION_METHOD = 'isotonic'
     CALIBRATION_CV_FOLDS = 5
     CALIBRATION_MANDATORY = True
     
-    # Evaluation configuration
     EVALUATION_CONFIG = {
         'ap_weight': 0.5,
         'wll_weight': 0.5,
@@ -297,44 +275,38 @@ class Config:
         'ctr_bias_multiplier': 6.0
     }
     
-    # CTR bias correction settings (strengthened)
     CTR_BIAS_CORRECTION = {
         'enable': True,
         'target_ctr': 0.0191,
-        'correction_factor': 0.5,  # Stronger correction
+        'correction_factor': 0.5,
         'post_processing': True,
         'clip_range': (0.0005, 0.1),
         'bias_threshold': 0.0003,
-        'calibration_strength': 2.0,  # Increased from 1.5
-        'prediction_scaling': 0.3  # Reduced from 0.5
+        'calibration_strength': 2.0,
+        'prediction_scaling': 0.3
     }
     
-    # Evaluation metrics
     PRIMARY_METRIC = 'combined_score'
     SECONDARY_METRICS = ['ap', 'auc', 'log_loss', 'ctr_bias', 'ctr_score']
     TARGET_COMBINED_SCORE = 0.35
     TARGET_CTR = 0.0191
     
-    # Logging settings
     LOG_LEVEL = logging.INFO
     LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     LOG_FILE_MAX_SIZE = 10 * 1024 * 1024
     LOG_FILE_BACKUP_COUNT = 5
     
-    # Performance settings
     ENABLE_PARALLEL_PROCESSING = True
     ENABLE_MEMORY_MAPPING = False
     ENABLE_CACHING = True
     CACHE_SIZE_MB = 2048
     
-    # Large dataset specific settings
     LARGE_DATASET_MODE = True
     MEMORY_EFFICIENT_SAMPLING = True
-    AGGRESSIVE_SAMPLING_THRESHOLD = 0.75  # Raised from 0.65
+    AGGRESSIVE_SAMPLING_THRESHOLD = 0.75
     MIN_SAMPLE_SIZE = 100000
     MAX_SAMPLE_SIZE = 1000000
     
-    # Logistic regression sampling configuration
     LOGISTIC_SAMPLING_CONFIG = {
         'normal_size': 1000000,
         'warning_size': 750000,
@@ -343,7 +315,6 @@ class Config:
         'enable_dynamic_sizing': True
     }
     
-    # RTX 4060 Ti specific settings
     RTX_4060_TI_OPTIMIZATION = GPU_AVAILABLE and GPU_NAME and "4060 Ti" in GPU_NAME
     
     @classmethod
@@ -426,12 +397,11 @@ class Config:
             print(f"    Memory: {cls.GPU_MEMORY_GB:.1f}GB")
             print(f"    Count: {cls.GPU_COUNT}")
             
-            # Show XGBoost GPU settings
             xgb_gpu_params = cls.MODEL_TRAINING_CONFIG.get('xgboost_gpu', {})
             print(f"\n  XGBoost GPU Settings:")
             print(f"    tree_method: {xgb_gpu_params.get('tree_method')}")
-            print(f"    gpu_id: {xgb_gpu_params.get('gpu_id')}")
-            print(f"    predictor: {xgb_gpu_params.get('predictor')}")
+            print(f"    max_depth: {xgb_gpu_params.get('max_depth')}")
+            print(f"    learning_rate: {xgb_gpu_params.get('learning_rate')}")
         
         print("=== GPU Check Completed ===")
         return status
