@@ -38,7 +38,7 @@ class CTRFeatureEngineer:
         self.final_feature_columns = []
         self.target_column = None
         
-        # Only 5 categorical features for tree models
+        # Only 5 categorical features for tree models (keep inventory_id)
         self.true_categorical = ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour']
         
         # All continuous features (112 total)
@@ -146,8 +146,8 @@ class CTRFeatureEngineer:
             X_train, X_test = self._encode_categorical_minimal(X_train, X_test)
             self._force_memory_cleanup()
             
-            # Fill missing values
-            X_train, X_test = self._fill_missing_values(X_train, X_test)
+            # Fill missing values with memory efficiency
+            X_train, X_test = self._fill_missing_values_efficient(X_train, X_test)
             self._force_memory_cleanup()
             
             # Optional: target encoding for categorical features
@@ -236,6 +236,51 @@ class CTRFeatureEngineer:
             
         except Exception as e:
             logger.error(f"Missing value filling failed: {e}")
+            return X_train, X_test
+    
+    def _fill_missing_values_efficient(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Fill missing values with memory efficiency"""
+        try:
+            logger.info("Filling missing values efficiently")
+            
+            # Process in chunks to avoid memory issues
+            chunk_size = 10
+            train_cols = list(X_train.columns)
+            
+            for i in range(0, len(train_cols), chunk_size):
+                chunk_cols = train_cols[i:i+chunk_size]
+                
+                # Fill train chunk
+                for col in chunk_cols:
+                    if X_train[col].isna().any():
+                        X_train[col] = X_train[col].fillna(0)
+                    if np.isinf(X_train[col]).any():
+                        X_train[col] = X_train[col].replace([np.inf, -np.inf], 0)
+                
+                # Fill test chunk
+                for col in chunk_cols:
+                    if col in X_test.columns:
+                        if X_test[col].isna().any():
+                            X_test[col] = X_test[col].fillna(0)
+                        if np.isinf(X_test[col]).any():
+                            X_test[col] = X_test[col].replace([np.inf, -np.inf], 0)
+                
+                if i % (chunk_size * 3) == 0:
+                    gc.collect()
+            
+            logger.info("Missing value filling completed")
+            return X_train, X_test
+            
+        except Exception as e:
+            logger.error(f"Efficient missing value filling failed: {e}")
+            # Fallback to simple method
+            try:
+                X_train = X_train.fillna(0)
+                X_test = X_test.fillna(0)
+                X_train = X_train.replace([np.inf, -np.inf], 0)
+                X_test = X_test.replace([np.inf, -np.inf], 0)
+            except:
+                pass
             return X_train, X_test
     
     def _ensure_float32(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -357,8 +402,8 @@ class CTRFeatureEngineer:
             
             X_test = test_df.copy()
             
-            # Remove ID columns
-            id_cols = [col for col in X_train.columns if 'id' in col.lower() or 'ID' in col or col == 'seq']
+            # Remove only 'seq' column - keep inventory_id as categorical
+            id_cols = [col for col in X_train.columns if col == 'seq']
             if id_cols:
                 X_train = X_train.drop(columns=id_cols, errors='ignore')
                 X_test = X_test.drop(columns=id_cols, errors='ignore')
@@ -403,7 +448,7 @@ class CTRFeatureEngineer:
             X_test = X_test[available_features]
             
             X_train, X_test = self._encode_categorical_minimal(X_train, X_test)
-            X_train, X_test = self._fill_missing_values(X_train, X_test)
+            X_train, X_test = self._fill_missing_values_efficient(X_train, X_test)
             X_train, X_test = self._ensure_float32(X_train, X_test)
             
             self.final_feature_columns = list(X_train.columns)
