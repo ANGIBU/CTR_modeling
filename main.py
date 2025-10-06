@@ -706,7 +706,7 @@ def main():
         sys.exit(0)
     except Exception as e:
         logger.error(f"System execution failed: {e}")
-        logger.error(f"Detailed error: {traceback.format_exc()}")
+        logger.error(f"Detailed                                      error: {traceback.format_exc()}")
         sys.exit(1)
 
 if __name__ == "__main__":
