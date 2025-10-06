@@ -11,7 +11,6 @@ import gc
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 
-# Safe imports
 try:
     import psutil
     PSUTIL_AVAILABLE = True
@@ -31,7 +30,6 @@ except ImportError as e:
     print(f"Essential package import failed: {e}")
     sys.exit(1)
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -43,7 +41,6 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Global cleanup flag
 cleanup_required = False
 
 def signal_handler(signum, frame):
@@ -59,10 +56,8 @@ def force_memory_cleanup():
     try:
         start_time = time.time()
         
-        # Python garbage collection
         collected = gc.collect()
         
-        # PyTorch cleanup if available
         if TORCH_AVAILABLE:
             try:
                 if torch.cuda.is_available():
@@ -82,22 +77,18 @@ def validate_environment() -> bool:
     try:
         logger.info("=== Environment validation started ===")
         
-        # Python version check
         python_version = sys.version
         logger.info(f"Python version: {python_version}")
         
-        # Create directories
         directories = ['data', 'models', 'logs', 'results']
         for directory in directories:
             os.makedirs(directory, exist_ok=True)
             logger.info(f"Directory prepared: {directory}")
         
-        # Check data files
         train_path = Path('data/train.parquet')
         test_path = Path('data/test.parquet')
         submission_path = Path('data/sample_submission.csv')
         
-        # File existence and size check
         train_exists = train_path.exists()
         test_exists = test_path.exists()
         submission_exists = submission_path.exists()
@@ -110,7 +101,6 @@ def validate_environment() -> bool:
         logger.info(f"test file: {test_exists} ({test_size:.1f}MB)")
         logger.info(f"submission file: {submission_exists} ({submission_size:.1f}MB)")
         
-        # Memory check
         if PSUTIL_AVAILABLE:
             vm = psutil.virtual_memory()
             total_memory = vm.total / (1024**3)
@@ -136,7 +126,6 @@ def check_gpu_availability() -> Tuple[bool, str]:
         if not torch.cuda.is_available():
             return False, "CUDA not available"
         
-        # Try to actually use GPU
         try:
             device = torch.device('cuda:0')
             test_tensor = torch.zeros(1, device=device)
@@ -157,27 +146,22 @@ def safe_train_test_split(X, y, test_size=0.3, random_state=42):
     try:
         from sklearn.model_selection import train_test_split
         
-        # Check if we have enough samples
         unique_classes, class_counts = np.unique(y, return_counts=True)
         min_class_count = min(class_counts)
         
-        # If any class has too few samples, don't stratify
         if min_class_count < 2 or len(y) < 10:
             logger.warning(f"Small dataset ({len(y)} samples) or class imbalance detected. Using simple split.")
             X_train, X_val, y_train, y_val = train_test_split(
                 X, y, test_size=test_size, random_state=random_state
             )
         else:
-            # Safe stratified split
             X_train, X_val, y_train, y_val = train_test_split(
                 X, y, test_size=test_size, random_state=random_state, stratify=y
             )
         
-        # Ensure validation set has both classes
         val_unique_classes = np.unique(y_val)
         if len(val_unique_classes) < 2:
             logger.warning("Validation set has only one class. Adjusting split.")
-            # Manually ensure both classes
             positive_indices = np.where(y == 1)[0]
             negative_indices = np.where(y == 0)[0]
             
@@ -204,7 +188,7 @@ def safe_train_test_split(X, y, test_size=0.3, random_state=42):
         return X.iloc[:split_point], X.iloc[split_point:], y.iloc[:split_point], y.iloc[split_point:]
 
 def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[str, Any]]:
-    """Execute complete CTR modeling pipeline optimized for 0.35+ score"""
+    """Execute complete CTR modeling pipeline"""
     try:
         start_time = time.time()
         
@@ -226,7 +210,6 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             logger.error(f"Config import failed: {e}")
             return None
         
-        # Check GPU availability properly
         gpu_optimization = False
         gpu_info = "Not available"
         
@@ -259,7 +242,6 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             logger.error(f"Module import failed: {e}")
             return None
         
-        # Phase 1: Data Loading
         logger.info("1. Data loading phase")
         data_loader = LargeDataLoader(config)
         logger.info("Large data loader initialization completed")
@@ -268,13 +250,11 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             data_loader.set_quick_mode(True)
             logger.info("Large data loader set to quick mode (50 samples)")
         
-        # Check memory before loading
         if PSUTIL_AVAILABLE:
             vm = psutil.virtual_memory()
             available_memory = vm.available / (1024**3)
             logger.info(f"Pre-loading memory status: available {available_memory:.1f}GB")
         
-        # Load data
         if quick_mode:
             logger.info("Quick mode: Loading sample data (50 samples)")
             train_df, test_df = data_loader.load_quick_sample_data()
@@ -288,7 +268,6 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         
         logger.info(f"Data loading completed - train: {train_df.shape}, test: {test_df.shape}")
         
-        # Phase 2: Feature Engineering
         logger.info("2. Feature engineering phase (tree model optimized)")
         feature_engineer = CTRFeatureEngineer(config)
         
@@ -306,14 +285,11 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         
         logger.info(f"Feature engineering completed - Features: {X_train.shape[1]}")
         
-        # Phase 3: Model Training
         logger.info("3. Model training phase (XGBoost GPU optimized)")
         
-        # Initialize trainer
         trainer = CTRTrainer(config)
         logger.info("CTR Trainer initialized")
         
-        # Get target column
         target_column = data_loader.get_detected_target_column()
         if target_column not in train_df.columns:
             logger.error(f"Target column '{target_column}' not found")
@@ -321,27 +297,39 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         
         y_train = train_df[target_column]
         
-        # Available models
         available_models = trainer.get_available_models()
         logger.info(f"Available models: {available_models}")
         
-        # Initialize ensemble manager
         ensemble_manager = CTREnsembleManager(config)
         logger.info("Ensemble manager initialization completed")
         
-        # Safe train/validation split
+        if PSUTIL_AVAILABLE:
+            vm = psutil.virtual_memory()
+            available_memory = vm.available / (1024**3)
+            logger.info(f"Available memory before split: {available_memory:.1f}GB")
+            
+            if available_memory < 10 and len(X_train) > 1000000:
+                logger.warning(f"Low memory detected, sampling data for training")
+                sample_size = min(1000000, len(X_train))
+                from sklearn.model_selection import train_test_split as simple_split
+                X_train, _, y_train, _ = simple_split(
+                    X_train, y_train, 
+                    train_size=sample_size,
+                    random_state=42,
+                    stratify=y_train
+                )
+                logger.info(f"Data sampled: {len(X_train)} samples")
+        
         X_train_split, X_val_split, y_train_split, y_val_split = safe_train_test_split(
             X_train, y_train, test_size=0.3, random_state=42
         )
         
         logger.info(f"Data split completed - train: {X_train_split.shape}, validation: {X_val_split.shape}")
         
-        # Select models for training
         if quick_mode:
             models_to_train = ['logistic']
             logger.info(f"Quick mode: Training only {models_to_train}")
         else:
-            # Priority: XGBoost GPU for target score
             if 'xgboost_gpu' in available_models and gpu_optimization:
                 models_to_train = ['xgboost_gpu']
                 logger.info(f"Full mode: Training XGBoost GPU for 0.35+ target score")
@@ -349,18 +337,15 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 models_to_train = available_models
                 logger.info(f"Full mode: Training available models {models_to_train}")
         
-        # Train models
         trained_models = {}
         model_performances = {}
         
         for model_name in models_to_train:
             logger.info(f"=== {model_name} model training started ===")
             
-            # Memory cleanup before each model
             force_memory_cleanup()
             
             try:
-                # Train model
                 model, performance = trainer.train_model(
                     model_name=model_name,
                     X_train=X_train_split,
@@ -370,16 +355,15 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                     quick_mode=quick_mode
                 )
                 
-                if model is not None:
+                if model is not None and hasattr(model, 'is_fitted') and model.is_fitted:
                     trained_models[model_name] = model
                     model_performances[model_name] = performance
                     
-                    # Add to ensemble
                     ensemble_manager.add_base_model(model_name, model)
                     
                     logger.info(f"{model_name} model training completed successfully")
                 else:
-                    logger.error(f"{model_name} model training failed")
+                    logger.error(f"{model_name} model training failed or model not fitted")
                     
             except Exception as e:
                 logger.error(f"{model_name} model training error: {e}")
@@ -387,35 +371,112 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         
         if not trained_models:
             logger.error("No models were successfully trained")
-            return None
+            logger.error("Creating default submission with baseline CTR")
+            
+            predictions = np.full(len(X_test), 0.0191)
+            
+            try:
+                sample_submission = pd.read_csv('data/sample_submission.csv')
+                if len(sample_submission) != len(predictions):
+                    logger.warning(f"Sample submission length mismatch")
+                    submission_df = pd.DataFrame({
+                        'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
+                        'clicked': predictions
+                    })
+                else:
+                    submission_df = pd.DataFrame({
+                        'ID': sample_submission['ID'].values,
+                        'clicked': predictions
+                    })
+            except:
+                submission_df = pd.DataFrame({
+                    'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
+                    'clicked': predictions
+                })
+            
+            submission_path = 'submission.csv'
+            submission_df.to_csv(submission_path, index=False)
+            logger.info(f"Default submission file saved: {submission_path}")
+            
+            return {
+                'quick_mode': quick_mode,
+                'execution_time': time.time() - start_time,
+                'successful_models': 0,
+                'ensemble_enabled': False,
+                'submission_file': submission_path,
+                'submission_rows': len(predictions),
+                'warning': 'No models trained successfully'
+            }
         
-        # Phase 4: Ensemble Preparation (skip for quick mode)
         ensemble_enabled = False
         ensemble_used = False
         
         if not quick_mode and len(trained_models) > 1:
             logger.info("4. Ensemble preparation")
             try:
-                ensemble_manager.train_all_ensembles(X_val_split, y_val_split)
-                ensemble_enabled = True
-                ensemble_used = True
-                logger.info("Ensemble preparation completed")
+                fitted_models = {name: model for name, model in trained_models.items() 
+                               if hasattr(model, 'is_fitted') and model.is_fitted}
+                
+                if len(fitted_models) > 1:
+                    ensemble_manager.train_all_ensembles(X_val_split, y_val_split)
+                    ensemble_enabled = True
+                    ensemble_used = True
+                    logger.info("Ensemble preparation completed")
+                else:
+                    logger.warning(f"Only {len(fitted_models)} fitted models, skipping ensemble")
+                    ensemble_used = False
             except Exception as e:
                 logger.warning(f"Ensemble preparation failed: {e}")
                 ensemble_used = False
         else:
-            logger.info("4. Ensemble skipped (quick mode or single model)")
+            logger.info("4. Ensemble skipped (quick mode or insufficient models)")
         
-        # Phase 5: Generate Submission
+        usable_models = {name: model for name, model in trained_models.items()
+                        if hasattr(model, 'is_fitted') and model.is_fitted}
+        
+        if not usable_models:
+            logger.error("No usable models available for prediction")
+            logger.info("Creating default submission with baseline CTR")
+            
+            predictions = np.full(len(X_test), 0.0191)
+            
+            try:
+                sample_submission = pd.read_csv('data/sample_submission.csv')
+                if len(sample_submission) != len(predictions):
+                    submission_df = pd.DataFrame({
+                        'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
+                        'clicked': predictions
+                    })
+                else:
+                    submission_df = pd.DataFrame({
+                        'ID': sample_submission['ID'].values,
+                        'clicked': predictions
+                    })
+            except:
+                submission_df = pd.DataFrame({
+                    'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
+                    'clicked': predictions
+                })
+            
+            submission_path = 'submission.csv'
+            submission_df.to_csv(submission_path, index=False)
+            logger.info(f"Default submission file saved: {submission_path}")
+            
+            return {
+                'quick_mode': quick_mode,
+                'execution_time': time.time() - start_time,
+                'successful_models': 0,
+                'submission_file': submission_path,
+                'warning': 'No usable models for prediction'
+            }
+        
         logger.info("5. Submission file generation")
         
-        # Memory cleanup before submission
         force_memory_cleanup()
         
         logger.info("Submission file generation started")
         logger.info(f"Test data size: {len(X_test)} rows")
         
-        # Generate predictions in batches
         batch_size = 50000
         all_predictions = []
         
@@ -426,9 +487,12 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 end_idx = min(i + batch_size, len(X_test))
                 batch_X = X_test.iloc[i:end_idx]
                 
-                # Get base model predictions for this batch
                 base_predictions = {}
                 for name, model in trained_models.items():
+                    if not hasattr(model, 'is_fitted') or not model.is_fitted:
+                        logger.warning(f"Model {name} not fitted, skipping")
+                        continue
+                    
                     try:
                         pred = model.predict_proba(batch_X)
                         base_predictions[name] = pred
@@ -436,10 +500,16 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                         logger.warning(f"Prediction failed for {name}: {e}")
                         base_predictions[name] = np.full(len(batch_X), 0.0191)
                 
+                if not base_predictions:
+                    logger.warning(f"No predictions available for batch, using baseline")
+                    batch_pred = np.full(len(batch_X), 0.0191)
+                    all_predictions.append(batch_pred)
+                    continue
+                
                 try:
                     batch_pred = ensemble_manager.final_ensemble.predict_proba(base_predictions)
                 except Exception as e:
-                    logger.warning(f"Ensemble prediction failed: {e}")
+                    logger.warning(f"Ensemble prediction failed: {e}, using average")
                     batch_pred = np.mean(list(base_predictions.values()), axis=0)
                 
                 all_predictions.append(batch_pred)
@@ -452,39 +522,46 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             predictions = np.concatenate(all_predictions)
             
         else:
-            # Use single best model with batch processing
-            best_model_name = list(trained_models.keys())[0]
-            logger.info(f"Using single model: {best_model_name}")
-            best_model = trained_models[best_model_name]
+            best_model_name = None
+            best_model = None
             
-            for i in range(0, len(X_test), batch_size):
-                end_idx = min(i + batch_size, len(X_test))
-                batch_X = X_test.iloc[i:end_idx]
-                
-                try:
-                    batch_pred = best_model.predict_proba(batch_X)
-                except Exception as e:
-                    logger.error(f"Single model prediction failed: {e}")
-                    batch_pred = np.full(len(batch_X), 0.0191)
-                
-                all_predictions.append(batch_pred)
-                
-                logger.info(f"Batch {i//batch_size + 1} completed ({i:,}~{end_idx:,})")
-                
-                if i % (batch_size * 5) == 0:
-                    gc.collect()
+            for name, model in trained_models.items():
+                if hasattr(model, 'is_fitted') and model.is_fitted:
+                    best_model_name = name
+                    best_model = model
+                    break
             
-            predictions = np.concatenate(all_predictions)
+            if best_model is None:
+                logger.error("No fitted models available for prediction")
+                predictions = np.full(len(X_test), 0.0191)
+            else:
+                logger.info(f"Using single model: {best_model_name}")
+                
+                for i in range(0, len(X_test), batch_size):
+                    end_idx = min(i + batch_size, len(X_test))
+                    batch_X = X_test.iloc[i:end_idx]
+                    
+                    try:
+                        batch_pred = best_model.predict_proba(batch_X)
+                    except Exception as e:
+                        logger.error(f"Single model prediction failed: {e}")
+                        batch_pred = np.full(len(batch_X), 0.0191)
+                    
+                    all_predictions.append(batch_pred)
+                    
+                    logger.info(f"Batch {i//batch_size + 1} completed ({i:,}~{end_idx:,})")
+                    
+                    if i % (batch_size * 5) == 0:
+                        gc.collect()
+                
+                predictions = np.concatenate(all_predictions)
         
-        # Ensure predictions are valid
         predictions = np.clip(predictions, 1e-7, 1 - 1e-7)
         
-        # Check if predictions are all zeros
         if np.allclose(predictions, 0.0):
             logger.warning("All predictions are zero! Using default CTR")
             predictions = np.full(len(predictions), 0.0191)
         
-        # Load sample submission to get proper ID format
         try:
             sample_submission = pd.read_csv('data/sample_submission.csv')
             if len(sample_submission) != len(predictions):
@@ -510,7 +587,6 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.info(f"Submission file saved: {submission_path}")
         logger.info(f"Submission statistics: mean={predictions.mean():.4f}, std={predictions.std():.4f}, min={predictions.min():.4f}, max={predictions.max():.4f}")
         
-        # Phase 6: Final Results
         logger.info("=== Pipeline completed ===")
         
         execution_time = time.time() - start_time
@@ -545,13 +621,11 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             logger.info(f"GPU info: {gpu_info}")
         logger.info(f"Submission file: {len(predictions)} rows")
         
-        # Final memory status
         if PSUTIL_AVAILABLE:
             vm = psutil.virtual_memory()
             available_memory = vm.available / (1024**3)
             logger.info(f"Final memory status: available {available_memory:.1f}GB")
         
-        # Final cleanup
         force_memory_cleanup()
         
         return results
@@ -565,11 +639,9 @@ def main():
     """Main execution function"""
     global cleanup_required
     
-    # Set up signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # Parse command line arguments
     parser = argparse.ArgumentParser(description="CTR modeling system - optimized for 0.35+ score")
     parser.add_argument("--mode", choices=["train", "inference"], 
                        default="train", help="Execution mode")
@@ -581,12 +653,10 @@ def main():
     try:
         logger.info("=== CTR modeling system started (0.35+ target) ===")
         
-        # Validate environment
         if not validate_environment():
             logger.error("Environment validation failed")
             sys.exit(1)
         
-        # Execute based on mode
         if args.mode == "train":
             logger.info(f"Training mode started {'(QUICK MODE)' if args.quick else '(FULL MODE - 0.35+ TARGET)'}")
             
@@ -594,7 +664,6 @@ def main():
             config = Config
             config.setup_directories()
             
-            # Execute pipeline
             results = execute_final_pipeline(config, quick_mode=args.quick)
             
             if results:
@@ -607,7 +676,6 @@ def main():
                     logger.info(f"GPU info: {results['gpu_info']}")
                 logger.info(f"Target score: {results['target_score']}")
                 
-                # Print prediction statistics
                 pred_stats = results.get('prediction_stats', {})
                 logger.info(f"Prediction statistics:")
                 logger.info(f"  Mean: {pred_stats.get('mean', 0):.4f}")
@@ -615,7 +683,6 @@ def main():
                 logger.info(f"  Min: {pred_stats.get('min', 0):.4f}")
                 logger.info(f"  Max: {pred_stats.get('max', 0):.4f}")
                 
-                # Print model performances
                 if results.get('model_performances'):
                     logger.info("\nModel Performance Summary:")
                     for model_name, perf in results['model_performances'].items():

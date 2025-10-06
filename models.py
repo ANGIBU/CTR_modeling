@@ -12,7 +12,7 @@ from pathlib import Path
 import pickle
 
 try:
-    from sklearn.linear_model import LogisticRegression
+    from sklearn.linear_model import LogisticRegression, SGDClassifier
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.isotonic import IsotonicRegression
     from sklearn.metrics import brier_score_loss, log_loss
@@ -159,13 +159,9 @@ class CTRBiasCorrector:
             actual_ctr = np.mean(y_true)
             predicted_ctr = np.mean(y_pred_proba)
             
-            # Calculate strong correction to align with target CTR
             if predicted_ctr > 0.001:
-                # Use actual CTR as reference
                 self.correction_factor = actual_ctr / predicted_ctr
-                # Additional scale to push toward target CTR
                 self.scale_factor = self.target_ctr / actual_ctr if actual_ctr > 0 else 1.0
-                # Bound scale factor
                 self.scale_factor = np.clip(self.scale_factor, 0.3, 3.0)
             else:
                 self.correction_factor = 1.0
@@ -186,19 +182,12 @@ class CTRBiasCorrector:
             if not self.is_fitted:
                 return y_pred_proba
             
-            # Apply correction factor
             corrected = y_pred_proba * self.correction_factor
-            
-            # Apply scale factor to push toward target CTR
             corrected = corrected * self.scale_factor
-            
-            # Ensure predictions stay in valid range
             corrected = np.clip(corrected, 1e-7, 0.5)
             
-            # Final alignment check
             corrected_ctr = np.mean(corrected)
             if corrected_ctr > self.target_ctr * 1.5:
-                # Too high, apply additional scaling
                 final_scale = self.target_ctr / corrected_ctr
                 corrected = corrected * final_scale
                 corrected = np.clip(corrected, 1e-7, 0.5)
@@ -384,7 +373,7 @@ class BaseModel(ABC):
                 logger.error(f"{self.name}: Insufficient memory for training")
                 return None
             elif memory_status['level'] == 'critical':
-                logger.warning(f"{self.name}: Memory critical")
+                logger.warning(f"{self.name}: Memory critical, using reduced mode")
             
             return fit_function(*args, **kwargs)
             
@@ -518,24 +507,24 @@ class BaseModel(ABC):
         pass
 
 class XGBoostGPUModel(BaseModel):
-    """XGBoost model with GPU acceleration"""
+    """XGBoost model with memory efficient training"""
     
     def __init__(self, name: str = "XGBoost_GPU", params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
             raise ImportError("XGBoost is not installed.")
         
-        # Parameters for 0.35+ score
         default_params = {
             'objective': 'binary:logistic',
-            'tree_method': 'gpu_hist',
-            'max_depth': 8,
+            'tree_method': 'hist',
+            'max_depth': 6,
             'learning_rate': 0.1,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
             'scale_pos_weight': 51.43,
-            'gpu_id': 0,
+            'max_bin': 256,
             'verbosity': 0,
-            'seed': 42
+            'seed': 42,
+            'n_jobs': 4
         }
         
         if params:
@@ -547,14 +536,19 @@ class XGBoostGPUModel(BaseModel):
         
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Training with GPU"""
+        """Training with memory management"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         start_time = time.time()
         
         def _fit_internal():
+            memory_status = self.memory_monitor.get_memory_status()
+            if memory_status['level'] == 'abort':
+                logger.error(f"{self.name}: Insufficient memory for training")
+                return None
+            
             self.feature_names = list(X_train.columns)
             
-            logger.info(f"{self.name}: Starting XGBoost GPU training")
+            logger.info(f"{self.name}: Starting XGBoost training")
             
             dtrain = xgb.DMatrix(X_train, label=y_train)
             
@@ -564,9 +558,9 @@ class XGBoostGPUModel(BaseModel):
                 self.model = xgb.train(
                     self.params,
                     dtrain,
-                    num_boost_round=200,
+                    num_boost_round=100,
                     evals=[(dval, 'val')],
-                    early_stopping_rounds=20,
+                    early_stopping_rounds=15,
                     verbose_eval=False
                 )
                 
@@ -576,7 +570,7 @@ class XGBoostGPUModel(BaseModel):
                 self.model = xgb.train(
                     self.params,
                     dtrain,
-                    num_boost_round=200
+                    num_boost_round=100
                 )
             
             logger.info(f"{self.name}: Training completed successfully")
@@ -621,7 +615,7 @@ class XGBoostGPUModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X, batch_size=50000)
 
 class LogisticModel(BaseModel):
-    """Logistic Regression model with sampling"""
+    """Logistic Regression model with memory efficient training"""
     
     def __init__(self, name: str = "LogisticRegression", params: Dict[str, Any] = None):
         if not SKLEARN_AVAILABLE:
@@ -631,11 +625,11 @@ class LogisticModel(BaseModel):
             'C': 0.5,
             'penalty': 'l2',
             'solver': 'saga',
-            'max_iter': 4000,
+            'max_iter': 100,
             'random_state': 42,
-            'class_weight': 'balanced',
-            'n_jobs': 8,
-            'tol': 0.00005
+            'n_jobs': 4,
+            'tol': 0.001,
+            'warm_start': True
         }
         
         if params:
@@ -648,11 +642,16 @@ class LogisticModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Training"""
+        """Training with memory management"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         start_time = time.time()
         
         def _fit_internal():
+            memory_status = self.memory_monitor.get_memory_status()
+            if memory_status['level'] == 'abort':
+                logger.error(f"{self.name}: Insufficient memory for training")
+                return None
+            
             self.feature_names = list(X_train.columns)
             
             logger.info(f"{self.name}: Starting training")

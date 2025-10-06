@@ -14,7 +14,7 @@ warnings.filterwarnings('ignore')
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.metrics import roc_auc_score, average_precision_score, log_loss
 
 try:
@@ -140,25 +140,26 @@ class CTRHyperparameterOptimizer:
         self.quick_mode = enabled
     
     def _get_default_params(self, model_type: str) -> Dict[str, Any]:
-        """Get default parameters optimized for 0.35+ score"""
+        """Get default parameters optimized for memory efficiency"""
         
         if model_type.lower() == 'xgboost_gpu':
             params = {
                 'objective': 'binary:logistic',
-                'tree_method': 'gpu_hist',
-                'max_depth': 8,
+                'tree_method': 'hist',
+                'max_depth': 6,
                 'learning_rate': 0.1,
                 'subsample': 0.8,
                 'colsample_bytree': 0.8,
                 'scale_pos_weight': 51.43,
-                'gpu_id': 0,
+                'max_bin': 256,
                 'verbosity': 0,
-                'seed': 42
+                'seed': 42,
+                'n_jobs': 4
             }
             
             if self.quick_mode:
                 params['learning_rate'] = 0.3
-                params['max_depth'] = 6
+                params['max_depth'] = 4
             
             return params
         
@@ -176,17 +177,17 @@ class CTRHyperparameterOptimizer:
                 'penalty': 'l2',
                 'C': 0.5,
                 'solver': 'saga',
-                'max_iter': 4000,
+                'max_iter': 100,
                 'random_state': 42,
-                'class_weight': 'balanced',
-                'n_jobs': 8,
-                'tol': 0.00005
+                'n_jobs': 4,
+                'tol': 0.001,
+                'warm_start': True
             }
         
         return {}
 
 class CTRModelTrainer:
-    """Main trainer class for CTR models"""
+    """Main trainer class for CTR models with memory efficient learning"""
     
     def __init__(self, config: Config):
         self.config = config
@@ -211,6 +212,30 @@ class CTRModelTrainer:
             logger.info("Trainer initialization completed")
             self.trainer_initialized = True
     
+    def _sample_for_memory(self, X_train: pd.DataFrame, y_train: pd.Series, 
+                          max_samples: int = 1000000) -> Tuple[pd.DataFrame, pd.Series]:
+        """Sample data to fit in memory"""
+        memory_status = self.memory_tracker.get_memory_status()
+        available_gb = memory_status['available_gb']
+        
+        if len(X_train) > max_samples and available_gb < 10:
+            logger.info(f"Sampling data due to memory constraint: {len(X_train)} -> {max_samples}")
+            
+            try:
+                from sklearn.model_selection import train_test_split
+                X_sampled, _, y_sampled, _ = train_test_split(
+                    X_train, y_train, 
+                    train_size=max_samples, 
+                    random_state=42,
+                    stratify=y_train
+                )
+                return X_sampled, y_sampled
+            except:
+                indices = np.random.choice(len(X_train), size=max_samples, replace=False)
+                return X_train.iloc[indices], y_train.iloc[indices]
+        
+        return X_train, y_train
+    
     def train_model(self,
                     model_class: Type,
                     model_name: str,
@@ -218,7 +243,7 @@ class CTRModelTrainer:
                     y_train: pd.Series,
                     X_val: Optional[pd.DataFrame] = None,
                     y_val: Optional[pd.Series] = None) -> Optional[Any]:
-        """Train individual model"""
+        """Train individual model with memory management"""
         
         logger.info(f"Starting {model_name} model training")
         
@@ -227,17 +252,23 @@ class CTRModelTrainer:
             
             self.initialize_trainer()
             self.memory_tracker.force_cleanup()
-            logger.info("GPU memory cache cleared")
+            logger.info("Memory cleanup completed")
             
             memory_status = self.memory_tracker.get_memory_status()
             logger.info(f"Pre-training memory: {memory_status['available_gb']:.1f}GB available")
             
+            if memory_status['available_gb'] < 5:
+                logger.warning(f"Low memory detected: {memory_status['available_gb']:.1f}GB available")
+                X_train_sampled, y_train_sampled = self._sample_for_memory(X_train, y_train, max_samples=500000)
+            else:
+                X_train_sampled, y_train_sampled = X_train, y_train
+            
             if X_val is None or y_val is None:
                 X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
-                    X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
+                    X_train_sampled, y_train_sampled, test_size=0.2, random_state=42, stratify=y_train_sampled
                 )
             else:
-                X_train_split, y_train_split = X_train, y_train
+                X_train_split, y_train_split = X_train_sampled, y_train_sampled
                 X_val_split, y_val_split = X_val, y_val
             
             best_params = self.hyperparameter_optimizer._get_default_params(model_name)
@@ -247,7 +278,7 @@ class CTRModelTrainer:
             else:
                 logger.info(f"Using optimized parameters for {model_name}")
             
-            logger.info(f"Training final {model_name} model")
+            logger.info(f"Training {model_name} model with {len(X_train_split)} samples")
             model = model_class()
             
             if hasattr(model, 'set_quick_mode'):
@@ -401,36 +432,37 @@ class CTRTrainer(CTRModelTrainer):
                 self.set_quick_mode(True)
             
             self.memory_tracker.force_cleanup()
-            logger.info("GPU memory cache cleared")
-            logger.info("Trainer initialization completed")
+            logger.info("Memory cleanup completed")
             
             memory_status = self.memory_tracker.get_memory_status()
             logger.info(f"Pre-training memory: {memory_status['available_gb']:.1f}GB available")
             
+            if memory_status['available_gb'] < 5:
+                logger.warning(f"Low memory detected, sampling data")
+                X_train, y_train = self._sample_for_memory(X_train, y_train, max_samples=500000)
+            
             params = self.get_default_params_by_model_type(model_name)
             logger.info(f"Using optimized parameters for {model_name}")
             
-            logger.info(f"Training final {model_name} model")
+            logger.info(f"Training {model_name} model with {len(X_train)} samples")
             
             if model_name == 'xgboost_gpu':
                 from models import XGBoostGPUModel
                 model = XGBoostGPUModel()
                 if hasattr(model, 'set_quick_mode'):
                     model.set_quick_mode(quick_mode)
-                logger.info(f"{model_name}: GPU mode enabled")
+                logger.info(f"{model_name}: Using hist method for memory efficiency")
                     
             elif model_name == 'logistic':
                 from models import LogisticModel
                 model = LogisticModel()
                 if hasattr(model, 'set_quick_mode'):
                     model.set_quick_mode(quick_mode)
-                logger.info(f"{model_name}: Quick mode enabled")
+                logger.info(f"{model_name}: Using memory efficient mode")
             else:
                 model = LogisticRegression(**params)
             
-            logger.info(f"{model_name} model training started (data: {len(X_train)})")
-            logger.info(f"{model_name}: Optimized parameters applied")
-            logger.info(f"{model_name}: Starting training")
+            logger.info(f"{model_name} model training started")
             
             if hasattr(model, 'fit_with_params'):
                 model.fit_with_params(X_train, y_train, **params)
