@@ -30,6 +30,9 @@ except ImportError as e:
     print(f"Essential package import failed: {e}")
     sys.exit(1)
 
+# Create logs directory before logging setup
+os.makedirs('logs', exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
