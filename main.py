@@ -308,9 +308,10 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             available_memory = vm.available / (1024**3)
             logger.info(f"Available memory before split: {available_memory:.1f}GB")
             
-            if available_memory < 10 and len(X_train) > 1000000:
+            # Only sample if memory is critical (under 8GB)
+            if available_memory < 8 and len(X_train) > 2000000:
                 logger.warning(f"Low memory detected, sampling data for training")
-                sample_size = min(1000000, len(X_train))
+                sample_size = min(2000000, len(X_train))
                 from sklearn.model_selection import train_test_split as simple_split
                 X_train, _, y_train, _ = simple_split(
                     X_train, y_train, 

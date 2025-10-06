@@ -30,18 +30,6 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
 
-try:
-    import GPUtil
-    GPUTIL_AVAILABLE = True
-except ImportError:
-    GPUTIL_AVAILABLE = False
-
-try:
-    import cupy as cp
-    CUPY_AVAILABLE = True
-except ImportError:
-    CUPY_AVAILABLE = False
-
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -68,64 +56,9 @@ class LargeDataMemoryTracker:
         
         return status
     
-    def get_gpu_memory_usage(self) -> Dict[str, Any]:
-        """Get GPU memory usage"""
-        if not self.gpu_available:
-            return {'available': False, 'rtx_4060_ti_optimized': False}
-        
-        try:
-            import torch
-            if torch.cuda.is_available():
-                allocated = torch.cuda.memory_allocated() / (1024**3)
-                cached = torch.cuda.memory_reserved() / (1024**3)
-                
-                gpu_name = torch.cuda.get_device_name(0)
-                rtx_4060_ti = "4060 Ti" in gpu_name
-                
-                return {
-                    'available': True,
-                    'allocated_gb': allocated,
-                    'cached_gb': cached,
-                    'rtx_4060_ti_optimized': rtx_4060_ti,
-                    'gpu_name': gpu_name
-                }
-        except Exception:
-            pass
-        
-        return {'available': False, 'rtx_4060_ti_optimized': False}
-    
-    def optimize_gpu_memory(self):
-        """Optimize GPU memory"""
-        if self.gpu_available:
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-            except Exception:
-                pass
-        
-        if CUPY_AVAILABLE:
-            try:
-                cp.get_default_memory_pool().free_all_blocks()
-            except:
-                pass
-    
     def force_cleanup(self):
         """Force memory cleanup"""
         gc.collect()
-        if self.gpu_available:
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
-        if CUPY_AVAILABLE:
-            try:
-                cp.get_default_memory_pool().free_all_blocks()
-            except:
-                pass
 
 class CTRHyperparameterOptimizer:
     """Hyperparameter optimization for CTR models"""
@@ -140,7 +73,7 @@ class CTRHyperparameterOptimizer:
         self.quick_mode = enabled
     
     def _get_default_params(self, model_type: str) -> Dict[str, Any]:
-        """Get default parameters optimized for memory efficiency"""
+        """Get default parameters"""
         
         if model_type.lower() == 'xgboost_gpu':
             params = {
@@ -208,21 +141,20 @@ class CTRModelTrainer:
     def initialize_trainer(self):
         """Initialize trainer"""
         if not self.trainer_initialized:
-            self.memory_tracker.optimize_gpu_memory()
             logger.info("Trainer initialization completed")
             self.trainer_initialized = True
     
     def _sample_for_memory(self, X_train: pd.DataFrame, y_train: pd.Series, 
-                          max_samples: int = 1000000) -> Tuple[pd.DataFrame, pd.Series]:
-        """Sample data to fit in memory"""
+                          max_samples: int = 5000000) -> Tuple[pd.DataFrame, pd.Series]:
+        """Sample data to fit in memory - increased limit"""
         memory_status = self.memory_tracker.get_memory_status()
         available_gb = memory_status['available_gb']
         
-        if len(X_train) > max_samples and available_gb < 10:
+        # Only sample if memory is critical
+        if len(X_train) > max_samples and available_gb < 8:
             logger.info(f"Sampling data due to memory constraint: {len(X_train)} -> {max_samples}")
             
             try:
-                from sklearn.model_selection import train_test_split
                 X_sampled, _, y_sampled, _ = train_test_split(
                     X_train, y_train, 
                     train_size=max_samples, 
@@ -234,6 +166,7 @@ class CTRModelTrainer:
                 indices = np.random.choice(len(X_train), size=max_samples, replace=False)
                 return X_train.iloc[indices], y_train.iloc[indices]
         
+        # Use full data if memory allows
         return X_train, y_train
     
     def train_model(self,
@@ -257,11 +190,8 @@ class CTRModelTrainer:
             memory_status = self.memory_tracker.get_memory_status()
             logger.info(f"Pre-training memory: {memory_status['available_gb']:.1f}GB available")
             
-            if memory_status['available_gb'] < 5:
-                logger.warning(f"Low memory detected: {memory_status['available_gb']:.1f}GB available")
-                X_train_sampled, y_train_sampled = self._sample_for_memory(X_train, y_train, max_samples=500000)
-            else:
-                X_train_sampled, y_train_sampled = X_train, y_train
+            # Apply sampling only if necessary
+            X_train_sampled, y_train_sampled = self._sample_for_memory(X_train, y_train, max_samples=5000000)
             
             if X_val is None or y_val is None:
                 X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
@@ -413,14 +343,6 @@ class CTRTrainer(CTRModelTrainer):
         
         return available_models
     
-    def enable_gpu_optimization(self):
-        """Enable GPU optimization"""
-        if self.gpu_available:
-            self.memory_tracker.optimize_gpu_memory()
-            logger.info("GPU optimization enabled")
-        else:
-            logger.warning("GPU not available, using CPU mode")
-    
     def train_model(self, model_name: str, X_train: pd.DataFrame, y_train: pd.Series,
                    X_val: pd.DataFrame, y_val: pd.Series, quick_mode: bool = False) -> Tuple[Any, Dict[str, float]]:
         """Train model with simplified interface"""
@@ -437,9 +359,10 @@ class CTRTrainer(CTRModelTrainer):
             memory_status = self.memory_tracker.get_memory_status()
             logger.info(f"Pre-training memory: {memory_status['available_gb']:.1f}GB available")
             
-            if memory_status['available_gb'] < 5:
+            # Apply sampling only if memory is critical
+            if memory_status['available_gb'] < 8:
                 logger.warning(f"Low memory detected, sampling data")
-                X_train, y_train = self._sample_for_memory(X_train, y_train, max_samples=500000)
+                X_train, y_train = self._sample_for_memory(X_train, y_train, max_samples=2000000)
             
             params = self.get_default_params_by_model_type(model_name)
             logger.info(f"Using optimized parameters for {model_name}")
@@ -451,7 +374,7 @@ class CTRTrainer(CTRModelTrainer):
                 model = XGBoostGPUModel()
                 if hasattr(model, 'set_quick_mode'):
                     model.set_quick_mode(quick_mode)
-                logger.info(f"{model_name}: Using hist method for memory efficiency")
+                logger.info(f"{model_name}: Using hist method")
                     
             elif model_name == 'logistic':
                 from models import LogisticModel

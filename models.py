@@ -6,26 +6,22 @@ from typing import Dict, Any, List, Optional, Tuple, Union
 import logging
 import time
 import gc
-import warnings
 from abc import ABC, abstractmethod
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression, SGDClassifier
+from sklearn.model_selection import StratifiedKFold
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import brier_score_loss, log_loss
 from pathlib import Path
 import pickle
+import warnings
 
 try:
-    from sklearn.linear_model import LogisticRegression, SGDClassifier
-    from sklearn.calibration import CalibratedClassifierCV
-    from sklearn.isotonic import IsotonicRegression
-    from sklearn.metrics import brier_score_loss, log_loss
-    from sklearn.model_selection import train_test_split
-    SKLEARN_AVAILABLE = True
+    import joblib
+    JOBLIB_AVAILABLE = True
 except ImportError:
-    SKLEARN_AVAILABLE = False
-    
-try:
-    import lightgbm as lgb
-    LIGHTGBM_AVAILABLE = True
-except ImportError:
-    LIGHTGBM_AVAILABLE = False
+    JOBLIB_AVAILABLE = False
 
 try:
     import xgboost as xgb
@@ -44,12 +40,6 @@ try:
     SCIPY_AVAILABLE = True
 except ImportError:
     SCIPY_AVAILABLE = False
-
-try:
-    import cupy as cp
-    CUPY_AVAILABLE = True
-except ImportError:
-    CUPY_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +92,7 @@ class MemoryMonitor:
             }
     
     def get_memory_status(self) -> Dict[str, Any]:
-        """Get detailed memory status"""
+        """Return memory status"""
         usage = self.get_memory_usage()
         available = usage['available_gb']
         
@@ -128,12 +118,6 @@ class MemoryMonitor:
     def force_memory_cleanup(self):
         """Force memory cleanup"""
         gc.collect()
-        
-        if CUPY_AVAILABLE:
-            try:
-                cp.get_default_memory_pool().free_all_blocks()
-            except:
-                pass
     
     def log_memory_status(self, context: str = "", force: bool = False):
         """Log memory status"""
@@ -162,7 +146,7 @@ class CTRBiasCorrector:
             if predicted_ctr > 0.001:
                 self.correction_factor = actual_ctr / predicted_ctr
                 self.scale_factor = self.target_ctr / actual_ctr if actual_ctr > 0 else 1.0
-                self.scale_factor = np.clip(self.scale_factor, 0.3, 3.0)
+                self.scale_factor = np.clip(self.scale_factor, 0.05, 5.0)
             else:
                 self.correction_factor = 1.0
                 self.scale_factor = 1.0
@@ -177,18 +161,20 @@ class CTRBiasCorrector:
             self.is_fitted = False
     
     def transform(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """Apply strong bias correction"""
+        """Apply strong bias correction to match target CTR"""
         try:
             if not self.is_fitted:
                 return y_pred_proba
             
+            # First correction
             corrected = y_pred_proba * self.correction_factor
             corrected = corrected * self.scale_factor
             corrected = np.clip(corrected, 1e-7, 0.5)
             
+            # Force alignment to target CTR
             corrected_ctr = np.mean(corrected)
-            if corrected_ctr > self.target_ctr * 1.5:
-                final_scale = self.target_ctr / corrected_ctr
+            if abs(corrected_ctr - self.target_ctr) > 0.001:
+                final_scale = self.target_ctr / corrected_ctr if corrected_ctr > 0 else 1.0
                 corrected = corrected * final_scale
                 corrected = np.clip(corrected, 1e-7, 0.5)
             
@@ -618,9 +604,6 @@ class LogisticModel(BaseModel):
     """Logistic Regression model with memory efficient training"""
     
     def __init__(self, name: str = "LogisticRegression", params: Dict[str, Any] = None):
-        if not SKLEARN_AVAILABLE:
-            raise ImportError("Scikit-learn is not installed.")
-        
         default_params = {
             'C': 0.5,
             'penalty': 'l2',
