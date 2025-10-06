@@ -30,6 +30,12 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
 
+try:
+    import torch
+    TORCH_GPU_AVAILABLE = torch.cuda.is_available()
+except ImportError:
+    TORCH_GPU_AVAILABLE = False
+
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -38,7 +44,7 @@ class LargeDataMemoryTracker:
     """Memory tracking and optimization"""
     
     def __init__(self):
-        self.gpu_available = XGBOOST_AVAILABLE
+        self.gpu_available = TORCH_GPU_AVAILABLE
         self.memory_threshold = 0.80
         self.cleanup_threshold = 0.85
         
@@ -54,11 +60,30 @@ class LargeDataMemoryTracker:
                 'percent': vm.percent
             })
         
+        if self.gpu_available and TORCH_GPU_AVAILABLE:
+            try:
+                gpu_mem_allocated = torch.cuda.memory_allocated(0) / (1024**3)
+                gpu_mem_reserved = torch.cuda.memory_reserved(0) / (1024**3)
+                gpu_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                status['gpu_usage_gb'] = gpu_mem_allocated
+                status['gpu_reserved_gb'] = gpu_mem_reserved
+                status['gpu_total_gb'] = gpu_total
+                status['gpu_available'] = True
+            except:
+                status['gpu_available'] = False
+        
         return status
     
     def force_cleanup(self):
         """Force memory cleanup"""
         gc.collect()
+        
+        if self.gpu_available and TORCH_GPU_AVAILABLE:
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            except:
+                pass
 
 class CTRHyperparameterOptimizer:
     """Hyperparameter optimization for CTR models"""
@@ -78,7 +103,7 @@ class CTRHyperparameterOptimizer:
         if model_type.lower() == 'xgboost_gpu':
             params = {
                 'objective': 'binary:logistic',
-                'tree_method': 'hist',
+                'tree_method': 'gpu_hist' if TORCH_GPU_AVAILABLE else 'hist',
                 'max_depth': 9,
                 'learning_rate': 0.08,
                 'subsample': 0.85,
@@ -89,6 +114,8 @@ class CTRHyperparameterOptimizer:
                 'reg_alpha': 0.05,
                 'reg_lambda': 1.5,
                 'max_bin': 512,
+                'gpu_id': 0 if TORCH_GPU_AVAILABLE else None,
+                'predictor': 'gpu_predictor' if TORCH_GPU_AVAILABLE else 'cpu_predictor',
                 'verbosity': 0,
                 'seed': 42,
                 'n_jobs': -1
@@ -193,6 +220,10 @@ class CTRModelTrainer:
             memory_status = self.memory_tracker.get_memory_status()
             logger.info(f"Pre-training memory: {memory_status['available_gb']:.1f}GB available")
             
+            if self.gpu_available:
+                logger.info(f"GPU available: {memory_status.get('gpu_total_gb', 0):.1f}GB total")
+                logger.info(f"GPU usage: {memory_status.get('gpu_usage_gb', 0):.1f}GB used")
+            
             X_train_sampled, y_train_sampled = self._sample_for_memory(X_train, y_train, max_samples=5000000)
             
             if X_val is None or y_val is None:
@@ -209,6 +240,10 @@ class CTRModelTrainer:
                 best_params = {}
             else:
                 logger.info(f"Using optimized parameters for {model_name}")
+                if 'tree_method' in best_params:
+                    logger.info(f"XGBoost tree_method: {best_params['tree_method']}")
+                    if best_params.get('tree_method') == 'gpu_hist':
+                        logger.info(f"GPU acceleration enabled for {model_name}")
             
             logger.info(f"Training {model_name} model with {len(X_train_split)} samples")
             model = model_class()
@@ -342,6 +377,10 @@ class CTRTrainer(CTRModelTrainer):
         
         if XGBOOST_AVAILABLE:
             available_models.append('xgboost_gpu')
+            if TORCH_GPU_AVAILABLE:
+                logger.info("XGBoost GPU mode available")
+            else:
+                logger.info("XGBoost CPU mode (GPU not available)")
         
         return available_models
     
@@ -368,6 +407,15 @@ class CTRTrainer(CTRModelTrainer):
             params = self.get_default_params_by_model_type(model_name)
             logger.info(f"Using optimized parameters for {model_name}")
             
+            if model_name == 'xgboost_gpu' and 'tree_method' in params:
+                logger.info(f"XGBoost tree_method: {params['tree_method']}")
+                if params.get('tree_method') == 'gpu_hist':
+                    logger.info("GPU hist method enabled")
+                    if params.get('predictor'):
+                        logger.info(f"GPU predictor: {params.get('predictor')}")
+                else:
+                    logger.info("CPU hist method (GPU not available)")
+            
             logger.info(f"Training {model_name} model with {len(X_train)} samples")
             
             if model_name == 'xgboost_gpu':
@@ -375,7 +423,6 @@ class CTRTrainer(CTRModelTrainer):
                 model = XGBoostGPUModel()
                 if hasattr(model, 'set_quick_mode'):
                     model.set_quick_mode(quick_mode)
-                logger.info(f"{model_name}: Using hist method")
                     
             elif model_name == 'logistic':
                 from models import LogisticModel

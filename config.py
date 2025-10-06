@@ -164,7 +164,7 @@ class Config:
         },
         'xgboost': {
             'objective': 'binary:logistic',
-            'tree_method': 'hist',
+            'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
             'max_depth': 8,
             'learning_rate': 0.05,
             'n_estimators': 500,
@@ -175,13 +175,14 @@ class Config:
             'alpha': 0,
             'lambda': 1,
             'scale_pos_weight': 51.43,
+            'gpu_id': 0 if GPU_AVAILABLE else None,
             'verbosity': 0,
             'seed': 42,
             'n_jobs': -1
         },
         'xgboost_gpu': {
             'objective': 'binary:logistic',
-            'tree_method': 'hist',
+            'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
             'max_depth': 9,
             'learning_rate': 0.08,
             'subsample': 0.85,
@@ -192,6 +193,8 @@ class Config:
             'reg_alpha': 0.05,
             'reg_lambda': 1.5,
             'max_bin': 512,
+            'gpu_id': 0 if GPU_AVAILABLE else None,
+            'predictor': 'gpu_predictor' if GPU_AVAILABLE else 'cpu_predictor',
             'verbosity': 0,
             'seed': 42,
             'n_jobs': -1
@@ -400,6 +403,8 @@ class Config:
             xgb_gpu_params = cls.MODEL_TRAINING_CONFIG.get('xgboost_gpu', {})
             print(f"\n  XGBoost GPU Settings:")
             print(f"    tree_method: {xgb_gpu_params.get('tree_method')}")
+            print(f"    predictor: {xgb_gpu_params.get('predictor')}")
+            print(f"    gpu_id: {xgb_gpu_params.get('gpu_id')}")
             print(f"    max_depth: {xgb_gpu_params.get('max_depth')}")
             print(f"    learning_rate: {xgb_gpu_params.get('learning_rate')}")
         

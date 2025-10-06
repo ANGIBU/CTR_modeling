@@ -41,6 +41,12 @@ try:
 except ImportError:
     SCIPY_AVAILABLE = False
 
+try:
+    import torch
+    TORCH_GPU_AVAILABLE = torch.cuda.is_available()
+except ImportError:
+    TORCH_GPU_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 class MemoryMonitor:
@@ -118,6 +124,13 @@ class MemoryMonitor:
     def force_memory_cleanup(self):
         """Force memory cleanup"""
         gc.collect()
+        
+        if TORCH_GPU_AVAILABLE:
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            except Exception:
+                pass
     
     def log_memory_status(self, context: str = "", force: bool = False):
         """Log memory status"""
@@ -489,7 +502,7 @@ class BaseModel(ABC):
         pass
 
 class XGBoostGPUModel(BaseModel):
-    """XGBoost model with memory efficient training"""
+    """XGBoost model with GPU acceleration"""
     
     def __init__(self, name: str = "XGBoost_GPU", params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
@@ -497,7 +510,7 @@ class XGBoostGPUModel(BaseModel):
         
         default_params = {
             'objective': 'binary:logistic',
-            'tree_method': 'hist',
+            'tree_method': 'gpu_hist' if TORCH_GPU_AVAILABLE else 'hist',
             'max_depth': 9,
             'learning_rate': 0.08,
             'subsample': 0.85,
@@ -508,6 +521,8 @@ class XGBoostGPUModel(BaseModel):
             'reg_alpha': 0.05,
             'reg_lambda': 1.5,
             'max_bin': 512,
+            'gpu_id': 0 if TORCH_GPU_AVAILABLE else None,
+            'predictor': 'gpu_predictor' if TORCH_GPU_AVAILABLE else 'cpu_predictor',
             'verbosity': 0,
             'seed': 42,
             'n_jobs': -1
@@ -519,10 +534,16 @@ class XGBoostGPUModel(BaseModel):
         super().__init__(name, default_params)
         self.model = None
         self.best_iteration = 0
+        self.gpu_enabled = TORCH_GPU_AVAILABLE and default_params.get('tree_method') == 'gpu_hist'
+        
+        if self.gpu_enabled:
+            logger.info(f"{self.name}: GPU mode enabled with gpu_hist")
+        else:
+            logger.info(f"{self.name}: CPU mode with hist")
         
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Training with memory management"""
+        """Training with GPU acceleration"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         start_time = time.time()
         
@@ -535,6 +556,10 @@ class XGBoostGPUModel(BaseModel):
             self.feature_names = list(X_train.columns)
             
             logger.info(f"{self.name}: Starting XGBoost training")
+            
+            if self.gpu_enabled:
+                self.memory_monitor.force_memory_cleanup()
+                logger.info(f"{self.name}: GPU memory cleared before training")
             
             dtrain = xgb.DMatrix(X_train, label=y_train)
             
@@ -581,12 +606,15 @@ class XGBoostGPUModel(BaseModel):
                 del dval
             gc.collect()
             
+            if self.gpu_enabled:
+                self.memory_monitor.force_memory_cleanup()
+            
             return self
         
         return self._memory_safe_fit(_fit_internal)
     
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """Raw predictions"""
+        """Raw predictions with GPU acceleration"""
         if not self.is_fitted:
             raise ValueError("Model is not fitted.")
         
