@@ -189,6 +189,30 @@ def safe_train_test_split(X, y, test_size=0.3, random_state=42):
         split_point = int(len(X) * (1 - test_size))
         return X.iloc[:split_point], X.iloc[split_point:], y.iloc[:split_point], y.iloc[split_point:]
 
+def apply_ctr_correction(predictions: np.ndarray, target_ctr: float = 0.0191) -> np.ndarray:
+    """Apply CTR correction to predictions"""
+    try:
+        current_ctr = predictions.mean()
+        
+        if abs(current_ctr - target_ctr) > 0.001:
+            logger.info(f"Applying CTR correction: {current_ctr:.4f} -> {target_ctr:.4f}")
+            
+            correction_factor = target_ctr / current_ctr if current_ctr > 0 else 1.0
+            corrected = predictions * correction_factor
+            
+            corrected = np.clip(corrected, 1e-7, 1 - 1e-7)
+            
+            final_ctr = corrected.mean()
+            logger.info(f"CTR after correction: {final_ctr:.4f}")
+            
+            return corrected
+        
+        return predictions
+        
+    except Exception as e:
+        logger.warning(f"CTR correction failed: {e}")
+        return predictions
+
 def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[str, Any]]:
     """Execute complete CTR modeling pipeline"""
     try:
@@ -312,18 +336,6 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             vm = psutil.virtual_memory()
             available_memory = vm.available / (1024**3)
             logger.info(f"Available memory before split: {available_memory:.1f}GB")
-            
-            if available_memory < 8 and len(X_train) > 2000000:
-                logger.warning(f"Low memory detected, sampling data for training")
-                sample_size = min(2000000, len(X_train))
-                from sklearn.model_selection import train_test_split as simple_split
-                X_train, _, y_train, _ = simple_split(
-                    X_train, y_train, 
-                    train_size=sample_size,
-                    random_state=42,
-                    stratify=y_train
-                )
-                logger.info(f"Data sampled: {len(X_train)} samples")
         
         X_train_split, X_val_split, y_train_split, y_val_split = safe_train_test_split(
             X_train, y_train, test_size=0.3, random_state=42
@@ -592,6 +604,10 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         if np.allclose(predictions, 0.0):
             logger.warning("All predictions are zero! Using default CTR")
             predictions = np.full(len(predictions), 0.0191)
+        
+        logger.info(f"Raw predictions - mean: {predictions.mean():.4f}, std: {predictions.std():.4f}")
+        
+        predictions = apply_ctr_correction(predictions, target_ctr=0.0191)
         
         try:
             sample_submission = pd.read_csv('data/sample_submission.csv')

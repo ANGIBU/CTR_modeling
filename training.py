@@ -108,7 +108,7 @@ class CTRHyperparameterOptimizer:
                 'learning_rate': 0.05,
                 'subsample': 0.9,
                 'colsample_bytree': 0.8,
-                'scale_pos_weight': 1.0,
+                'scale_pos_weight': 51.43,
                 'min_child_weight': 10,
                 'gamma': 0.1,
                 'reg_alpha': 0.05,
@@ -186,8 +186,9 @@ class CTRModelTrainer:
         """Sample data to fit in memory"""
         memory_status = self.memory_tracker.get_memory_status()
         available_gb = memory_status['available_gb']
+        memory_percent = memory_status.get('percent', 50)
         
-        if len(X_train) > max_samples and available_gb < 8:
+        if len(X_train) > max_samples and (available_gb < 15 or memory_percent > 75):
             logger.info(f"Sampling data due to memory constraint: {len(X_train)} -> {max_samples}")
             
             try:
@@ -566,10 +567,11 @@ class CTRTrainer(CTRModelTrainer):
             
             memory_status = self.memory_tracker.get_memory_status()
             logger.info(f"Pre-training memory: {memory_status['available_gb']:.1f}GB available")
+            memory_percent = memory_status.get('percent', 50)
             
-            if memory_status['available_gb'] < 8:
-                logger.warning(f"Low memory detected, sampling data")
-                X_train, y_train = self._sample_for_memory(X_train, y_train, max_samples=2000000)
+            if memory_status['available_gb'] < 15 or memory_percent > 75:
+                logger.warning(f"Memory constrained, sampling data")
+                X_train, y_train = self._sample_for_memory(X_train, y_train, max_samples=5000000)
             
             params = self.get_default_params_by_model_type(model_name)
             logger.info(f"Using optimized parameters for {model_name}")

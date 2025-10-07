@@ -178,7 +178,7 @@ class Config:
             'learning_rate': 0.05,
             'subsample': 0.9,
             'colsample_bytree': 0.8,
-            'scale_pos_weight': 1.0,
+            'scale_pos_weight': 51.43,
             'min_child_weight': 10,
             'gamma': 0.1,
             'reg_alpha': 0.05,
