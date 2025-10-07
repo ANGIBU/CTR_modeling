@@ -228,29 +228,6 @@ class BaseModel(ABC):
             logger.warning(f"{self.name}: Feature consistency check failed: {e}")
             return X
     
-    def _enhance_prediction_diversity(self, predictions: np.ndarray) -> np.ndarray:
-        """Enhance prediction diversity"""
-        try:
-            unique_predictions = len(np.unique(predictions))
-            
-            if unique_predictions < self.prediction_diversity_threshold:
-                base_noise_scale = max(np.std(predictions) * 0.002, 1e-6)
-                pred_range = np.max(predictions) - np.min(predictions)
-                range_factor = max(0.5, min(2.0, pred_range * 100))
-                noise_scale = base_noise_scale * range_factor
-                
-                if np.random.random() > 0.5:
-                    noise = np.random.normal(0, noise_scale, len(predictions))
-                else:
-                    noise = np.random.laplace(0, noise_scale * 0.7, len(predictions))
-                
-                enhanced_predictions = predictions + noise
-                return np.clip(enhanced_predictions, 1e-7, 0.5)
-            
-            return predictions
-        except Exception:
-            return predictions
-    
     def apply_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, method: str = 'auto'):
         """Apply calibration (disabled by default)"""
         logger.info(f"{self.name}: Calibration disabled (CTR trust mode)")
@@ -286,12 +263,12 @@ class XGBoostGPUModel(BaseModel):
             'learning_rate': 0.1,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
-            'scale_pos_weight': 51.43,
-            'min_child_weight': 1,
-            'gamma': 0,
-            'reg_alpha': 0,
-            'reg_lambda': 1,
-            'max_bin': 256,
+            'scale_pos_weight': 10.0,
+            'min_child_weight': 3,
+            'gamma': 0.1,
+            'reg_alpha': 0.05,
+            'reg_lambda': 1.5,
+            'max_bin': 512,
             'gpu_id': 0 if TORCH_GPU_AVAILABLE else None,
             'predictor': 'gpu_predictor' if TORCH_GPU_AVAILABLE else 'cpu_predictor',
             'verbosity': 0,
@@ -376,7 +353,7 @@ class XGBoostGPUModel(BaseModel):
         return self._memory_safe_fit(_fit_internal)
     
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """Raw predictions with GPU acceleration"""
+        """Raw predictions with GPU acceleration - no artificial enhancement"""
         if not self.is_fitted:
             raise ValueError("Model is not fitted.")
         
@@ -388,8 +365,8 @@ class XGBoostGPUModel(BaseModel):
             
             del dtest
             
-            proba = np.clip(proba, 1e-7, 0.5)
-            return self._enhance_prediction_diversity(proba)
+            proba = np.clip(proba, 1e-7, 1 - 1e-7)
+            return proba
         
         return self._memory_safe_predict(_predict_internal, X, batch_size=50000)
 
@@ -445,7 +422,7 @@ class LogisticModel(BaseModel):
         return self._memory_safe_fit(_fit_internal)
     
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """Raw predictions"""
+        """Raw predictions - no artificial enhancement"""
         if not self.is_fitted:
             raise ValueError("Model is not fitted.")
         
@@ -453,8 +430,8 @@ class LogisticModel(BaseModel):
             X_processed = self._ensure_feature_consistency(batch_X)
             
             proba = self.model.predict_proba(X_processed)[:, 1]
-            proba = np.clip(proba, 1e-7, 0.5)
-            return self._enhance_prediction_diversity(proba)
+            proba = np.clip(proba, 1e-7, 1 - 1e-7)
+            return proba
         
         return self._memory_safe_predict(_predict_internal, X, batch_size=50000)
 

@@ -189,31 +189,6 @@ def safe_train_test_split(X, y, test_size=0.3, random_state=42):
         split_point = int(len(X) * (1 - test_size))
         return X.iloc[:split_point], X.iloc[split_point:], y.iloc[:split_point], y.iloc[split_point:]
 
-def align_final_ctr(predictions: np.ndarray, target_ctr: float = 0.0191) -> np.ndarray:
-    """Final CTR alignment for submission"""
-    try:
-        current_ctr = np.mean(predictions)
-        
-        if current_ctr > 0.001:
-            scale_factor = target_ctr / current_ctr
-            aligned = predictions * scale_factor
-            aligned = np.clip(aligned, 1e-7, 0.5)
-            
-            final_ctr = np.mean(aligned)
-            if abs(final_ctr - target_ctr) > 0.0005:
-                additional_scale = target_ctr / final_ctr if final_ctr > 0 else 1.0
-                aligned = aligned * additional_scale
-                aligned = np.clip(aligned, 1e-7, 0.5)
-            
-            logger.info(f"Final CTR alignment: {current_ctr:.4f} -> {np.mean(aligned):.4f} (target: {target_ctr:.4f})")
-            return aligned
-        else:
-            return np.full_like(predictions, target_ctr)
-            
-    except Exception as e:
-        logger.error(f"Final CTR alignment failed: {e}")
-        return predictions
-
 def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[str, Any]]:
     """Execute complete CTR modeling pipeline"""
     try:
@@ -582,8 +557,6 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                         gc.collect()
                 
                 predictions = np.concatenate(all_predictions)
-        
-        predictions = align_final_ctr(predictions, target_ctr=0.0191)
         
         predictions = np.clip(predictions, 1e-7, 1 - 1e-7)
         
