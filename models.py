@@ -10,8 +10,7 @@ from abc import ABC, abstractmethod
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.model_selection import StratifiedKFold
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.isotonic import IsotonicRegression
+from sklearn.calibration import CalibratedClassifierCV, IsotonicRegression
 from sklearn.metrics import brier_score_loss, log_loss
 from pathlib import Path
 import pickle
@@ -141,6 +140,61 @@ class MemoryMonitor:
         except Exception:
             pass
 
+class CTRCalibrator:
+    """CTR-specific calibration with Isotonic Regression"""
+    
+    def __init__(self, method: str = 'isotonic'):
+        self.method = method
+        self.calibrator = None
+        self.is_fitted = False
+        self.target_ctr = 0.0191
+        
+    def fit(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
+        """Fit calibration model"""
+        try:
+            logger.info(f"Fitting {self.method} calibration")
+            
+            if self.method == 'isotonic':
+                self.calibrator = IsotonicRegression(out_of_bounds='clip')
+                self.calibrator.fit(y_pred_proba, y_true)
+            else:
+                logger.warning(f"Unknown calibration method: {self.method}, using isotonic")
+                self.calibrator = IsotonicRegression(out_of_bounds='clip')
+                self.calibrator.fit(y_pred_proba, y_true)
+            
+            self.is_fitted = True
+            logger.info("Calibration fitted successfully")
+            
+        except Exception as e:
+            logger.error(f"Calibration fitting failed: {e}")
+            self.is_fitted = False
+    
+    def transform(self, y_pred_proba: np.ndarray) -> np.ndarray:
+        """Apply calibration"""
+        if not self.is_fitted:
+            logger.warning("Calibrator not fitted, returning original predictions")
+            return y_pred_proba
+        
+        try:
+            calibrated = self.calibrator.transform(y_pred_proba)
+            calibrated = np.clip(calibrated, 1e-7, 1 - 1e-7)
+            
+            original_ctr = np.mean(y_pred_proba)
+            calibrated_ctr = np.mean(calibrated)
+            
+            logger.info(f"Calibration applied: {original_ctr:.4f} -> {calibrated_ctr:.4f}")
+            
+            return calibrated
+            
+        except Exception as e:
+            logger.error(f"Calibration transform failed: {e}")
+            return y_pred_proba
+    
+    def fit_transform(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> np.ndarray:
+        """Fit and transform"""
+        self.fit(y_true, y_pred_proba)
+        return self.transform(y_pred_proba)
+
 class BaseModel(ABC):
     """Base class for all models"""
     
@@ -158,6 +212,7 @@ class BaseModel(ABC):
         self.quick_mode = False
         self.training_time = 0.0
         self.validation_score = 0.0
+        self.ctr_calibrator = None
         
     def set_quick_mode(self, enabled: bool):
         """Set quick mode"""
@@ -228,15 +283,38 @@ class BaseModel(ABC):
             logger.warning(f"{self.name}: Feature consistency check failed: {e}")
             return X
     
-    def apply_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, method: str = 'auto'):
-        """Apply calibration (disabled by default)"""
-        logger.info(f"{self.name}: Calibration disabled (CTR trust mode)")
-        self.is_calibrated = False
-        return False
+    def apply_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, method: str = 'isotonic'):
+        """Apply CTR-specific calibration"""
+        try:
+            logger.info(f"{self.name}: Applying {method} calibration")
+            
+            y_pred_proba = self.predict_proba_raw(X_val)
+            
+            self.ctr_calibrator = CTRCalibrator(method=method)
+            self.ctr_calibrator.fit(y_val.values, y_pred_proba)
+            
+            self.is_calibrated = True
+            logger.info(f"{self.name}: Calibration applied successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"{self.name}: Calibration failed: {e}")
+            self.is_calibrated = False
+            return False
     
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Probability predictions"""
-        return self.predict_proba_raw(X)
+        """Probability predictions with calibration"""
+        raw_pred = self.predict_proba_raw(X)
+        
+        if self.is_calibrated and self.ctr_calibrator is not None:
+            try:
+                calibrated_pred = self.ctr_calibrator.transform(raw_pred)
+                return calibrated_pred
+            except Exception as e:
+                logger.warning(f"{self.name}: Calibration transform failed: {e}")
+                return raw_pred
+        
+        return raw_pred
     
     @abstractmethod
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
@@ -250,7 +328,7 @@ class BaseModel(ABC):
         pass
 
 class XGBoostGPUModel(BaseModel):
-    """XGBoost model with GPU acceleration"""
+    """XGBoost model with GPU acceleration and calibration"""
     
     def __init__(self, name: str = "XGBoost_GPU", params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
@@ -259,21 +337,22 @@ class XGBoostGPUModel(BaseModel):
         default_params = {
             'objective': 'binary:logistic',
             'tree_method': 'gpu_hist' if TORCH_GPU_AVAILABLE else 'hist',
-            'max_depth': 8,
-            'learning_rate': 0.1,
-            'subsample': 0.8,
+            'max_depth': 6,
+            'learning_rate': 0.05,
+            'subsample': 0.9,
             'colsample_bytree': 0.8,
-            'scale_pos_weight': 10.0,
-            'min_child_weight': 3,
+            'scale_pos_weight': 1.0,
+            'min_child_weight': 10,
             'gamma': 0.1,
             'reg_alpha': 0.05,
             'reg_lambda': 1.5,
-            'max_bin': 512,
+            'max_bin': 256,
             'gpu_id': 0 if TORCH_GPU_AVAILABLE else None,
             'predictor': 'gpu_predictor' if TORCH_GPU_AVAILABLE else 'cpu_predictor',
             'verbosity': 0,
             'seed': 42,
-            'n_jobs': -1
+            'n_jobs': -1,
+            'max_delta_step': 1
         }
         
         if params:
@@ -353,7 +432,7 @@ class XGBoostGPUModel(BaseModel):
         return self._memory_safe_fit(_fit_internal)
     
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """Raw predictions with GPU acceleration - no artificial enhancement"""
+        """Raw predictions with GPU acceleration"""
         if not self.is_fitted:
             raise ValueError("Model is not fitted.")
         
@@ -422,7 +501,7 @@ class LogisticModel(BaseModel):
         return self._memory_safe_fit(_fit_internal)
     
     def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """Raw predictions - no artificial enhancement"""
+        """Raw predictions"""
         if not self.is_fitted:
             raise ValueError("Model is not fitted.")
         

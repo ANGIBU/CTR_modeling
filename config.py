@@ -14,20 +14,23 @@ except ImportError:
     TORCH_AVAILABLE = False
     logging.warning("PyTorch not installed. GPU functions will be disabled.")
 
-try:
-    import cudf
-    import cupy as cp
-    RAPIDS_AVAILABLE = True
-except ImportError:
-    RAPIDS_AVAILABLE = False
-    logging.warning("RAPIDS not installed. GPU acceleration disabled.")
+# RAPIDS and NVTabular (Linux/WSL2 only - not available on Windows)
+# try:
+#     import cudf
+#     import cupy as cp
+#     RAPIDS_AVAILABLE = True
+# except ImportError:
+#     RAPIDS_AVAILABLE = False
+#     logging.warning("RAPIDS not installed. GPU acceleration disabled.")
+RAPIDS_AVAILABLE = False
 
-try:
-    import nvtabular as nvt
-    NVTABULAR_AVAILABLE = True
-except ImportError:
-    NVTABULAR_AVAILABLE = False
-    logging.warning("NVTabular not installed. Merlin features disabled.")
+# try:
+#     import nvtabular as nvt
+#     NVTABULAR_AVAILABLE = True
+# except ImportError:
+#     NVTABULAR_AVAILABLE = False
+#     logging.warning("NVTabular not installed. Merlin features disabled.")
+NVTABULAR_AVAILABLE = False
 
 class Config:
     """Project-wide configuration management"""
@@ -107,7 +110,7 @@ class Config:
     
     MAX_MEMORY_GB = 45
     CHUNK_SIZE = 150000
-    BATCH_SIZE_GPU = 20480
+    BATCH_SIZE_GPU = 16384
     BATCH_SIZE_CPU = 6144
     PREFETCH_FACTOR = 6
     NUM_WORKERS = 10
@@ -183,21 +186,22 @@ class Config:
         'xgboost_gpu': {
             'objective': 'binary:logistic',
             'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
-            'max_depth': 8,
-            'learning_rate': 0.1,
-            'subsample': 0.8,
+            'max_depth': 6,
+            'learning_rate': 0.05,
+            'subsample': 0.9,
             'colsample_bytree': 0.8,
-            'scale_pos_weight': 10.0,
-            'min_child_weight': 3,
+            'scale_pos_weight': 1.0,
+            'min_child_weight': 10,
             'gamma': 0.1,
             'reg_alpha': 0.05,
             'reg_lambda': 1.5,
-            'max_bin': 512,
+            'max_bin': 256,
             'gpu_id': 0 if GPU_AVAILABLE else None,
             'predictor': 'gpu_predictor' if GPU_AVAILABLE else 'cpu_predictor',
             'verbosity': 0,
             'seed': 42,
-            'n_jobs': -1
+            'n_jobs': -1,
+            'max_delta_step': 1
         },
         'logistic': {
             'C': 0.5,
@@ -261,8 +265,8 @@ class Config:
     }
     
     CALIBRATION_METHOD = 'isotonic'
-    CALIBRATION_CV_FOLDS = 5
-    CALIBRATION_MANDATORY = False
+    CALIBRATION_CV_FOLDS = 3
+    CALIBRATION_MANDATORY = True
     
     EVALUATION_CONFIG = {
         'ap_weight': 0.5,
@@ -279,14 +283,14 @@ class Config:
     }
     
     CTR_BIAS_CORRECTION = {
-        'enable': False,
+        'enable': True,
         'target_ctr': 0.0191,
-        'correction_factor': 0.5,
-        'post_processing': False,
-        'clip_range': (0.0005, 0.1),
+        'correction_factor': 1.0,
+        'post_processing': True,
+        'clip_range': (0.0001, 0.5),
         'bias_threshold': 0.0003,
-        'calibration_strength': 2.0,
-        'prediction_scaling': 0.3
+        'calibration_strength': 1.0,
+        'prediction_scaling': 1.0
     }
     
     PRIMARY_METRIC = 'combined_score'
@@ -407,6 +411,7 @@ class Config:
             print(f"    gpu_id: {xgb_gpu_params.get('gpu_id')}")
             print(f"    max_depth: {xgb_gpu_params.get('max_depth')}")
             print(f"    learning_rate: {xgb_gpu_params.get('learning_rate')}")
+            print(f"    scale_pos_weight: {xgb_gpu_params.get('scale_pos_weight')}")
         
         print("=== GPU Check Completed ===")
         return status

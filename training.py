@@ -104,27 +104,28 @@ class CTRHyperparameterOptimizer:
             params = {
                 'objective': 'binary:logistic',
                 'tree_method': 'gpu_hist' if TORCH_GPU_AVAILABLE else 'hist',
-                'max_depth': 9,
-                'learning_rate': 0.08,
-                'subsample': 0.85,
-                'colsample_bytree': 0.85,
-                'scale_pos_weight': 51.43,
-                'min_child_weight': 3,
+                'max_depth': 6,
+                'learning_rate': 0.05,
+                'subsample': 0.9,
+                'colsample_bytree': 0.8,
+                'scale_pos_weight': 1.0,
+                'min_child_weight': 10,
                 'gamma': 0.1,
                 'reg_alpha': 0.05,
                 'reg_lambda': 1.5,
-                'max_bin': 512,
+                'max_bin': 256,
                 'gpu_id': 0 if TORCH_GPU_AVAILABLE else None,
                 'predictor': 'gpu_predictor' if TORCH_GPU_AVAILABLE else 'cpu_predictor',
                 'verbosity': 0,
                 'seed': 42,
-                'n_jobs': -1
+                'n_jobs': -1,
+                'max_delta_step': 1
             }
             
             if self.quick_mode:
-                params['learning_rate'] = 0.3
+                params['learning_rate'] = 0.1
                 params['max_depth'] = 4
-                params['max_bin'] = 256
+                params['max_bin'] = 128
             
             return params
         
@@ -164,6 +165,7 @@ class CTRModelTrainer:
         self.trained_models = {}
         self.best_params = {}
         self.model_performance = {}
+        self.calibration_enabled = config.CALIBRATION_MANDATORY
         
     def set_quick_mode(self, enabled: bool):
         """Set quick mode"""
@@ -206,7 +208,7 @@ class CTRModelTrainer:
                     y_train: pd.Series,
                     X_val: Optional[pd.DataFrame] = None,
                     y_val: Optional[pd.Series] = None) -> Optional[Any]:
-        """Train individual model with memory management"""
+        """Train individual model with memory management and calibration"""
         
         logger.info(f"Starting {model_name} model training")
         
@@ -244,6 +246,7 @@ class CTRModelTrainer:
                     logger.info(f"XGBoost tree_method: {best_params['tree_method']}")
                     if best_params.get('tree_method') == 'gpu_hist':
                         logger.info(f"GPU acceleration enabled for {model_name}")
+                    logger.info(f"scale_pos_weight: {best_params.get('scale_pos_weight', 1.0)}")
             
             logger.info(f"Training {model_name} model with {len(X_train_split)} samples")
             model = model_class()
@@ -255,6 +258,16 @@ class CTRModelTrainer:
                 model.fit_with_params(X_train_split, y_train_split, **best_params)
             else:
                 model.fit(X_train_split, y_train_split, X_val_split, y_val_split)
+            
+            if self.calibration_enabled and hasattr(model, 'apply_calibration'):
+                logger.info(f"Applying calibration to {model_name}")
+                calibration_method = self.config.CALIBRATION_METHOD
+                calibration_success = model.apply_calibration(X_val_split, y_val_split, method=calibration_method)
+                
+                if calibration_success:
+                    logger.info(f"{model_name}: Calibration applied successfully")
+                else:
+                    logger.warning(f"{model_name}: Calibration failed, using raw predictions")
             
             try:
                 if hasattr(model, 'predict_proba'):
@@ -268,13 +281,21 @@ class CTRModelTrainer:
                 ap = average_precision_score(y_val_split, y_pred_proba)
                 logloss = log_loss(y_val_split, np.clip(y_pred_proba, 1e-15, 1-1e-15))
                 
+                actual_ctr = y_val_split.mean()
+                predicted_ctr = y_pred_proba.mean()
+                ctr_bias = predicted_ctr - actual_ctr
+                
                 self.model_performance[model_name] = {
                     'auc': auc,
                     'average_precision': ap,
-                    'logloss': logloss
+                    'logloss': logloss,
+                    'actual_ctr': actual_ctr,
+                    'predicted_ctr': predicted_ctr,
+                    'ctr_bias': ctr_bias
                 }
                 
                 logger.info(f"{model_name} performance - AUC: {auc:.4f}, AP: {ap:.4f}")
+                logger.info(f"{model_name} CTR - Actual: {actual_ctr:.4f}, Predicted: {predicted_ctr:.4f}, Bias: {ctr_bias:.6f}")
                 
             except Exception as e:
                 logger.warning(f"Performance calculation failed for {model_name}: {e}")
@@ -285,7 +306,8 @@ class CTRModelTrainer:
                 'params': best_params,
                 'performance': self.model_performance.get(model_name, {}),
                 'training_time': time.time(),
-                'gpu_trained': self.gpu_available
+                'gpu_trained': self.gpu_available,
+                'calibrated': getattr(model, 'is_calibrated', False)
             }
             
             logger.info(f"{model_name} model training completed successfully")
@@ -339,7 +361,7 @@ class CTRModelTrainer:
         """Get training summary"""
         calibrated_base_models = sum(
             1 for model_data in self.trained_models.values() 
-            if hasattr(model_data.get('model', {}), 'is_calibrated') and model_data['model'].is_calibrated
+            if model_data.get('calibrated', False)
         )
         
         avg_performance = {}
@@ -360,7 +382,8 @@ class CTRModelTrainer:
             'average_performance': avg_performance,
             'quick_mode': self.quick_mode,
             'gpu_used': self.gpu_available,
-            'training_completed': True
+            'training_completed': True,
+            'calibration_enabled': self.calibration_enabled
         }
 
 class CTRTrainer(CTRModelTrainer):
@@ -415,6 +438,7 @@ class CTRTrainer(CTRModelTrainer):
                         logger.info(f"GPU predictor: {params.get('predictor')}")
                 else:
                     logger.info("CPU hist method (GPU not available)")
+                logger.info(f"scale_pos_weight: {params.get('scale_pos_weight', 1.0)}")
             
             logger.info(f"Training {model_name} model with {len(X_train)} samples")
             
@@ -442,6 +466,16 @@ class CTRTrainer(CTRModelTrainer):
             
             logger.info(f"{model_name}: Training completed successfully")
             
+            if self.calibration_enabled and hasattr(model, 'apply_calibration'):
+                logger.info(f"Applying calibration to {model_name}")
+                calibration_method = self.config.CALIBRATION_METHOD
+                calibration_success = model.apply_calibration(X_val, y_val, method=calibration_method)
+                
+                if calibration_success:
+                    logger.info(f"{model_name}: Calibration applied successfully")
+                else:
+                    logger.warning(f"{model_name}: Calibration failed")
+            
             try:
                 if hasattr(model, 'predict_proba'):
                     y_pred_proba = model.predict_proba(X_val)
@@ -453,8 +487,19 @@ class CTRTrainer(CTRModelTrainer):
                 auc = roc_auc_score(y_val, y_pred_proba) if len(np.unique(y_val)) > 1 else 0.5
                 ap = average_precision_score(y_val, y_pred_proba)
                 
-                performance = {'auc': auc, 'ap': ap}
+                actual_ctr = y_val.mean()
+                predicted_ctr = y_pred_proba.mean()
+                ctr_bias = predicted_ctr - actual_ctr
+                
+                performance = {
+                    'auc': auc, 
+                    'ap': ap,
+                    'actual_ctr': actual_ctr,
+                    'predicted_ctr': predicted_ctr,
+                    'ctr_bias': ctr_bias
+                }
                 logger.info(f"{model_name} performance - AUC: {auc:.4f}, AP: {ap:.4f}")
+                logger.info(f"{model_name} CTR - Actual: {actual_ctr:.4f}, Predicted: {predicted_ctr:.4f}, Bias: {ctr_bias:.6f}")
                 
             except Exception as e:
                 logger.warning(f"Performance calculation failed: {e}")
