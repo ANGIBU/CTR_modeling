@@ -32,6 +32,9 @@ class Config:
     SUBMISSION_PATH = DATA_DIR / "sample_submission.csv"
     SUBMISSION_TEMPLATE_PATH = DATA_DIR / "sample_submission.csv"
     
+    EXPERIMENT_LOG_PATH = LOG_DIR / "experiment_log.txt"
+    EXPERIMENT_COUNTER_PATH = LOG_DIR / "experiment_counter.json"
+    
     NVT_PROCESSED_DIR = DATA_DIR / "nvt_processed"
     NVT_WORKFLOW_DIR = NVT_PROCESSED_DIR / "workflow"
     

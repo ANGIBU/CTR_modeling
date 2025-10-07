@@ -201,6 +201,9 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         else:
             logger.info("FULL MODE: Running with complete dataset for 0.35+ target score")
         
+        from experiment_logger import ExperimentLogger
+        exp_logger = ExperimentLogger(config.LOG_DIR)
+        
         force_memory_cleanup()
         
         logger.info("Essential module import started")
@@ -396,7 +399,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             submission_df.to_csv(submission_path, index=False)
             logger.info(f"Default submission file saved: {submission_path}")
             
-            return {
+            default_results = {
                 'quick_mode': quick_mode,
                 'execution_time': time.time() - start_time,
                 'successful_models': 0,
@@ -405,6 +408,18 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 'submission_rows': len(predictions),
                 'warning': 'No models trained successfully'
             }
+            
+            try:
+                exp_logger.log_experiment(
+                    config=config,
+                    results=default_results,
+                    model_name="None",
+                    notes="No models trained - default submission"
+                )
+            except Exception as e:
+                logger.warning(f"Experiment logging failed: {e}")
+            
+            return default_results
         
         ensemble_enabled = False
         ensemble_used = False
@@ -466,13 +481,25 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             submission_df.to_csv(submission_path, index=False)
             logger.info(f"Default submission file saved: {submission_path}")
             
-            return {
+            no_models_results = {
                 'quick_mode': quick_mode,
                 'execution_time': time.time() - start_time,
                 'successful_models': 0,
                 'submission_file': submission_path,
                 'warning': 'No usable models for prediction'
             }
+            
+            try:
+                exp_logger.log_experiment(
+                    config=config,
+                    results=no_models_results,
+                    model_name="None",
+                    notes="No usable models - default submission"
+                )
+            except Exception as e:
+                logger.warning(f"Experiment logging failed: {e}")
+            
+            return no_models_results
         
         logger.info("5. Submission file generation")
         
@@ -675,6 +702,22 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             
         except Exception as e:
             logger.warning(f"Performance analysis phase failed: {e}")
+        
+        logger.info("7. Experiment logging")
+        try:
+            primary_model = list(trained_models.keys())[0] if trained_models else "Unknown"
+            
+            exp_logger.log_experiment(
+                config=config,
+                results=results,
+                model_name=primary_model,
+                notes=f"Mode: {'Quick' if quick_mode else 'Full'}"
+            )
+            
+            logger.info("Experiment logged successfully")
+            
+        except Exception as e:
+            logger.warning(f"Experiment logging failed: {e}")
         
         return results
         
