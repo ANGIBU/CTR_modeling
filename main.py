@@ -287,7 +287,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         
         logger.info(f"Feature engineering completed - Features: {X_train.shape[1]}")
         
-        logger.info("3. Model training phase (XGBoost GPU optimized)")
+        logger.info("3. Model training phase (Multi-model with ensemble)")
         
         trainer = CTRTrainer(config)
         logger.info("CTR Trainer initialized")
@@ -332,12 +332,8 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             models_to_train = ['logistic']
             logger.info(f"Quick mode: Training only {models_to_train}")
         else:
-            if 'xgboost_gpu' in available_models and gpu_optimization:
-                models_to_train = ['xgboost_gpu']
-                logger.info(f"Full mode: Training XGBoost GPU for 0.35+ target score")
-            else:
-                models_to_train = available_models
-                logger.info(f"Full mode: Training available models {models_to_train}")
+            models_to_train = available_models
+            logger.info(f"Full mode: Training all available models {models_to_train}")
         
         trained_models = {}
         model_performances = {}
@@ -412,14 +408,15 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         
         ensemble_enabled = False
         ensemble_used = False
+        min_models_for_ensemble = config.ENSEMBLE_CONFIG.get('min_models_for_ensemble', 2)
         
-        if not quick_mode and len(trained_models) > 1:
-            logger.info("4. Ensemble preparation")
+        if not quick_mode and len(trained_models) >= min_models_for_ensemble and config.ENSEMBLE_CONFIG.get('enable_ensemble', True):
+            logger.info(f"4. Ensemble preparation ({len(trained_models)} models available)")
             try:
                 fitted_models = {name: model for name, model in trained_models.items() 
                                if hasattr(model, 'is_fitted') and model.is_fitted}
                 
-                if len(fitted_models) > 1:
+                if len(fitted_models) >= min_models_for_ensemble:
                     ensemble_manager.train_all_ensembles(X_val_split, y_val_split)
                     ensemble_enabled = True
                     ensemble_used = True
@@ -431,7 +428,12 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 logger.warning(f"Ensemble preparation failed: {e}")
                 ensemble_used = False
         else:
-            logger.info("4. Ensemble skipped (quick mode or insufficient models)")
+            if quick_mode:
+                logger.info("4. Ensemble skipped (quick mode)")
+            elif len(trained_models) < min_models_for_ensemble:
+                logger.info(f"4. Ensemble skipped (insufficient models: {len(trained_models)} < {min_models_for_ensemble})")
+            else:
+                logger.info("4. Ensemble skipped (disabled in config)")
         
         usable_models = {name: model for name, model in trained_models.items()
                         if hasattr(model, 'is_fitted') and model.is_fitted}

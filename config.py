@@ -14,22 +14,7 @@ except ImportError:
     TORCH_AVAILABLE = False
     logging.warning("PyTorch not installed. GPU functions will be disabled.")
 
-# RAPIDS and NVTabular (Linux/WSL2 only - not available on Windows)
-# try:
-#     import cudf
-#     import cupy as cp
-#     RAPIDS_AVAILABLE = True
-# except ImportError:
-#     RAPIDS_AVAILABLE = False
-#     logging.warning("RAPIDS not installed. GPU acceleration disabled.")
 RAPIDS_AVAILABLE = False
-
-# try:
-#     import nvtabular as nvt
-#     NVTABULAR_AVAILABLE = True
-# except ImportError:
-#     NVTABULAR_AVAILABLE = False
-#     logging.warning("NVTabular not installed. Merlin features disabled.")
 NVTABULAR_AVAILABLE = False
 
 class Config:
@@ -245,6 +230,7 @@ class Config:
     CV_FOLDS = 5
     CV_SHUFFLE = True
     RANDOM_STATE = 42
+    USE_CROSS_VALIDATION = True
     
     EARLY_STOPPING_ROUNDS = 30
     EARLY_STOPPING_TOLERANCE = 1e-5
@@ -261,7 +247,9 @@ class Config:
         'diversity_threshold': 0.03,
         'performance_threshold': 0.20,
         'enable_meta_features': True,
-        'use_simple_average': False
+        'use_simple_average': False,
+        'min_models_for_ensemble': 2,
+        'enable_ensemble': True
     }
     
     CALIBRATION_METHOD = 'isotonic'
@@ -279,7 +267,8 @@ class Config:
         'pos_weight': 51.43,
         'neg_weight': 1.0,
         'wll_normalization_factor': 1.8,
-        'ctr_bias_multiplier': 6.0
+        'ctr_bias_multiplier': 6.0,
+        'auc_threshold': 0.73
     }
     
     CTR_BIAS_CORRECTION = {

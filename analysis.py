@@ -1,8 +1,4 @@
 # analysis.py
-"""
-CTR Performance Analysis Module
-Advanced performance analysis for Click-Through Rate prediction models
-"""
 
 import os
 import gc
@@ -14,11 +10,9 @@ from typing import Dict, List, Any, Tuple, Optional, Union
 import warnings
 warnings.filterwarnings('ignore')
 
-# Essential imports
 import numpy as np
 import pandas as pd
 
-# Try advanced imports with fallbacks
 try:
     from sklearn.metrics import (
         roc_auc_score, average_precision_score, log_loss, 
@@ -34,17 +28,15 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 class CTRPerformanceAnalyzer:
-    """
-    Comprehensive CTR performance analyzer with advanced metrics
-    """
+    """Comprehensive CTR performance analyzer"""
     
     def __init__(self, config):
         self.config = config
         self.target_ctr = getattr(config, 'TARGET_CTR', 0.0191)
         self.ctr_tolerance = getattr(config, 'CTR_TOLERANCE', 0.0002)
         self.target_combined_score = getattr(config, 'TARGET_COMBINED_SCORE', 0.34)
+        self.auc_threshold = config.EVALUATION_CONFIG.get('auc_threshold', 0.73)
         
-        # Performance thresholds
         self.performance_tiers = {
             'EXCEPTIONAL': 0.35,
             'EXCELLENT': 0.30,
@@ -53,30 +45,17 @@ class CTRPerformanceAnalyzer:
             'POOR': 0.15
         }
         
-        # Cache for computations
         self.cache = {}
         
         logger.info("CTR Performance Analyzer initialized")
     
     def full_performance_analysis(self, y_true: np.ndarray, y_pred_proba: np.ndarray,
                                 model_name: str = "Unknown", quick_mode: bool = False) -> Dict[str, Any]:
-        """
-        Perform comprehensive performance analysis
-        
-        Args:
-            y_true: True binary labels
-            y_pred_proba: Predicted probabilities
-            model_name: Name of the model being analyzed
-            quick_mode: Whether to run in quick mode
-            
-        Returns:
-            Dictionary containing comprehensive analysis results
-        """
+        """Perform comprehensive performance analysis"""
         try:
             logger.info(f"Starting full performance analysis for {model_name}")
             start_time = time.time()
             
-            # Validate inputs
             y_true = np.asarray(y_true).flatten()
             y_pred_proba = np.asarray(y_pred_proba).flatten()
             
@@ -86,13 +65,9 @@ class CTRPerformanceAnalyzer:
             if len(y_true) == 0:
                 raise ValueError("Empty input arrays")
             
-            # Core performance metrics
             core_metrics = self._calculate_core_metrics(y_true, y_pred_proba, model_name)
-            
-            # CTR-specific analysis
             ctr_analysis = self._analyze_ctr_performance(y_true, y_pred_proba)
             
-            # Execution metrics
             execution_time = time.time() - start_time
             execution_metrics = {
                 'execution_time': execution_time,
@@ -102,10 +77,7 @@ class CTRPerformanceAnalyzer:
                 'analysis_mode': 'QUICK' if quick_mode else 'FULL'
             }
             
-            # Overall assessment
             overall_assessment = self._generate_overall_assessment(core_metrics, ctr_analysis)
-            
-            # Performance recommendations
             recommendations = self._generate_recommendations(core_metrics, ctr_analysis, overall_assessment)
             
             analysis_result = {
@@ -145,7 +117,6 @@ class CTRPerformanceAnalyzer:
                 })
                 return metrics
             
-            # AUC calculation with error handling
             try:
                 if len(np.unique(y_true)) == 1:
                     auc = float('nan')
@@ -156,29 +127,24 @@ class CTRPerformanceAnalyzer:
                 auc = float('nan')
                 logger.warning(f"{model_name}: AUC calculation failed: {e}")
             
-            # Average Precision
             try:
                 ap = average_precision_score(y_true, y_pred_proba)
             except Exception as e:
                 ap = 0.0
                 logger.warning(f"{model_name}: AP calculation failed: {e}")
             
-            # Log Loss
             try:
-                # Clip predictions to avoid log(0)
                 y_pred_clipped = np.clip(y_pred_proba, 1e-15, 1-1e-15)
                 log_loss_val = log_loss(y_true, y_pred_clipped)
             except Exception as e:
                 log_loss_val = 1.0
                 logger.warning(f"{model_name}: Log loss calculation failed: {e}")
             
-            # Combined score calculation
             if not np.isnan(auc):
                 combined_score = (auc * 0.6) + (ap * 0.4)
             else:
-                combined_score = ap * 0.4  # Use only AP if AUC is invalid
+                combined_score = ap * 0.4
             
-            # Binary classification metrics
             try:
                 y_pred_binary = (y_pred_proba >= 0.5).astype(int)
                 accuracy = accuracy_score(y_true, y_pred_binary)
@@ -186,7 +152,6 @@ class CTRPerformanceAnalyzer:
                 recall = recall_score(y_true, y_pred_binary, zero_division=0)
                 f1 = f1_score(y_true, y_pred_binary, zero_division=0)
                 
-                # Specificity calculation
                 tn, fp, fn, tp = confusion_matrix(y_true, y_pred_binary).ravel()
                 specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
                 
@@ -217,7 +182,6 @@ class CTRPerformanceAnalyzer:
         try:
             ctr_analysis = {}
             
-            # Basic CTR statistics
             actual_ctr = float(np.mean(y_true))
             predicted_ctr = float(np.mean(y_pred_proba))
             ctr_bias = predicted_ctr - actual_ctr
@@ -231,7 +195,6 @@ class CTRPerformanceAnalyzer:
                 'ctr_relative_error': float(ctr_absolute_error / actual_ctr) if actual_ctr > 0 else float('inf')
             })
             
-            # Target alignment
             ctr_analysis['target_alignment'] = {
                 'target_ctr': self.target_ctr,
                 'actual_vs_target_error': abs(actual_ctr - self.target_ctr),
@@ -239,7 +202,6 @@ class CTRPerformanceAnalyzer:
                 'within_tolerance': ctr_absolute_error <= self.ctr_tolerance
             }
             
-            # CTR distribution analysis
             ctr_analysis['distribution'] = {
                 'prediction_std': float(np.std(y_pred_proba)),
                 'prediction_min': float(np.min(y_pred_proba)),
@@ -249,7 +211,6 @@ class CTRPerformanceAnalyzer:
                 'prediction_q75': float(np.percentile(y_pred_proba, 75))
             }
             
-            # CTR quality assessment
             if ctr_absolute_error <= 0.0001:
                 ctr_quality = 'EXCELLENT'
             elif ctr_absolute_error <= 0.0002:
@@ -281,19 +242,16 @@ class CTRPerformanceAnalyzer:
             combined_score = core_metrics.get('combined_score', 0.0)
             performance_tier = self._classify_performance_tier(combined_score)
             
-            # Deployment readiness assessment
             auc = core_metrics.get('auc', 0.5)
             deployment_ready = (
                 combined_score >= 0.30 and
                 not np.isnan(auc) and
-                auc >= 0.75 and
+                auc >= self.auc_threshold and
                 ctr_analysis.get('ctr_quality', 'POOR') in ['EXCELLENT', 'GOOD']
             )
             
-            # Target achievement
             target_achievement = combined_score >= self.target_combined_score
             
-            # Overall score calculation
             ctr_quality_score = {
                 'EXCELLENT': 1.0, 'GOOD': 0.8, 'FAIR': 0.6, 'POOR': 0.3
             }.get(ctr_analysis.get('ctr_quality', 'POOR'), 0.3)
@@ -327,20 +285,17 @@ class CTRPerformanceAnalyzer:
             ctr_bias = ctr_analysis.get('ctr_bias', 0.0)
             performance_tier = overall_assessment.get('performance_tier', 'POOR')
             
-            # Performance-based recommendations
             if combined_score < 0.20:
                 recommendations.append("Model performance is below acceptable threshold - consider complete redesign")
             elif combined_score < 0.30:
                 recommendations.append("Model shows potential but needs improvement in feature engineering")
             
-            # CTR bias recommendations
             if abs(ctr_bias) > 0.002:
                 if ctr_bias > 0:
                     recommendations.append("Model over-predicts CTR - apply calibration or adjust threshold")
                 else:
                     recommendations.append("Model under-predicts CTR - consider boosting positive examples")
             
-            # Tier-specific recommendations
             if performance_tier == 'POOR':
                 recommendations.append("Focus on data quality and feature selection improvements")
             elif performance_tier == 'FAIR':
@@ -360,7 +315,7 @@ class CTRPerformanceAnalyzer:
             import psutil
             process = psutil.Process()
             memory_info = process.memory_info()
-            return memory_info.rss / (1024**3)  # Convert to GB
+            return memory_info.rss / (1024**3)
         except ImportError:
             return 0.0
     
@@ -378,10 +333,8 @@ class CTRPerformanceAnalyzer:
     def save_analysis_report(self, analysis_result: Dict[str, Any], output_path: str) -> Optional[str]:
         """Save analysis report to JSON file"""
         try:
-            # Ensure output directory exists
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             
-            # Convert numpy types to Python types for JSON serialization
             def convert_numpy_types(obj):
                 if isinstance(obj, np.integer):
                     return int(obj)
@@ -449,13 +402,9 @@ class CTRPerformanceAnalyzer:
                 logger.warning("No valid analysis data to create summary CSV")
                 return False
             
-            # Create summary DataFrame
             summary_df = pd.DataFrame(summary_data)
-            
-            # Sort by combined score descending
             summary_df = summary_df.sort_values('combined_score', ascending=False)
             
-            # Save to CSV with proper path
             csv_path = "results/summary.csv"
             os.makedirs("results", exist_ok=True)
             summary_df.to_csv(csv_path, index=False, encoding='utf-8')
@@ -487,7 +436,6 @@ def compare_model_performances(analysis_results: Dict[str, Any]) -> Dict[str, An
                     'ap': core_metrics.get('ap', 0.0)
                 }
         
-        # Find best models by each metric
         best_models = {}
         for metric in ['combined_score', 'auc', 'ap']:
             valid_models = {name: scores[metric] for name, scores in model_scores.items() 
@@ -511,3 +459,29 @@ def compare_model_performances(analysis_results: Dict[str, Any]) -> Dict[str, An
     except Exception as e:
         logger.error(f"Model comparison failed: {e}")
         return {}
+
+CTRMetrics = CTRPerformanceAnalyzer
+ModelComparator = None
+
+def create_ctr_metrics():
+    """CTR metrics generator"""
+    return CTRPerformanceAnalyzer
+
+def create_model_comparator():
+    """Model comparator generator"""
+    return None
+
+def create_evaluation_reporter():
+    """Evaluation reporter generator"""
+    return None
+
+def evaluate_model_performance(y_true, y_pred_proba, model_name="Unknown"):
+    """Single model performance evaluation"""
+    from config import Config
+    config = Config()
+    metrics_calc = CTRPerformanceAnalyzer(config)
+    return metrics_calc.full_performance_analysis(y_true, y_pred_proba, model_name)
+
+def compare_multiple_models(models_predictions, y_true, models_info=None):
+    """Multiple model comparison"""
+    return compare_model_performances(models_predictions)

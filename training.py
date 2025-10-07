@@ -13,7 +13,7 @@ warnings.filterwarnings('ignore')
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.metrics import roc_auc_score, average_precision_score, log_loss
 
@@ -153,7 +153,7 @@ class CTRHyperparameterOptimizer:
         return {}
 
 class CTRModelTrainer:
-    """Main trainer class for CTR models with memory efficient learning"""
+    """Main trainer class for CTR models with cross-validation support"""
     
     def __init__(self, config: Config):
         self.config = config
@@ -166,6 +166,9 @@ class CTRModelTrainer:
         self.best_params = {}
         self.model_performance = {}
         self.calibration_enabled = config.CALIBRATION_MANDATORY
+        self.use_cv = config.USE_CROSS_VALIDATION
+        self.cv_folds = config.CV_FOLDS
+        self.cv_results = {}
         
     def set_quick_mode(self, enabled: bool):
         """Set quick mode"""
@@ -201,6 +204,140 @@ class CTRModelTrainer:
         
         return X_train, y_train
     
+    def train_model_with_cv(self,
+                           model_class: Type,
+                           model_name: str,
+                           X_train: pd.DataFrame,
+                           y_train: pd.Series) -> Optional[Any]:
+        """Train model with cross-validation"""
+        
+        logger.info(f"Starting {model_name} model training with {self.cv_folds}-fold CV")
+        
+        try:
+            start_time = time.time()
+            
+            self.initialize_trainer()
+            self.memory_tracker.force_cleanup()
+            logger.info("Memory cleanup completed")
+            
+            memory_status = self.memory_tracker.get_memory_status()
+            logger.info(f"Pre-training memory: {memory_status['available_gb']:.1f}GB available")
+            
+            X_train_sampled, y_train_sampled = self._sample_for_memory(X_train, y_train, max_samples=5000000)
+            
+            best_params = self.hyperparameter_optimizer._get_default_params(model_name)
+            if not best_params:
+                logger.warning(f"Using default parameters for {model_name}")
+                best_params = {}
+            else:
+                logger.info(f"Using optimized parameters for {model_name}")
+            
+            skf = StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=42)
+            
+            cv_scores = []
+            cv_models = []
+            
+            for fold, (train_idx, val_idx) in enumerate(skf.split(X_train_sampled, y_train_sampled), 1):
+                logger.info(f"Training fold {fold}/{self.cv_folds}")
+                
+                X_fold_train = X_train_sampled.iloc[train_idx]
+                y_fold_train = y_train_sampled.iloc[train_idx]
+                X_fold_val = X_train_sampled.iloc[val_idx]
+                y_fold_val = y_train_sampled.iloc[val_idx]
+                
+                model = model_class()
+                
+                if hasattr(model, 'set_quick_mode'):
+                    model.set_quick_mode(self.quick_mode)
+                
+                if hasattr(model, 'fit_with_params'):
+                    model.fit_with_params(X_fold_train, y_fold_train, **best_params)
+                else:
+                    model.fit(X_fold_train, y_fold_train, X_fold_val, y_fold_val)
+                
+                if self.calibration_enabled and hasattr(model, 'apply_calibration'):
+                    calibration_method = self.config.CALIBRATION_METHOD
+                    calibration_success = model.apply_calibration(X_fold_val, y_fold_val, method=calibration_method)
+                    
+                    if calibration_success:
+                        logger.info(f"{model_name} fold {fold}: Calibration applied successfully")
+                
+                try:
+                    if hasattr(model, 'predict_proba'):
+                        y_pred_proba = model.predict_proba(X_fold_val)
+                        if len(y_pred_proba.shape) > 1:
+                            y_pred_proba = y_pred_proba[:, 1]
+                    else:
+                        y_pred_proba = model.predict(X_fold_val)
+                    
+                    auc = roc_auc_score(y_fold_val, y_pred_proba) if len(np.unique(y_fold_val)) > 1 else 0.5
+                    ap = average_precision_score(y_fold_val, y_pred_proba)
+                    
+                    actual_ctr = y_fold_val.mean()
+                    predicted_ctr = y_pred_proba.mean()
+                    ctr_bias = predicted_ctr - actual_ctr
+                    
+                    fold_score = {
+                        'fold': fold,
+                        'auc': auc,
+                        'ap': ap,
+                        'ctr_bias': ctr_bias,
+                        'actual_ctr': actual_ctr,
+                        'predicted_ctr': predicted_ctr
+                    }
+                    
+                    cv_scores.append(fold_score)
+                    cv_models.append(model)
+                    
+                    logger.info(f"{model_name} fold {fold} - AUC: {auc:.4f}, AP: {ap:.4f}, CTR Bias: {ctr_bias:.6f}")
+                    
+                except Exception as e:
+                    logger.warning(f"Fold {fold} evaluation failed: {e}")
+                    continue
+                
+                self.memory_tracker.force_cleanup()
+            
+            if not cv_models:
+                logger.error(f"No models successfully trained for {model_name}")
+                return None
+            
+            avg_auc = np.mean([s['auc'] for s in cv_scores])
+            avg_ap = np.mean([s['ap'] for s in cv_scores])
+            avg_ctr_bias = np.mean([s['ctr_bias'] for s in cv_scores])
+            
+            logger.info(f"{model_name} CV Results - Avg AUC: {avg_auc:.4f}, Avg AP: {avg_ap:.4f}, Avg CTR Bias: {avg_ctr_bias:.6f}")
+            
+            best_model = cv_models[0]
+            
+            self.cv_results[model_name] = {
+                'fold_scores': cv_scores,
+                'avg_auc': avg_auc,
+                'avg_ap': avg_ap,
+                'avg_ctr_bias': avg_ctr_bias,
+                'models': cv_models
+            }
+            
+            self.trained_models[model_name] = {
+                'model': best_model,
+                'params': best_params,
+                'performance': {
+                    'auc': avg_auc,
+                    'average_precision': avg_ap,
+                    'ctr_bias': avg_ctr_bias
+                },
+                'training_time': time.time() - start_time,
+                'gpu_trained': self.gpu_available,
+                'calibrated': getattr(best_model, 'is_calibrated', False),
+                'cv_results': cv_scores
+            }
+            
+            logger.info(f"{model_name} model training completed successfully")
+            return best_model
+            
+        except Exception as e:
+            logger.error(f"{model_name} model training failed: {e}")
+            return None
+    
     def train_model(self,
                     model_class: Type,
                     model_name: str,
@@ -209,6 +346,9 @@ class CTRModelTrainer:
                     X_val: Optional[pd.DataFrame] = None,
                     y_val: Optional[pd.Series] = None) -> Optional[Any]:
         """Train individual model with memory management and calibration"""
+        
+        if self.use_cv and X_val is None:
+            return self.train_model_with_cv(model_class, model_name, X_train, y_train)
         
         logger.info(f"Starting {model_name} model training")
         
@@ -321,8 +461,8 @@ class CTRModelTrainer:
                             model_configs: List[Dict[str, Any]],
                             X_train: pd.DataFrame,
                             y_train: pd.Series,
-                            X_val: pd.DataFrame,
-                            y_val: pd.Series) -> Dict[str, Any]:
+                            X_val: Optional[pd.DataFrame] = None,
+                            y_val: Optional[pd.Series] = None) -> Dict[str, Any]:
         """Train multiple models"""
         
         logger.info(f"Training {len(model_configs)} models")
@@ -383,7 +523,10 @@ class CTRModelTrainer:
             'quick_mode': self.quick_mode,
             'gpu_used': self.gpu_available,
             'training_completed': True,
-            'calibration_enabled': self.calibration_enabled
+            'calibration_enabled': self.calibration_enabled,
+            'cv_enabled': self.use_cv,
+            'cv_folds': self.cv_folds if self.use_cv else 0,
+            'cv_results': self.cv_results
         }
 
 class CTRTrainer(CTRModelTrainer):
@@ -408,7 +551,8 @@ class CTRTrainer(CTRModelTrainer):
         return available_models
     
     def train_model(self, model_name: str, X_train: pd.DataFrame, y_train: pd.Series,
-                   X_val: pd.DataFrame, y_val: pd.Series, quick_mode: bool = False) -> Tuple[Any, Dict[str, float]]:
+                   X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None, 
+                   quick_mode: bool = False) -> Tuple[Any, Dict[str, float]]:
         """Train model with simplified interface"""
         
         logger.info(f"Starting {model_name} model training")
@@ -462,11 +606,26 @@ class CTRTrainer(CTRModelTrainer):
             if hasattr(model, 'fit_with_params'):
                 model.fit_with_params(X_train, y_train, **params)
             else:
-                model.fit(X_train, y_train, X_val, y_val)
+                if X_val is not None and y_val is not None:
+                    model.fit(X_train, y_train, X_val, y_val)
+                else:
+                    X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
+                        X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
+                    )
+                    model.fit(X_train_split, y_train_split, X_val_split, y_val_split)
+                    X_val = X_val_split
+                    y_val = y_val_split
             
             logger.info(f"{model_name}: Training completed successfully")
             
             if self.calibration_enabled and hasattr(model, 'apply_calibration'):
+                if X_val is None or y_val is None:
+                    X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
+                        X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
+                    )
+                    X_val = X_val_split
+                    y_val = y_val_split
+                
                 logger.info(f"Applying calibration to {model_name}")
                 calibration_method = self.config.CALIBRATION_METHOD
                 calibration_success = model.apply_calibration(X_val, y_val, method=calibration_method)
@@ -477,6 +636,13 @@ class CTRTrainer(CTRModelTrainer):
                     logger.warning(f"{model_name}: Calibration failed")
             
             try:
+                if X_val is None or y_val is None:
+                    X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
+                        X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
+                    )
+                    X_val = X_val_split
+                    y_val = y_val_split
+                
                 if hasattr(model, 'predict_proba'):
                     y_pred_proba = model.predict_proba(X_val)
                     if len(y_pred_proba.shape) > 1:
