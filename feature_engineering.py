@@ -19,21 +19,16 @@ from data_loader import MemoryMonitor
 logger = logging.getLogger(__name__)
 
 class CTRFeatureEngineer:
-    """CTR feature engineering optimized for tree models"""
+    """CTR feature engineering for tree models"""
     
     def __init__(self, config: Config = Config):
         self.config = config
         self.memory_monitor = MemoryMonitor()
         
-        self.quick_mode = False
-        self.memory_efficient_mode = True
-        
         self.label_encoders = {}
         self.feature_stats = {}
         self.numerical_features = []
         self.categorical_features = []
-        self.target_encoding_features = []
-        self.interaction_features = []
         self.removed_columns = []
         self.original_feature_order = []
         self.final_feature_columns = []
@@ -60,71 +55,19 @@ class CTRFeatureEngineer:
             'total_features_generated': 0
         }
     
-    def set_memory_efficient_mode(self, enabled: bool):
-        """Enable or disable memory efficient mode"""
-        self.memory_efficient_mode = enabled
-        if enabled:
-            logger.info("Memory efficient mode enabled")
-        else:
-            logger.info("Memory efficient mode disabled")
-    
-    def set_quick_mode(self, enabled: bool):
-        """Enable or disable quick mode"""
-        self.quick_mode = enabled
-        if enabled:
-            logger.info("Quick mode enabled")
-            self.memory_efficient_mode = True
-        else:
-            logger.info("Quick mode disabled")
-    
     def engineer_features(self, 
                          train_df: pd.DataFrame, 
                          test_df: pd.DataFrame, 
                          target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Main feature engineering pipeline for tree models"""
-        if self.quick_mode:
-            logger.info("=== Quick Mode Feature Engineering Started ===")
-            return self.create_quick_features(train_df, test_df, target_col)
-        else:
-            logger.info("=== Tree Model Feature Engineering Started ===")
-            return self.create_tree_model_features(train_df, test_df, target_col)
-    
-    def create_quick_features(self,
-                            train_df: pd.DataFrame,
-                            test_df: pd.DataFrame,
-                            target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create basic features for quick testing"""
-        logger.info("Creating basic features for quick mode")
-        
-        try:
-            self._initialize_processing(train_df, test_df, target_col)
-            
-            X_train, X_test, y_train = self._prepare_basic_data(train_df, test_df, target_col)
-            
-            available_features = list(set(self.true_categorical + self.all_continuous) & set(X_train.columns))
-            X_train = X_train[available_features]
-            X_test = X_test[available_features]
-            
-            X_train, X_test = self._encode_categorical_minimal(X_train, X_test)
-            X_train, X_test = self._fill_missing_values(X_train, X_test)
-            X_train, X_test = self._ensure_float32(X_train, X_test)
-            
-            self.final_feature_columns = list(X_train.columns)
-            
-            logger.info(f"Quick feature engineering completed: {X_train.shape[1]} features")
-            logger.info(f"Final features - Train: {X_train.shape}, Test: {X_test.shape}")
-            
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.error(f"Quick feature engineering failed: {e}")
-            return self._create_minimal_features(train_df, test_df, target_col)
+        logger.info("=== Tree Model Feature Engineering Started ===")
+        return self.create_tree_model_features(train_df, test_df, target_col)
     
     def create_tree_model_features(self, 
                                   train_df: pd.DataFrame, 
                                   test_df: pd.DataFrame, 
                                   target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create features optimized for tree models"""
+        """Create features for tree models"""
         logger.info("Creating features for tree models")
         
         try:
@@ -144,16 +87,6 @@ class CTRFeatureEngineer:
             
             X_train, X_test = self._fill_missing_values_efficient(X_train, X_test)
             self._force_memory_cleanup()
-            
-            memory_status = self.memory_monitor.get_memory_status()
-            if memory_status['available_gb'] > 8 and not self.quick_mode:
-                X_train, X_test = self._create_target_encoding_minimal(X_train, X_test, y_train)
-                self._force_memory_cleanup()
-            
-            memory_status = self.memory_monitor.get_memory_status()
-            if memory_status['available_gb'] > 10 and not self.quick_mode:
-                X_train, X_test = self._create_interaction_features(X_train, X_test)
-                self._force_memory_cleanup()
             
             X_train, X_test = self._ensure_float32(X_train, X_test)
             self._force_memory_cleanup()
@@ -217,21 +150,6 @@ class CTRFeatureEngineer:
             logger.error(f"Categorical encoding failed: {e}")
             return X_train, X_test
     
-    def _fill_missing_values(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Fill missing values"""
-        try:
-            X_train = X_train.fillna(0)
-            X_test = X_test.fillna(0)
-            
-            X_train = X_train.replace([np.inf, -np.inf], 0)
-            X_test = X_test.replace([np.inf, -np.inf], 0)
-            
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.error(f"Missing value filling failed: {e}")
-            return X_train, X_test
-    
     def _fill_missing_values_efficient(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Fill missing values with memory efficiency"""
         try:
@@ -292,109 +210,6 @@ class CTRFeatureEngineer:
             logger.error(f"Float32 conversion failed: {e}")
             return X_train, X_test
     
-    def _create_target_encoding_minimal(self, X_train: pd.DataFrame, X_test: pd.DataFrame,
-                                       y_train: pd.Series) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Minimal target encoding for categorical features"""
-        try:
-            logger.info("Creating target encoding features")
-            
-            for col in self.categorical_features[:3]:
-                if col in X_train.columns:
-                    try:
-                        kf = KFold(n_splits=3, shuffle=True, random_state=42)
-                        encoded_col = np.zeros(len(X_train), dtype='float32')
-                        
-                        for train_idx, val_idx in kf.split(X_train):
-                            X_fold_train = X_train.iloc[train_idx]
-                            y_fold_train = y_train.iloc[train_idx]
-                            
-                            means = X_fold_train[[col]].assign(target=y_fold_train).groupby(col)['target'].mean()
-                            
-                            encoded_col[val_idx] = X_train.iloc[val_idx][col].map(means).fillna(y_train.mean()).astype('float32')
-                        
-                        train_means = X_train[[col]].assign(target=y_train).groupby(col)['target'].mean()
-                        test_encoded = X_test[col].map(train_means).fillna(y_train.mean()).astype('float32')
-                        
-                        feature_name = f"{col}_target_encoded"
-                        X_train[feature_name] = encoded_col
-                        X_test[feature_name] = test_encoded
-                        self.target_encoding_features.append(feature_name)
-                        
-                    except Exception as e:
-                        logger.warning(f"Target encoding failed for {col}: {e}")
-                        continue
-            
-            logger.info(f"Target encoding completed: {len(self.target_encoding_features)} features")
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.error(f"Target encoding features failed: {e}")
-            return X_train, X_test
-    
-    def _create_interaction_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create interaction features between continuous variables"""
-        try:
-            logger.info("Creating interaction features")
-            
-            continuous_cols = [col for col in X_train.columns if col in self.all_continuous]
-            
-            if len(continuous_cols) < 2:
-                logger.warning("Not enough continuous features for interactions")
-                return X_train, X_test
-            
-            important_features = []
-            for prefix in ['feat_e', 'feat_d', 'history_a']:
-                important_features.extend([col for col in continuous_cols if col.startswith(prefix)])
-            
-            important_features = important_features[:15]
-            
-            interaction_count = 0
-            max_interactions = self.config.FEATURE_ENGINEERING_CONFIG['max_numeric_for_interaction']
-            
-            for i in range(len(important_features)):
-                for j in range(i + 1, len(important_features)):
-                    if interaction_count >= max_interactions:
-                        break
-                    
-                    col1 = important_features[i]
-                    col2 = important_features[j]
-                    
-                    try:
-                        mult_name = f"{col1}_x_{col2}"
-                        X_train[mult_name] = (X_train[col1] * X_train[col2]).astype('float32')
-                        X_test[mult_name] = (X_test[col1] * X_test[col2]).astype('float32')
-                        self.interaction_features.append(mult_name)
-                        interaction_count += 1
-                        
-                        if interaction_count >= max_interactions:
-                            break
-                        
-                        ratio_name = f"{col1}_div_{col2}"
-                        denominator_train = X_train[col2].replace(0, 1e-10)
-                        denominator_test = X_test[col2].replace(0, 1e-10)
-                        X_train[ratio_name] = (X_train[col1] / denominator_train).astype('float32')
-                        X_test[ratio_name] = (X_test[col1] / denominator_test).astype('float32')
-                        
-                        X_train[ratio_name] = X_train[ratio_name].replace([np.inf, -np.inf], 0).fillna(0)
-                        X_test[ratio_name] = X_test[ratio_name].replace([np.inf, -np.inf], 0).fillna(0)
-                        
-                        self.interaction_features.append(ratio_name)
-                        interaction_count += 1
-                        
-                    except Exception as e:
-                        logger.warning(f"Interaction creation failed for {col1} and {col2}: {e}")
-                        continue
-                
-                if interaction_count >= max_interactions:
-                    break
-            
-            logger.info(f"Interaction features created: {len(self.interaction_features)} features")
-            return X_train, X_test
-            
-        except Exception as e:
-            logger.error(f"Interaction feature creation failed: {e}")
-            return X_train, X_test
-    
     def _initialize_processing(self, train_df: pd.DataFrame, test_df: pd.DataFrame, target_col: str):
         """Initialize feature engineering processing"""
         try:
@@ -404,8 +219,7 @@ class CTRFeatureEngineer:
             
             self.original_feature_order = sorted([col for col in train_df.columns if col != self.target_column])
             
-            mode_info = "QUICK MODE" if self.quick_mode else "TREE MODEL MODE"
-            logger.info(f"Feature engineering initialization ({mode_info})")
+            logger.info(f"Feature engineering initialization (TREE MODEL MODE)")
             logger.info(f"Initial data: Training {train_df.shape}, Test {test_df.shape}")
             logger.info(f"Target column: {self.target_column}")
             logger.info(f"Original feature count: {len(self.original_feature_order)}")
@@ -478,13 +292,8 @@ class CTRFeatureEngineer:
             self.processing_stats['feature_types_count'] = {
                 'original': len(self.original_feature_order),
                 'categorical': len(self.categorical_features),
-                'target_encoding': len(self.target_encoding_features),
-                'interaction': len(self.interaction_features),
                 'final': len(self.final_feature_columns)
             }
-            
-            total_generated = len(self.target_encoding_features) + len(self.interaction_features)
-            self.processing_stats['total_features_generated'] = total_generated
             
             logger.info(f"Feature engineering finalized - {len(self.final_feature_columns)} features in {self.processing_stats['processing_time']:.2f}s")
             

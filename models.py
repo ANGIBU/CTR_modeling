@@ -141,197 +141,6 @@ class MemoryMonitor:
         except Exception:
             pass
 
-class CTRBiasCorrector:
-    """CTR bias correction with strong target alignment"""
-    
-    def __init__(self, target_ctr: float = 0.0191):
-        self.target_ctr = target_ctr
-        self.correction_factor = 1.0
-        self.scale_factor = 1.0
-        self.is_fitted = False
-        
-    def fit(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Fit bias corrector with strong CTR alignment"""
-        try:
-            actual_ctr = np.mean(y_true)
-            predicted_ctr = np.mean(y_pred_proba)
-            
-            if predicted_ctr > 0.001:
-                self.correction_factor = self.target_ctr / predicted_ctr
-                self.scale_factor = 1.0
-            else:
-                self.correction_factor = 1.0
-                self.scale_factor = 1.0
-            
-            self.is_fitted = True
-            logger.info(f"CTR bias corrector fitted: factor={self.correction_factor:.4f}, target={self.target_ctr:.4f}")
-            
-        except Exception as e:
-            logger.warning(f"CTR bias correction fitting failed: {e}")
-            self.correction_factor = 1.0
-            self.scale_factor = 1.0
-            self.is_fitted = False
-    
-    def transform(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """Apply strong bias correction to match target CTR"""
-        try:
-            if not self.is_fitted:
-                return y_pred_proba
-            
-            corrected = y_pred_proba * self.correction_factor
-            corrected = np.clip(corrected, 1e-7, 0.5)
-            
-            corrected_ctr = np.mean(corrected)
-            if abs(corrected_ctr - self.target_ctr) > 0.002:
-                final_scale = self.target_ctr / corrected_ctr if corrected_ctr > 0 else 1.0
-                corrected = corrected * final_scale
-                corrected = np.clip(corrected, 1e-7, 0.5)
-            
-            return corrected
-            
-        except Exception as e:
-            logger.warning(f"CTR bias correction application failed: {e}")
-            return y_pred_proba
-
-class EnhancedMultiMethodCalibrator:
-    """Multi-method calibration with strong CTR correction"""
-    
-    def __init__(self):
-        self.calibration_models = {}
-        self.best_method = None
-        self.ctr_corrector = CTRBiasCorrector()
-        self.is_fitted = False
-        
-    def fit(self, y_true: np.ndarray, y_pred_proba: np.ndarray, method: str = 'auto'):
-        """Fit calibration models"""
-        try:
-            self.ctr_corrector.fit(y_true, y_pred_proba)
-            
-            try:
-                isotonic = IsotonicRegression(out_of_bounds='clip')
-                isotonic.fit(y_pred_proba, y_true)
-                self.calibration_models['isotonic'] = isotonic
-            except Exception:
-                pass
-            
-            try:
-                platt = LogisticRegression()
-                platt.fit(y_pred_proba.reshape(-1, 1), y_true)
-                self.calibration_models['platt'] = platt
-            except Exception:
-                pass
-            
-            if SCIPY_AVAILABLE:
-                beta_params = self._fit_beta_calibration(y_true, y_pred_proba)
-                if beta_params:
-                    self.calibration_models['beta'] = beta_params
-            
-            if method == 'auto':
-                self._select_best_method(y_true, y_pred_proba)
-            else:
-                self.best_method = method if method in self.calibration_models else None
-            
-            self.is_fitted = True
-            logger.info(f"Calibration fitted: {len(self.calibration_models)} methods available")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Calibration fitting failed: {e}")
-            return False
-    
-    def predict_proba(self, y_pred_proba: np.ndarray) -> np.ndarray:
-        """Apply calibration with strong CTR correction"""
-        try:
-            if not self.is_fitted:
-                return self.ctr_corrector.transform(y_pred_proba)
-            
-            if self.best_method and self.best_method in self.calibration_models:
-                calibrated = self._predict_with_method(y_pred_proba, self.best_method)
-                if calibrated is not None:
-                    calibrated = self.ctr_corrector.transform(calibrated)
-                    return np.clip(calibrated, 1e-7, 0.5)
-            
-            return self.ctr_corrector.transform(y_pred_proba)
-            
-        except Exception as e:
-            logger.warning(f"Calibration prediction failed: {e}")
-            return self.ctr_corrector.transform(y_pred_proba)
-    
-    def _select_best_method(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Select best calibration method"""
-        try:
-            best_score = float('inf')
-            best_method = None
-            
-            for method in self.calibration_models.keys():
-                pred = self._predict_with_method(y_pred_proba, method)
-                if pred is not None:
-                    try:
-                        score = log_loss(y_true, pred)
-                        if score < best_score:
-                            best_score = score
-                            best_method = method
-                    except:
-                        continue
-            
-            self.best_method = best_method
-            if best_method:
-                logger.info(f"Best calibration method selected: {best_method}")
-                
-        except Exception as e:
-            logger.warning(f"Calibration method selection failed: {e}")
-    
-    def _fit_beta_calibration(self, y_true: np.ndarray, y_pred_proba: np.ndarray):
-        """Fit beta calibration"""
-        try:
-            def beta_loss(param):
-                try:
-                    calibrated = np.power(y_pred_proba, param)
-                    calibrated = np.clip(calibrated, 1e-15, 1-1e-15)
-                    return log_loss(y_true, calibrated)
-                except:
-                    return float('inf')
-            
-            result = minimize_scalar(beta_loss, bounds=(0.1, 3.0), method='bounded')
-            
-            if result.success:
-                return {'type': 'beta', 'param': result.x}
-            else:
-                return None
-                
-        except Exception:
-            return None
-    
-    def _predict_with_method(self, y_pred_proba: np.ndarray, method: str) -> Optional[np.ndarray]:
-        """Predict with specific method"""
-        try:
-            if method not in self.calibration_models:
-                return None
-                
-            calibrator = self.calibration_models[method]
-            
-            if method == 'isotonic':
-                return calibrator.predict(y_pred_proba)
-            elif method == 'platt':
-                return calibrator.predict_proba(y_pred_proba.reshape(-1, 1))[:, 1]
-            elif method == 'beta':
-                param = calibrator['param']
-                return np.power(y_pred_proba, param)
-            else:
-                return None
-                
-        except Exception:
-            return None
-    
-    def get_calibration_summary(self) -> Dict[str, Any]:
-        """Get calibration summary"""
-        return {
-            'is_fitted': self.is_fitted,
-            'best_method': self.best_method,
-            'available_methods': list(self.calibration_models.keys()),
-            'calibration_scores': {}
-        }
-
 class BaseModel(ABC):
     """Base class for all models"""
     
@@ -344,7 +153,7 @@ class BaseModel(ABC):
         self.calibrator = None
         self.is_calibrated = False
         self.prediction_diversity_threshold = 2000
-        self.calibration_applied = True
+        self.calibration_applied = False
         self.memory_monitor = MemoryMonitor()
         self.quick_mode = False
         self.training_time = 0.0
@@ -443,52 +252,14 @@ class BaseModel(ABC):
             return predictions
     
     def apply_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, method: str = 'auto'):
-        """Apply calibration"""
-        try:
-            if not self.is_fitted:
-                logger.warning("Model not fitted, cannot apply calibration")
-                return False
-            
-            if self.quick_mode and len(X_val) < 10:
-                logger.info("Quick mode: Skipping calibration for small dataset")
-                return False
-            
-            logger.info(f"{self.name}: Starting calibration")
-            raw_predictions = self.predict_proba_raw(X_val)
-            
-            self.calibrator = EnhancedMultiMethodCalibrator()
-            success = self.calibrator.fit(y_val.values, raw_predictions, method)
-            
-            if success:
-                self.is_calibrated = True
-                logger.info(f"{self.name}: Calibration applied successfully")
-                return True
-            else:
-                self.calibrator = EnhancedMultiMethodCalibrator()
-                self.calibrator.ctr_corrector.fit(y_val.values, raw_predictions)
-                self.is_calibrated = True
-                logger.warning(f"{self.name}: Calibration fitting failed, using CTR correction only")
-                return True
-                
-        except Exception as e:
-            logger.warning(f"Calibration application failed: {e}")
-            try:
-                self.calibrator = EnhancedMultiMethodCalibrator()
-                self.calibrator.ctr_corrector.fit(y_val.values, raw_predictions)
-                self.is_calibrated = True
-                return True
-            except:
-                return False
+        """Apply calibration (disabled by default)"""
+        logger.info(f"{self.name}: Calibration disabled (CTR trust mode)")
+        self.is_calibrated = False
+        return False
     
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Calibrated probability predictions"""
-        raw_predictions = self.predict_proba_raw(X)
-        
-        if self.is_calibrated and self.calibrator is not None:
-            return self.calibrator.predict_proba(raw_predictions)
-        else:
-            corrector = CTRBiasCorrector()
-            return corrector.transform(raw_predictions)
+        """Probability predictions"""
+        return self.predict_proba_raw(X)
     
     @abstractmethod
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
@@ -511,16 +282,16 @@ class XGBoostGPUModel(BaseModel):
         default_params = {
             'objective': 'binary:logistic',
             'tree_method': 'gpu_hist' if TORCH_GPU_AVAILABLE else 'hist',
-            'max_depth': 9,
-            'learning_rate': 0.08,
-            'subsample': 0.85,
-            'colsample_bytree': 0.85,
+            'max_depth': 8,
+            'learning_rate': 0.1,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
             'scale_pos_weight': 51.43,
-            'min_child_weight': 3,
-            'gamma': 0.1,
-            'reg_alpha': 0.05,
-            'reg_lambda': 1.5,
-            'max_bin': 512,
+            'min_child_weight': 1,
+            'gamma': 0,
+            'reg_alpha': 0,
+            'reg_lambda': 1,
+            'max_bin': 256,
             'gpu_id': 0 if TORCH_GPU_AVAILABLE else None,
             'predictor': 'gpu_predictor' if TORCH_GPU_AVAILABLE else 'cpu_predictor',
             'verbosity': 0,
@@ -563,8 +334,8 @@ class XGBoostGPUModel(BaseModel):
             
             dtrain = xgb.DMatrix(X_train, label=y_train)
             
-            num_boost_round = 100 if self.quick_mode else 300
-            early_stopping = 15 if self.quick_mode else 30
+            num_boost_round = 100 if self.quick_mode else 200
+            early_stopping = 15 if self.quick_mode else 20
             
             if X_val is not None and y_val is not None and len(X_val) > 0:
                 dval = xgb.DMatrix(X_val, label=y_val)
@@ -589,15 +360,6 @@ class XGBoostGPUModel(BaseModel):
             
             logger.info(f"{self.name}: Training completed successfully")
             self.is_fitted = True
-            
-            if X_val is not None and y_val is not None and len(X_val) > 0:
-                calibration_success = self.apply_calibration(X_val, y_val, method='auto')
-                if calibration_success:
-                    logger.info(f"{self.name}: Calibration completed")
-                else:
-                    logger.warning(f"{self.name}: Calibration skipped")
-            else:
-                logger.warning(f"{self.name}: No validation data - calibration skipped")
             
             self.training_time = time.time() - start_time
             
@@ -673,15 +435,6 @@ class LogisticModel(BaseModel):
             
             logger.info(f"{self.name}: Training completed successfully")
             self.is_fitted = True
-            
-            if X_val is not None and y_val is not None and len(X_val) > 0:
-                calibration_success = self.apply_calibration(X_val, y_val, method='auto')
-                if calibration_success:
-                    logger.info(f"{self.name}: Calibration completed successfully")
-                else:
-                    logger.warning(f"{self.name}: Calibration failed - CTR correction applied")
-            else:
-                logger.warning(f"{self.name}: No validation data - calibration skipped")
             
             self.training_time = time.time() - start_time
             

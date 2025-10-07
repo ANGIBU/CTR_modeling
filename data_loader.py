@@ -243,7 +243,7 @@ class DataColumnAnalyzer:
             return None
 
 class StreamingDataLoader:
-    """Streaming data loader with memory management and quick mode support"""
+    """Streaming data loader with memory management"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -251,7 +251,6 @@ class StreamingDataLoader:
         self.column_analyzer = DataColumnAnalyzer(config)
         self.target_column = None
         self.temp_dir = tempfile.mkdtemp()
-        self.quick_mode = False
         
         logger.info("Streaming data loader initialization completed")
     
@@ -262,111 +261,6 @@ class StreamingDataLoader:
                 shutil.rmtree(self.temp_dir)
         except Exception:
             pass
-    
-    def set_quick_mode(self, quick_mode: bool):
-        """Enable or disable quick mode"""
-        self.quick_mode = quick_mode
-        if quick_mode:
-            logger.info("Quick mode enabled: Will load 50 samples only")
-        else:
-            logger.info("Full mode enabled: Will load complete dataset")
-    
-    def load_quick_sample_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Load small sample data for quick testing (50 samples)"""
-        logger.info("=== Quick sample data loading started ===")
-        
-        try:
-            train_sample = self._load_sample_from_file(self.config.TRAIN_PATH, 35, is_train=True)
-            test_sample = self._load_sample_from_file(self.config.TEST_PATH, 15, is_train=False)
-            
-            if self.target_column and self.target_column in train_sample.columns:
-                logger.info(f"Target column confirmed: {self.target_column}")
-            else:
-                self.target_column = 'clicked'
-                if self.target_column not in train_sample.columns:
-                    train_sample[self.target_column] = np.random.binomial(1, 0.02, len(train_sample))
-                    logger.info(f"Created dummy target column: {self.target_column}")
-            
-            logger.info(f"Quick sample loading completed - train: {train_sample.shape}, test: {test_sample.shape}")
-            
-            return train_sample, test_sample
-            
-        except Exception as e:
-            logger.error(f"Quick sample loading failed: {e}")
-            return self._create_dummy_data()
-    
-    def _load_sample_from_file(self, file_path: Path, sample_size: int, is_train: bool = True) -> pd.DataFrame:
-        """Load a small sample from a parquet file"""
-        try:
-            if not PYARROW_AVAILABLE:
-                raise ValueError("PyArrow is required for parquet loading")
-            
-            if not file_path.exists():
-                logger.warning(f"File not found: {file_path}")
-                return self._create_dummy_sample(sample_size, is_train)
-            
-            parquet_file = pq.ParquetFile(file_path)
-            
-            table = parquet_file.read_row_group(0)
-            df = table.to_pandas()
-            
-            if is_train and self.target_column is None:
-                self.target_column = self.column_analyzer.detect_target_column(df)
-            
-            if len(df) > sample_size:
-                df = df.sample(n=sample_size, random_state=42).reset_index(drop=True)
-            
-            df = self._optimize_dataframe_memory(df, for_feature_engineering=True)
-            
-            logger.info(f"Sample loaded from {file_path.name}: {df.shape}")
-            return df
-            
-        except Exception as e:
-            logger.warning(f"Sample loading failed for {file_path}: {e}")
-            return self._create_dummy_sample(sample_size, is_train)
-    
-    def _create_dummy_sample(self, sample_size: int, is_train: bool) -> pd.DataFrame:
-        """Create dummy data when file loading fails"""
-        try:
-            data = {
-                'feature_1': np.random.randint(0, 100, sample_size),
-                'feature_2': np.random.normal(0, 1, sample_size),
-                'feature_3': np.random.choice(['A', 'B', 'C'], sample_size),
-                'feature_4': np.random.uniform(0, 1, sample_size)
-            }
-            
-            if is_train:
-                data['clicked'] = np.random.binomial(1, 0.02, sample_size)
-                self.target_column = 'clicked'
-            
-            df = pd.DataFrame(data)
-            logger.info(f"Created dummy sample: {df.shape}")
-            return df
-            
-        except Exception as e:
-            logger.error(f"Dummy sample creation failed: {e}")
-            return pd.DataFrame({'dummy': [0] * sample_size})
-    
-    def _create_dummy_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create minimal dummy data as absolute fallback"""
-        train_data = {
-            'feature_1': [1, 2, 3] * 17,
-            'feature_2': [0.1, 0.2, 0.3] * 17,
-            'clicked': [0, 1, 0] * 17
-        }
-        
-        test_data = {
-            'feature_1': [4, 5, 6] * 5,
-            'feature_2': [0.4, 0.5, 0.6] * 5
-        }
-        
-        train_df = pd.DataFrame(train_data).iloc[:35]
-        test_df = pd.DataFrame(test_data).iloc[:15]
-        
-        self.target_column = 'clicked'
-        logger.warning("Using minimal dummy data as fallback")
-        
-        return train_df, test_df
     
     def load_full_data_streaming(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Complete processing via streaming with memory management"""
@@ -423,7 +317,6 @@ class StreamingDataLoader:
             
             logger.info(f"File analysis - Total {total_rows:,} rows, {num_row_groups} row groups")
             
-            # Select only necessary columns
             essential_cols = self._get_essential_columns(parquet_file.schema.names, is_train)
             logger.info(f"Loading {len(essential_cols)} essential columns out of {len(parquet_file.schema.names)}")
             
@@ -440,13 +333,11 @@ class StreamingDataLoader:
                 del sample_df, sample_table
                 gc.collect()
             
-            # Read file with selected columns only
             table = parquet_file.read(columns=essential_cols)
             df = table.to_pandas()
             del table
             gc.collect()
             
-            # Immediate memory optimization
             df = self._optimize_dataframe_memory(df, for_feature_engineering=True)
             
             logger.info(f"File streaming completed: {len(df):,} rows, {len(df.columns)} columns")
@@ -462,10 +353,8 @@ class StreamingDataLoader:
     def _get_essential_columns(self, all_columns: List[str], is_train: bool) -> List[str]:
         """Get essential columns to load"""
         try:
-            # Exclude columns
             exclude = ['seq']
             
-            # Keep all feature columns
             essential = [col for col in all_columns if col not in exclude]
             
             return essential
@@ -558,13 +447,12 @@ class StreamingDataLoader:
         return self.target_column
 
 class LargeDataLoader:
-    """Large data loader with quick mode"""
+    """Large data loader"""
     
     def __init__(self, config: Config = Config):
         self.config = config
         self.memory_monitor = MemoryMonitor()
         self.target_column = None
-        self.quick_mode = False
         
         self.streaming_loader = StreamingDataLoader(config)
         
@@ -578,33 +466,6 @@ class LargeDataLoader:
         }
         
         logger.info("Large data loader initialization completed")
-    
-    def set_quick_mode(self, quick_mode: bool):
-        """Enable or disable quick mode for testing"""
-        self.quick_mode = quick_mode
-        self.streaming_loader.set_quick_mode(quick_mode)
-        
-        if quick_mode:
-            logger.info("Large data loader set to quick mode (50 samples)")
-        else:
-            logger.info("Large data loader set to full mode (complete dataset)")
-    
-    def load_quick_sample_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Load small sample data for quick testing"""
-        logger.info("=== Quick sample data loading via LargeDataLoader ===")
-        
-        result = self.streaming_loader.load_quick_sample_data()
-        
-        self.target_column = self.streaming_loader.get_detected_target_column()
-        
-        self.loading_stats.update({
-            'data_loaded': True,
-            'train_rows': result[0].shape[0] if result[0] is not None else 0,
-            'test_rows': result[1].shape[0] if result[1] is not None else 0,
-            'loading_time': time.time() - self.loading_stats['start_time']
-        })
-        
-        return result
     
     def load_large_data_optimized(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Complete data processing (full dataset)"""
@@ -642,15 +503,13 @@ if __name__ == "__main__":
     try:
         loader = LargeDataLoader(config)
         
-        print("Testing quick mode...")
-        loader.set_quick_mode(True)
-        train_df, test_df = loader.load_quick_sample_data()
+        print("Testing full mode...")
+        train_df, test_df = loader.load_large_data_optimized()
         
-        print(f"Quick mode results:")
+        print(f"Full mode results:")
         print(f"Training data: {train_df.shape}")
         print(f"Test data: {test_df.shape}")
         print(f"Detected target column: {loader.get_detected_target_column()}")
-        print(f"Total samples: {len(train_df) + len(test_df)}")
         
         stats = loader.get_loading_stats()
         print(f"\nLoading stats:")

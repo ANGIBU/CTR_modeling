@@ -183,16 +183,16 @@ class Config:
         'xgboost_gpu': {
             'objective': 'binary:logistic',
             'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
-            'max_depth': 9,
-            'learning_rate': 0.08,
-            'subsample': 0.85,
-            'colsample_bytree': 0.85,
+            'max_depth': 8,
+            'learning_rate': 0.1,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
             'scale_pos_weight': 51.43,
-            'min_child_weight': 3,
-            'gamma': 0.1,
-            'reg_alpha': 0.05,
-            'reg_lambda': 1.5,
-            'max_bin': 512,
+            'min_child_weight': 1,
+            'gamma': 0,
+            'reg_alpha': 0,
+            'reg_lambda': 1,
+            'max_bin': 256,
             'gpu_id': 0 if GPU_AVAILABLE else None,
             'predictor': 'gpu_predictor' if GPU_AVAILABLE else 'cpu_predictor',
             'verbosity': 0,
@@ -212,13 +212,13 @@ class Config:
     }
     
     FEATURE_ENGINEERING_CONFIG = {
-        'enable_interaction_features': True,
+        'enable_interaction_features': False,
         'enable_polynomial_features': False,
         'enable_binning': False,
-        'enable_target_encoding': True,
+        'enable_target_encoding': False,
         'enable_frequency_encoding': True,
         'enable_statistical_features': False,
-        'enable_cross_validation_encoding': True,
+        'enable_cross_validation_encoding': False,
         'max_interaction_degree': 2,
         'binning_strategy': 'quantile',
         'n_bins': 6,
@@ -262,7 +262,7 @@ class Config:
     
     CALIBRATION_METHOD = 'isotonic'
     CALIBRATION_CV_FOLDS = 5
-    CALIBRATION_MANDATORY = True
+    CALIBRATION_MANDATORY = False
     
     EVALUATION_CONFIG = {
         'ap_weight': 0.5,
@@ -279,10 +279,10 @@ class Config:
     }
     
     CTR_BIAS_CORRECTION = {
-        'enable': True,
+        'enable': False,
         'target_ctr': 0.0191,
         'correction_factor': 0.5,
-        'post_processing': True,
+        'post_processing': False,
         'clip_range': (0.0005, 0.1),
         'bias_threshold': 0.0003,
         'calibration_strength': 2.0,
@@ -305,7 +305,7 @@ class Config:
     CACHE_SIZE_MB = 2048
     
     LARGE_DATASET_MODE = True
-    MEMORY_EFFICIENT_SAMPLING = True
+    MEMORY_EFFICIENT_SAMPLING = False
     AGGRESSIVE_SAMPLING_THRESHOLD = 0.75
     MIN_SAMPLE_SIZE = 100000
     MAX_SAMPLE_SIZE = 1000000
