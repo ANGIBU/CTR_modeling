@@ -1,5 +1,4 @@
 # main.py
-# score : 0.3275
 
 import os
 import sys
@@ -12,7 +11,6 @@ import gc
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 
-# Safe imports with availability checking
 try:
     import psutil
     PSUTIL_AVAILABLE = True
@@ -32,6 +30,9 @@ except ImportError as e:
     print(f"Essential package import failed: {e}")
     sys.exit(1)
 
+# Create logs directory before logging setup
+os.makedirs('logs', exist_ok=True)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -44,7 +45,6 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Global cleanup flag
 cleanup_required = False
 
 def signal_handler(signum, frame):
@@ -80,7 +80,7 @@ def validate_environment() -> bool:
         python_version = sys.version
         logger.info(f"Python version: {python_version}")
         
-        directories = ['data', 'models', 'logs']
+        directories = ['data', 'models', 'logs', 'output']
         for directory in directories:
             os.makedirs(directory, exist_ok=True)
             logger.info(f"Directory prepared: {directory}")
@@ -269,7 +269,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.info("3. Model training phase")
         
         trainer = CTRTrainer(config)
-        logger.info("CTR Trainer initialized (CPU mode)")
+        logger.info("CTR Trainer initialized")
         
         target_column = data_loader.get_detected_target_column()
         if target_column not in train_df.columns:
@@ -311,7 +311,8 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                     X_train=X_train_split,
                     y_train=y_train_split,
                     X_val=X_val_split,
-                    y_val=y_val_split
+                    y_val=y_val_split,
+                    quick_mode=quick_mode
                 )
                 
                 if model is not None:
@@ -338,7 +339,8 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         if len(trained_models) >= 1:
             try:
                 logger.info("Ensemble training started")
-                ensemble_manager.train_ensembles(X_val_split, y_val_split)
+                ensemble_manager.train_all_ensembles(X_val_split, y_val_split)
+                ensemble_manager.evaluate_ensembles(X_val_split, y_val_split)
                 ensemble_enabled = True
                 logger.info("Ensemble training completed")
             except Exception as e:
@@ -351,9 +353,9 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         try:
             if ensemble_enabled:
                 try:
-                    predictions = ensemble_manager.predict_with_best_ensemble(X_test)
-                    ensemble_used = True
-                    logger.info("Ensemble prediction completed")
+                    predictions, success = ensemble_manager.predict_with_best_ensemble(X_test)
+                    ensemble_used = success
+                    logger.info(f"Ensemble prediction completed (success: {success})")
                 except Exception as e:
                     logger.warning(f"Ensemble prediction failed: {e}")
                     ensemble_used = False
