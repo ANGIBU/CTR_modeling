@@ -2,7 +2,7 @@
 
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, List, Optional, Tuple, Union
+from typing import Dict, List, Any, Optional, Tuple, Union
 import logging
 import time
 import gc
@@ -80,47 +80,17 @@ class CTRStackingEnsemble(BaseEnsemble):
         
         try:
             if len(self.base_models) < 2:
-                logger.warning("Stacking requires at least 2 base models, falling back to simple average")
-                self.weights = {name: 1.0 / len(base_predictions) for name in base_predictions.keys()}
+                logger.warning("Stacking requires at least 2 base models, falling back to weighted average")
+                self.weights = self._calculate_performance_weights_simple(y, base_predictions)
                 self.is_fitted = True
                 self.ensemble_execution_guaranteed = True
                 return
             
-            logger.info("Generating out-of-fold predictions")
-            self.oof_predictions = {}
-            
-            skf = StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=42)
-            
-            for name in self.base_models.keys():
-                self.oof_predictions[name] = np.zeros(len(X))
-            
-            for name, pred in base_predictions.items():
-                if len(pred) == len(y):
-                    self.oof_predictions[name] = pred
-                else:
-                    logger.warning(f"Prediction length mismatch for {name}, using zeros")
-                    self.oof_predictions[name] = np.zeros(len(y))
-            
             logger.info("Calculating performance-based weights")
-            performance_weights = self._calculate_performance_weights(y)
+            self.oof_predictions = base_predictions.copy()
             
+            performance_weights = self._calculate_performance_weights_simple(y, base_predictions)
             self.weights = performance_weights
-            
-            logger.info("Training meta learners")
-            meta_features = np.column_stack([self.oof_predictions[name] for name in self.base_models.keys()])
-            
-            try:
-                meta_learner = LogisticRegression(
-                    max_iter=1000, 
-                    random_state=42,
-                    C=1.0,
-                    class_weight='balanced'
-                )
-                meta_learner.fit(meta_features, y)
-                self.meta_learners['logistic'] = meta_learner
-                logger.info("Meta learner trained: logistic")
-            except Exception as e:
-                logger.warning(f"Meta learner training failed: {e}")
             
             self.is_fitted = True
             self.ensemble_execution_guaranteed = True
@@ -132,24 +102,22 @@ class CTRStackingEnsemble(BaseEnsemble):
             self.is_fitted = True
             self.ensemble_execution_guaranteed = False
     
-    def _calculate_performance_weights(self, y: pd.Series) -> Dict[str, float]:
-        """Calculate performance-based weights"""
+    def _calculate_performance_weights_simple(self, y: pd.Series, base_predictions: Dict[str, np.ndarray]) -> Dict[str, float]:
+        """Calculate performance-based weights with XGBoost emphasis"""
         weights = {}
         total_score = 0.0
         
         metrics_calculator = CTRMetrics()
         
-        for name, pred in self.oof_predictions.items():
+        for name, pred in base_predictions.items():
             try:
                 auc = roc_auc_score(y, pred)
                 ap = average_precision_score(y, pred)
                 
-                actual_ctr = np.mean(y)
-                predicted_ctr = np.mean(pred)
-                ctr_bias = abs(predicted_ctr - actual_ctr)
-                ctr_penalty = min(ctr_bias * 10, 0.5)
+                combined_score = 0.6 * auc + 0.4 * ap
                 
-                combined_score = (0.5 * auc + 0.5 * ap) * (1 - ctr_penalty)
+                if 'xgboost' in name.lower():
+                    combined_score *= 1.5
                 
                 weights[name] = max(combined_score, 0.1)
                 total_score += weights[name]
@@ -162,24 +130,16 @@ class CTRStackingEnsemble(BaseEnsemble):
         if total_score > 0:
             weights = {name: weight / total_score for name, weight in weights.items()}
         else:
-            weights = {name: 1.0 / len(self.oof_predictions) for name in self.oof_predictions.keys()}
+            weights = {name: 1.0 / len(base_predictions) for name in base_predictions.keys()}
         
         logger.info(f"Performance weights calculated: {weights}")
         return weights
     
     def predict_proba(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """Predict probabilities using stacking ensemble"""
+        """Predict probabilities using weighted average"""
         try:
             if not self.is_fitted:
                 raise ValueError("Ensemble not fitted")
-            
-            if 'logistic' in self.meta_learners and len(base_predictions) >= 2:
-                try:
-                    meta_features = np.column_stack([base_predictions[name] for name in self.base_models.keys() if name in base_predictions])
-                    pred = self.meta_learners['logistic'].predict_proba(meta_features)[:, 1]
-                    return pred
-                except Exception as e:
-                    logger.warning(f"Meta-learner prediction failed: {e}")
             
             pred = self._weighted_average_prediction(base_predictions)
             return pred
@@ -214,62 +174,35 @@ class CTRDynamicEnsemble(BaseEnsemble):
     
     def __init__(self):
         super().__init__("CTRDynamic")
-        self.strategies = ['simple_average', 'performance_weighted', 'ctr_corrected']
+        self.strategies = ['performance_weighted']
         self.strategy_weights = {}
-        self.best_strategy = 'simple_average'
+        self.best_strategy = 'performance_weighted'
         self.performance_history = {}
         
     def fit(self, X: pd.DataFrame, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
-        """Fit dynamic ensemble with strategy selection"""
+        """Fit dynamic ensemble with XGBoost emphasis"""
         logger.info(f"{self.name} ensemble training started")
         
         try:
-            logger.info("Initializing performance tracking")
-            self.performance_history = {}
+            logger.info("Calculating performance weights with XGBoost emphasis")
+            self.strategy_weights = {
+                'performance_weighted': self._calculate_performance_weights_xgb(y, base_predictions)
+            }
             
-            logger.info("Calculating multi-strategy weights")
-            self._calculate_strategy_weights(y, base_predictions)
-            
-            logger.info("Selecting optimal strategy")
-            best_score = -1
-            metrics_calculator = CTRMetrics()
-            
-            for strategy in self.strategies:
-                try:
-                    pred = self._apply_strategy(strategy, base_predictions)
-                    score = metrics_calculator.combined_score(y.values, pred)
-                    
-                    logger.info(f"Strategy {strategy}: Combined Score {score:.4f}")
-                    
-                    if score > best_score:
-                        best_score = score
-                        self.best_strategy = strategy
-                        
-                except Exception as e:
-                    logger.warning(f"Strategy evaluation failed for {strategy}: {e}")
-            
-            logger.info(f"Best strategy selected: {self.best_strategy} (Score: {best_score:.4f})")
-            
+            self.best_strategy = 'performance_weighted'
             self.is_fitted = True
             self.ensemble_execution_guaranteed = True
             logger.info(f"{self.name} ensemble training completed")
             
         except Exception as e:
             logger.error(f"{self.name} ensemble training failed: {e}")
-            self.best_strategy = 'simple_average'
+            self.best_strategy = 'performance_weighted'
+            self.strategy_weights = {'performance_weighted': {name: 1.0/len(base_predictions) for name in base_predictions.keys()}}
             self.is_fitted = True
             self.ensemble_execution_guaranteed = False
     
-    def _calculate_strategy_weights(self, y: pd.Series, base_predictions: Dict[str, np.ndarray]):
-        """Calculate weights for different strategies"""
-        self.strategy_weights = {
-            'simple_average': {name: 1.0 / len(base_predictions) for name in base_predictions.keys()},
-            'performance_weighted': self._calculate_performance_weights(y, base_predictions),
-            'ctr_corrected': self._calculate_ctr_corrected_weights(y, base_predictions)
-        }
-    
-    def _calculate_performance_weights(self, y: pd.Series, base_predictions: Dict[str, np.ndarray]) -> Dict[str, float]:
-        """Calculate performance-based weights"""
+    def _calculate_performance_weights_xgb(self, y: pd.Series, base_predictions: Dict[str, np.ndarray]) -> Dict[str, float]:
+        """Calculate performance weights with XGBoost emphasis"""
         weights = {}
         total_score = 0.0
         
@@ -277,44 +210,16 @@ class CTRDynamicEnsemble(BaseEnsemble):
             try:
                 auc = roc_auc_score(y, pred)
                 ap = average_precision_score(y, pred)
-                score = 0.5 * auc + 0.5 * ap
+                score = 0.6 * auc + 0.4 * ap
                 
-                weights[name] = max(score, 0.1)
-                total_score += weights[name]
+                if 'xgboost' in name.lower():
+                    score *= 2.0
                 
-            except Exception as e:
-                logger.warning(f"Performance weight calculation failed for {name}: {e}")
-                weights[name] = 0.1
-                total_score += 0.1
-        
-        if total_score > 0:
-            weights = {name: weight / total_score for name, weight in weights.items()}
-        else:
-            weights = {name: 1.0 / len(base_predictions) for name in base_predictions.keys()}
-        
-        return weights
-    
-    def _calculate_ctr_corrected_weights(self, y: pd.Series, base_predictions: Dict[str, np.ndarray]) -> Dict[str, float]:
-        """Calculate CTR-corrected weights"""
-        weights = {}
-        total_score = 0.0
-        actual_ctr = np.mean(y)
-        
-        for name, pred in base_predictions.items():
-            try:
-                auc = roc_auc_score(y, pred)
-                ap = average_precision_score(y, pred)
-                
-                predicted_ctr = np.mean(pred)
-                ctr_bias = abs(predicted_ctr - actual_ctr)
-                ctr_penalty = min(ctr_bias * 15, 0.6)
-                
-                score = (0.5 * auc + 0.5 * ap) * (1 - ctr_penalty)
                 weights[name] = max(score, 0.05)
                 total_score += weights[name]
                 
             except Exception as e:
-                logger.warning(f"CTR corrected weight calculation failed for {name}: {e}")
+                logger.warning(f"Performance weight calculation failed for {name}: {e}")
                 weights[name] = 0.05
                 total_score += 0.05
         
@@ -327,9 +232,7 @@ class CTRDynamicEnsemble(BaseEnsemble):
     
     def _apply_strategy(self, strategy: str, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
         """Apply specified strategy"""
-        if strategy == 'simple_average':
-            return np.mean(list(base_predictions.values()), axis=0)
-        elif strategy in ['performance_weighted', 'ctr_corrected']:
+        if strategy == 'performance_weighted':
             weights = self.strategy_weights.get(strategy, {})
             weighted_pred = np.zeros(len(next(iter(base_predictions.values()))))
             total_weight = 0.0
@@ -506,11 +409,25 @@ class CTRMainEnsemble(BaseEnsemble):
             return pred
     
     def _simple_weighted_average(self, base_predictions: Dict[str, np.ndarray]) -> np.ndarray:
-        """Simple weighted average of base predictions"""
+        """Simple weighted average with XGBoost emphasis"""
         if not base_predictions:
             return np.array([])
         
-        return np.mean(list(base_predictions.values()), axis=0)
+        weights = {}
+        for name in base_predictions.keys():
+            if 'xgboost' in name.lower():
+                weights[name] = 0.75
+            else:
+                weights[name] = 0.25
+        
+        total_weight = sum(weights.values())
+        weights = {k: v/total_weight for k, v in weights.items()}
+        
+        weighted_pred = np.zeros(len(next(iter(base_predictions.values()))))
+        for name, pred in base_predictions.items():
+            weighted_pred += weights.get(name, 1.0/len(base_predictions)) * pred
+        
+        return weighted_pred
 
 class CTREnsembleManager:
     """CTR ensemble manager"""

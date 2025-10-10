@@ -157,7 +157,7 @@ class Config:
             'objective': 'binary:logistic',
             'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
             'max_depth': 8,
-            'learning_rate': 0.05,
+            'learning_rate': 0.1,
             'n_estimators': 500,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
@@ -174,11 +174,11 @@ class Config:
         'xgboost_gpu': {
             'objective': 'binary:logistic',
             'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
-            'max_depth': 6,
-            'learning_rate': 0.05,
-            'subsample': 0.9,
+            'max_depth': 8,
+            'learning_rate': 0.1,
+            'subsample': 0.8,
             'colsample_bytree': 0.8,
-            'scale_pos_weight': 1.0,
+            'scale_pos_weight': 51.43,
             'min_child_weight': 10,
             'gamma': 0.1,
             'reg_alpha': 0.05,
@@ -235,7 +235,7 @@ class Config:
     RANDOM_STATE = 42
     USE_CROSS_VALIDATION = True
     
-    EARLY_STOPPING_ROUNDS = 30
+    EARLY_STOPPING_ROUNDS = 20
     EARLY_STOPPING_TOLERANCE = 1e-5
     
     OPTUNA_N_TRIALS = 150
@@ -244,7 +244,7 @@ class Config:
     OPTUNA_VERBOSITY = 1
     
     ENSEMBLE_CONFIG = {
-        'voting_weights': {'lightgbm': 0.45, 'xgboost': 0.35, 'logistic': 0.2},
+        'voting_weights': {'xgboost_gpu': 0.75, 'logistic': 0.25},
         'stacking_cv_folds': 5,
         'blending_ratio': 0.8,
         'diversity_threshold': 0.03,
@@ -257,7 +257,7 @@ class Config:
     
     CALIBRATION_METHOD = 'isotonic'
     CALIBRATION_CV_FOLDS = 3
-    CALIBRATION_MANDATORY = True
+    CALIBRATION_MANDATORY = False
     
     EVALUATION_CONFIG = {
         'ap_weight': 0.5,
@@ -275,10 +275,10 @@ class Config:
     }
     
     CTR_BIAS_CORRECTION = {
-        'enable': True,
+        'enable': False,
         'target_ctr': 0.0191,
         'correction_factor': 1.0,
-        'post_processing': True,
+        'post_processing': False,
         'clip_range': (0.0001, 0.5),
         'bias_threshold': 0.0003,
         'calibration_strength': 1.0,
