@@ -12,7 +12,6 @@ from pathlib import Path
 import pickle
 from scipy.special import betaln
 
-# Safe imports
 try:
     from sklearn.linear_model import LogisticRegression
     from sklearn.calibration import CalibratedClassifierCV
@@ -55,15 +54,15 @@ class MemoryMonitor:
     
     def __init__(self):
         self.memory_thresholds = {
-            'warning': 15.0,    # GB
-            'critical': 10.0,   # GB  
-            'abort': 5.0       # GB
+            'warning': 52.0,
+            'critical': 58.0,
+            'abort': 62.0
         }
         
         self.quick_mode_thresholds = {
-            'warning': 4.0,    # GB
-            'critical': 2.0,   # GB
-            'abort': 1.0       # GB
+            'warning': 4.0,
+            'critical': 2.0,
+            'abort': 1.0
         }
         
         self.quick_mode = False
@@ -85,17 +84,17 @@ class MemoryMonitor:
                 }
             else:
                 return {
-                    'available_gb': 32.0,
-                    'used_gb': 16.0,
-                    'total_gb': 48.0,
-                    'percent': 33.3
+                    'available_gb': 45.0,
+                    'used_gb': 19.0,
+                    'total_gb': 64.0,
+                    'percent': 30.0
                 }
         except Exception:
             return {
-                'available_gb': 32.0,
-                'used_gb': 16.0,
-                'total_gb': 48.0,
-                'percent': 33.3
+                'available_gb': 45.0,
+                'used_gb': 19.0,
+                'total_gb': 64.0,
+                'percent': 30.0
             }
     
     def get_memory_status(self) -> Dict[str, Any]:
@@ -169,13 +168,8 @@ class CTRBiasCorrector:
             if not self.is_fitted:
                 return y_pred_proba
             
-            # Apply multiplicative correction
             corrected = y_pred_proba * self.correction_factor
-            
-            # Apply additive correction
             corrected = corrected + self.additive_correction * 0.1
-            
-            # Clip to valid range
             corrected = np.clip(corrected, 1e-15, 1 - 1e-15)
             
             return corrected
@@ -199,10 +193,8 @@ class EnhancedMultiMethodCalibrator:
     def fit(self, y_true: np.ndarray, y_pred_proba: np.ndarray, method: str = 'auto'):
         """Fit calibration models"""
         try:
-            # Fit CTR corrector first
             self.ctr_corrector.fit(y_true, y_pred_proba)
             
-            # Try isotonic calibration
             try:
                 isotonic = IsotonicRegression(out_of_bounds='clip')
                 isotonic.fit(y_pred_proba, y_true)
@@ -210,7 +202,6 @@ class EnhancedMultiMethodCalibrator:
             except Exception:
                 pass
             
-            # Try Platt scaling
             try:
                 platt = LogisticRegression()
                 platt.fit(y_pred_proba.reshape(-1, 1), y_true)
@@ -218,19 +209,16 @@ class EnhancedMultiMethodCalibrator:
             except Exception:
                 pass
             
-            # Try beta calibration if scipy available
             if SCIPY_AVAILABLE:
                 beta_params = self._fit_beta_calibration(y_true, y_pred_proba)
                 if beta_params:
                     self.calibration_models['beta'] = beta_params
             
-            # Select best method
             if method == 'auto':
                 self._select_best_method(y_true, y_pred_proba)
             else:
                 self.best_method = method if method in self.calibration_models else None
             
-            # Fit ensemble calibrator
             if len(self.calibration_models) >= 2:
                 self._fit_ensemble_calibrator(y_true, y_pred_proba)
             
@@ -248,7 +236,6 @@ class EnhancedMultiMethodCalibrator:
             if not self.is_fitted:
                 return self.ctr_corrector.transform(y_pred_proba)
             
-            # Use best method or ensemble
             if self.ensemble_calibrator and len(self.ensemble_calibrator) > 1:
                 calibrated = self._ensemble_predict(y_pred_proba)
             elif self.best_method:
@@ -256,7 +243,6 @@ class EnhancedMultiMethodCalibrator:
             else:
                 calibrated = y_pred_proba
             
-            # Apply CTR correction
             if calibrated is not None:
                 calibrated = self.ctr_corrector.transform(calibrated)
             else:
@@ -595,7 +581,7 @@ class BaseModel(ABC):
         pass
 
 class LogisticModel(BaseModel):
-    """Logistic Regression model with optimized sampling"""
+    """Logistic Regression model with relaxed sampling"""
     
     def __init__(self, name: str = "LogisticRegression", params: Dict[str, Any] = None):
         if not SKLEARN_AVAILABLE:
@@ -649,7 +635,7 @@ class LogisticModel(BaseModel):
         logger.info(f"{self.name}: Quick mode parameters applied")
     
     def _safe_sampling(self, X_train: pd.DataFrame, y_train: pd.Series, target_size: int) -> Tuple[pd.DataFrame, pd.Series]:
-        """Safe stratified sampling - OPTIMIZED"""
+        """Safe stratified sampling - RELAXED for full data usage"""
         try:
             current_size = len(X_train)
             
@@ -681,7 +667,7 @@ class LogisticModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Training with optimized sampling"""
+        """Training with relaxed sampling for full data usage"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         start_time = time.time()
         
@@ -691,41 +677,34 @@ class LogisticModel(BaseModel):
             if self.quick_mode:
                 self._apply_quick_mode_params()
             
-            # OPTIMIZED: Memory-based sampling with higher thresholds
+            # RELAXED: Increased sampling sizes for better model performance
             memory_status = self.memory_monitor.get_memory_status()
             
-            # Increased sampling sizes for better model performance
             if memory_status['level'] == 'abort':
-                # Critical memory situation - minimal sampling
-                target_size = 100000
+                target_size = 1000000
                 X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
             elif memory_status['level'] == 'critical':
-                # Use 500K samples (10x improvement from 50K)
-                target_size = 500000
+                target_size = 3000000
                 X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
-            elif memory_status['level'] == 'warning' and len(X_train) > 1000000:
-                # Use 750K samples for warning level
-                target_size = 750000
+            elif memory_status['level'] == 'warning' and len(X_train) > 5000000:
+                target_size = 5000000
                 X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
             else:
-                # Use full data or up to 1M samples
-                if len(X_train) > 1000000:
-                    target_size = 1000000
+                # Use full data or up to 8M samples
+                if len(X_train) > 8000000:
+                    target_size = 8000000
                     X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
                 else:
                     X_train_sample, y_train_sample = X_train, y_train
             
-            # Safe data preprocessing with scaling
             X_train_clean = self._safe_data_preprocessing(X_train_sample, fit_scaler=True)
             
-            # Fit model
             logger.info(f"{self.name}: Starting training")
             self.model.fit(X_train_clean, y_train_sample)
             
             logger.info(f"{self.name}: Training completed successfully")
             self.is_fitted = True
             
-            # Calculate validation score
             if X_val is not None and y_val is not None and len(X_val) > 0:
                 try:
                     val_pred = self.predict_proba_raw(X_val)
@@ -734,7 +713,6 @@ class LogisticModel(BaseModel):
                 except:
                     self.validation_score = 0.5
             
-            # Calibration
             if X_val is not None and y_val is not None and len(X_val) > 0:
                 calibration_success = self.apply_calibration(X_val, y_val, method='auto')
                 if calibration_success:
@@ -744,10 +722,8 @@ class LogisticModel(BaseModel):
             else:
                 logger.warning(f"{self.name}: No validation data - calibration skipped")
             
-            # Record training time
             self.training_time = time.time() - start_time
             
-            # Cleanup
             del X_train_clean
             gc.collect()
             
@@ -771,7 +747,7 @@ class LogisticModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X, batch_size=50000)
 
 class LightGBMModel(BaseModel):
-    """LightGBM model"""
+    """LightGBM model with GPU support"""
     
     def __init__(self, name: str = "LightGBM", params: Dict[str, Any] = None):
         if not LIGHTGBM_AVAILABLE:
@@ -802,6 +778,17 @@ class LightGBMModel(BaseModel):
         super().__init__(name, default_params)
         self.model = None
         self.use_scaling = False
+        
+        # GPU support
+        try:
+            import torch
+            if torch.cuda.is_available():
+                default_params['device'] = 'gpu'
+                default_params['gpu_platform_id'] = 0
+                default_params['gpu_device_id'] = 0
+                logger.info(f"{self.name}: GPU mode enabled")
+        except:
+            pass
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
@@ -865,18 +852,22 @@ class LightGBMModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X, batch_size=50000)
 
 class XGBoostModel(BaseModel):
-    """XGBoost model"""
+    """XGBoost model with FORCED GPU support"""
     
     def __init__(self, name: str = "XGBoost", params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
             raise ImportError("XGBoost is not installed.")
         
+        # FORCE GPU params
         default_params = {
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
-            'max_depth': 6,
-            'learning_rate': 0.05,
-            'n_estimators': 600,
+            'tree_method': 'gpu_hist',
+            'gpu_id': 0,
+            'predictor': 'gpu_predictor',
+            'max_depth': 8,
+            'learning_rate': 0.1,
+            'n_estimators': 500,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
             'min_child_weight': 10,
@@ -885,8 +876,7 @@ class XGBoostModel(BaseModel):
             'reg_lambda': 0.5,
             'random_state': 42,
             'n_jobs': 8,
-            'scale_pos_weight': 52.3,
-            'tree_method': 'hist'
+            'scale_pos_weight': 52.3
         }
         
         if params:
@@ -895,10 +885,12 @@ class XGBoostModel(BaseModel):
         super().__init__(name, default_params)
         self.model = None
         self.use_scaling = False
+        
+        logger.info(f"{self.name}: GPU mode FORCED - tree_method=gpu_hist")
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Training"""
+        """Training with GPU"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         start_time = time.time()
         
@@ -907,7 +899,7 @@ class XGBoostModel(BaseModel):
             
             X_train_clean = self._safe_data_preprocessing(X_train, fit_scaler=False)
             
-            logger.info(f"{self.name}: Starting XGBoost training")
+            logger.info(f"{self.name}: Starting XGBoost GPU training")
             
             if X_val is not None and y_val is not None and len(X_val) > 0:
                 X_val_clean = self._safe_data_preprocessing(X_val, fit_scaler=False)
@@ -915,7 +907,6 @@ class XGBoostModel(BaseModel):
                 self.model.fit(
                     X_train_clean, y_train,
                     eval_set=[(X_val_clean, y_val)],
-                    early_stopping_rounds=50,
                     verbose=False
                 )
             else:
@@ -952,15 +943,7 @@ class XGBoostModel(BaseModel):
             X_processed = self._ensure_feature_consistency(batch_X)
             X_processed = self._safe_data_preprocessing(X_processed, fit_scaler=False)
             
-            dtest = xgb.DMatrix(
-                X_processed, 
-                feature_names=list(X_processed.columns),
-                enable_categorical=False
-            )
-            proba = self.model.predict(dtest)
-            
-            del dtest
-            
+            proba = self.model.predict_proba(X_processed)[:, 1]
             proba = np.clip(proba, 1e-15, 1 - 1e-15)
             return self._enhance_prediction_diversity(proba)
         
@@ -1036,11 +1019,11 @@ class ModelFactory:
         """Model priority list"""
         priority_order = []
         
-        if LIGHTGBM_AVAILABLE:
-            priority_order.append('lightgbm')
-        
         if XGBOOST_AVAILABLE:
             priority_order.append('xgboost')
+        
+        if LIGHTGBM_AVAILABLE:
+            priority_order.append('lightgbm')
             
         if SKLEARN_AVAILABLE:
             priority_order.append('logistic')
@@ -1056,19 +1039,16 @@ class ModelFactory:
         if memory_status['level'] == 'abort':
             return ['logistic']
         elif memory_status['level'] == 'critical':
-            models = ['logistic']
+            models = ['xgboost', 'logistic']
             if LIGHTGBM_AVAILABLE:
                 models.append('lightgbm')
             return models
         elif memory_status['level'] == 'warning':
-            models = ['lightgbm', 'logistic']
-            if XGBOOST_AVAILABLE:
-                models.append('xgboost')
+            models = ['xgboost', 'lightgbm', 'logistic']
             return models
         else:
             return ModelFactory.get_available_models()
 
-# Model aliases
 FinalLightGBMModel = LightGBMModel
 FinalXGBoostModel = XGBoostModel  
 FinalLogisticModel = LogisticModel

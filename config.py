@@ -12,7 +12,7 @@ except ImportError:
     logging.warning("PyTorch not installed. GPU functions will be disabled.")
 
 class Config:
-    """Project-wide configuration management - optimized for performance"""
+    """Project-wide configuration management"""
     
     # Basic path settings
     BASE_DIR = Path(__file__).parent
@@ -45,7 +45,7 @@ class Config:
         'typical_ctr_range': (0.005, 0.05)
     }
     
-    # GPU and hardware settings
+    # GPU and hardware settings - RTX 4060 Ti 16GB optimization
     if TORCH_AVAILABLE:
         DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         GPU_AVAILABLE = torch.cuda.is_available()
@@ -53,30 +53,31 @@ class Config:
         DEVICE = 'cpu'
         GPU_AVAILABLE = False
     
-    GPU_MEMORY_LIMIT = 14
+    GPU_MEMORY_LIMIT = 16
     CUDA_VISIBLE_DEVICES = "0"
     USE_MIXED_PRECISION = True
     GPU_OPTIMIZATION_LEVEL = 3
+    FORCE_GPU_XGBOOST = True
     
-    # Memory settings - OPTIMIZED for 64GB RAM system
-    MAX_MEMORY_GB = 58
-    CHUNK_SIZE = 150000
-    BATCH_SIZE_GPU = 20480
-    BATCH_SIZE_CPU = 6144
-    PREFETCH_FACTOR = 6
+    # Memory settings - 64GB RAM system optimization
+    MAX_MEMORY_GB = 64
+    CHUNK_SIZE = 200000
+    BATCH_SIZE_GPU = 32768
+    BATCH_SIZE_CPU = 8192
+    PREFETCH_FACTOR = 8
     NUM_WORKERS = 10
     
-    # Memory thresholds - adjusted for better performance
-    MEMORY_WARNING_THRESHOLD = 48
-    MEMORY_CRITICAL_THRESHOLD = 53
-    MEMORY_ABORT_THRESHOLD = 58
+    # Memory thresholds - adjusted for full data usage
+    MEMORY_WARNING_THRESHOLD = 52
+    MEMORY_CRITICAL_THRESHOLD = 58
+    MEMORY_ABORT_THRESHOLD = 62
     
-    # Data size limits
+    # Data size limits - increased for full data usage
     MAX_TRAIN_SIZE = 15000000
     MAX_TEST_SIZE = 2500000
-    MAX_INTERACTION_FEATURES = 60
+    MAX_INTERACTION_FEATURES = 80
     
-    # Model training settings
+    # Model training settings - GPU XGBoost focused
     MODEL_TRAINING_CONFIG = {
         'lightgbm': {
             'max_depth': 6,
@@ -86,51 +87,60 @@ class Config:
             'bagging_fraction': 0.8,
             'bagging_freq': 5,
             'learning_rate': 0.05,
-            'n_estimators': 200,
-            'early_stopping_rounds': 10,
-            'verbosity': -1
+            'n_estimators': 500,
+            'early_stopping_rounds': 50,
+            'verbosity': -1,
+            'device': 'gpu',
+            'gpu_platform_id': 0,
+            'gpu_device_id': 0
         },
         'xgboost': {
-            'max_depth': 6,
-            'learning_rate': 0.05,
-            'n_estimators': 200,
-            'min_child_weight': 5,
+            'tree_method': 'gpu_hist',
+            'gpu_id': 0,
+            'predictor': 'gpu_predictor',
+            'max_depth': 8,
+            'learning_rate': 0.1,
+            'n_estimators': 500,
+            'min_child_weight': 10,
             'gamma': 0.1,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
-            'reg_alpha': 0.1,
-            'reg_lambda': 1.0,
-            'early_stopping_rounds': 10,
+            'reg_alpha': 0.5,
+            'reg_lambda': 0.5,
+            'early_stopping_rounds': 50,
             'verbosity': 0
         },
         'catboost': {
             'depth': 6,
             'learning_rate': 0.05,
-            'iterations': 200,
+            'iterations': 500,
             'l2_leaf_reg': 3,
             'border_count': 128,
             'verbose': 0,
-            'early_stopping_rounds': 10
+            'early_stopping_rounds': 50,
+            'task_type': 'GPU',
+            'devices': '0'
         },
         'logistic': {
             'C': 0.5,
             'penalty': 'l2',
             'solver': 'saga',
-            'max_iter': 100,
+            'max_iter': 2000,
             'n_jobs': -1,
             'verbose': 0
         }
     }
     
-    # Feature engineering settings
+    # Feature engineering settings - increased limits
     FEATURE_ENGINEERING_CONFIG = {
-        'target_feature_count': 100,
-        'use_feature_selection': True,
+        'target_feature_count': 500,
+        'use_feature_selection': False,
         'feature_selection_method': 'mutual_info',
         'cleanup_after_each_step': True,
-        'max_categorical_for_encoding': 20,
-        'max_numeric_for_interaction': 15,
-        'interaction_max_features': 30
+        'max_categorical_for_encoding': 30,
+        'max_numeric_for_interaction': 20,
+        'interaction_max_features': 50,
+        'disable_normalization_for_trees': True
     }
     
     # Training and evaluation settings
@@ -141,7 +151,7 @@ class Config:
     # Calibration settings
     CALIBRATION_CONFIG = {
         'enabled': False,
-        'methods': ['isotonic', 'sigmoid'],
+        'methods': ['isotonic'],
         'cv_folds': 3
     }
     
@@ -160,7 +170,9 @@ class Config:
     EVALUATION_CONFIG = {
         'metrics': ['auc', 'ap', 'log_loss'],
         'ctr_validation_enabled': True,
-        'ctr_tolerance': 0.001
+        'ctr_tolerance': 0.001,
+        'ap_weight': 0.5,
+        'wll_weight': 0.5
     }
     
     # Target metrics
@@ -177,21 +189,21 @@ class Config:
     ENABLE_PARALLEL_PROCESSING = True
     ENABLE_MEMORY_MAPPING = False
     ENABLE_CACHING = True
-    CACHE_SIZE_MB = 2048
+    CACHE_SIZE_MB = 4096
     
-    # Large dataset specific settings - OPTIMIZED
+    # Large dataset specific settings
     LARGE_DATASET_MODE = True
     MEMORY_EFFICIENT_SAMPLING = True
-    AGGRESSIVE_SAMPLING_THRESHOLD = 0.65
-    MIN_SAMPLE_SIZE = 100000
-    MAX_SAMPLE_SIZE = 1000000
+    AGGRESSIVE_SAMPLING_THRESHOLD = 0.80
+    MIN_SAMPLE_SIZE = 3000000
+    MAX_SAMPLE_SIZE = 12000000
     
-    # NEW: Logistic regression sampling configuration
+    # Logistic regression sampling configuration - increased for full data usage
     LOGISTIC_SAMPLING_CONFIG = {
-        'normal_size': 1000000,
-        'warning_size': 750000,
-        'critical_size': 500000,
-        'abort_size': 100000,
+        'normal_size': 8000000,
+        'warning_size': 5000000,
+        'critical_size': 3000000,
+        'abort_size': 1000000,
         'enable_dynamic_sizing': True
     }
     
@@ -291,7 +303,7 @@ class Config:
         """Get memory efficient configuration"""
         return {
             'chunk_size': cls.CHUNK_SIZE,
-            'batch_size': cls.BATCH_SIZE_CPU,
+            'batch_size': cls.BATCH_SIZE_GPU if cls.GPU_AVAILABLE else cls.BATCH_SIZE_CPU,
             'max_train_size': cls.MAX_TRAIN_SIZE,
             'max_test_size': cls.MAX_TEST_SIZE,
             'memory_thresholds': {
@@ -316,6 +328,12 @@ class Config:
     def get_optimization_summary(cls):
         """Get optimization settings summary"""
         return {
+            'gpu_optimizations': {
+                'gpu_available': cls.GPU_AVAILABLE,
+                'force_gpu_xgboost': cls.FORCE_GPU_XGBOOST,
+                'rtx_4060_ti_optimized': cls.RTX_4060_TI_OPTIMIZATION,
+                'gpu_memory_limit': cls.GPU_MEMORY_LIMIT
+            },
             'memory_optimizations': {
                 'target_features': cls.FEATURE_ENGINEERING_CONFIG['target_feature_count'],
                 'feature_selection_enabled': cls.FEATURE_ENGINEERING_CONFIG['use_feature_selection'],
@@ -336,13 +354,11 @@ class Config:
             }
         }
 
-# Backward compatibility
 def get_config():
     """Get configuration instance"""
     return Config()
 
 if __name__ == "__main__":
-    # Test configuration
     config = Config()
     
     print("=== Configuration Test ===")

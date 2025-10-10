@@ -56,7 +56,10 @@ class CTRFeatureEngineer:
         self.final_feature_columns = []
         self.target_column = None
         
-        self.target_feature_count = 200
+        # Increased feature count - no restriction
+        self.target_feature_count = config.FEATURE_ENGINEERING_CONFIG.get('target_feature_count', 500)
+        self.use_feature_selection = config.FEATURE_ENGINEERING_CONFIG.get('use_feature_selection', False)
+        self.disable_normalization_for_trees = config.FEATURE_ENGINEERING_CONFIG.get('disable_normalization_for_trees', True)
         self.feature_importance_scores = {}
         
         self.processing_stats = {
@@ -117,7 +120,9 @@ class CTRFeatureEngineer:
             
             X_train, X_test = self._encode_categorical_safe(X_train, X_test)
             
-            X_train, X_test = self._normalize_numeric_basic(X_train, X_test)
+            # Skip normalization for tree models
+            if not self.disable_normalization_for_trees:
+                X_train, X_test = self._normalize_numeric_basic(X_train, X_test)
             
             X_train, X_test = self._clean_final_features(X_train, X_test)
             
@@ -192,9 +197,13 @@ class CTRFeatureEngineer:
             X_train, X_test = self._create_numeric_features(X_train, X_test)
             self._force_memory_cleanup()
             
-            logger.info(f"Starting feature selection: {X_train.shape[1]} -> {self.target_feature_count} features")
-            X_train, X_test = self._select_important_features(X_train, X_test, y_train)
-            self._force_memory_cleanup()
+            # Feature selection - DISABLED by default for full feature usage
+            if self.use_feature_selection and X_train.shape[1] > self.target_feature_count:
+                logger.info(f"Starting feature selection: {X_train.shape[1]} -> {self.target_feature_count} features")
+                X_train, X_test = self._select_important_features(X_train, X_test, y_train)
+                self._force_memory_cleanup()
+            else:
+                logger.info(f"Feature selection DISABLED - using all {X_train.shape[1]} features")
             
             X_train, X_test = self._final_data_cleanup_optimized(X_train, X_test)
             self._force_memory_cleanup()
@@ -692,7 +701,11 @@ class CTRFeatureEngineer:
         return X_train, X_test
     
     def _normalize_numeric_basic(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Basic numeric normalization"""
+        """Basic numeric normalization - DISABLED for tree models"""
+        if self.disable_normalization_for_trees:
+            logger.info("Normalization DISABLED for tree-based models")
+            return X_train, X_test
+        
         try:
             for col in self.numerical_features:
                 if col in X_train.columns and col in X_test.columns:
@@ -825,7 +838,8 @@ class CTRFeatureEngineer:
             X_train = self._safe_fillna(X_train)
             X_test = self._safe_fillna(X_test)
             X_train, X_test = self._encode_categorical_safe(X_train, X_test)
-            X_train, X_test = self._normalize_numeric_basic(X_train, X_test)
+            if not self.disable_normalization_for_trees:
+                X_train, X_test = self._normalize_numeric_basic(X_train, X_test)
             X_train, X_test = self._clean_final_features(X_train, X_test)
             
             self.final_feature_columns = list(X_train.columns)
