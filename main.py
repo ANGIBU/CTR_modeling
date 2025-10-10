@@ -288,7 +288,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             logger.info("Quick mode: Loading sample data (50 samples)")
             train_df, test_df = data_loader.load_quick_sample_data()
         else:
-            logger.info("Full mode: Loading complete dataset for target score")
+            logger.info("Full mode: Loading complete dataset")
             train_df, test_df = data_loader.load_large_data_optimized()
         
         if train_df is None or test_df is None:
@@ -304,7 +304,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             feature_engineer.set_quick_mode(True)
             logger.info("Quick mode: Basic feature engineering only")
         else:
-            logger.info("Full mode: Tree model optimized features (no normalization)")
+            logger.info("Full mode: Tree model optimized features")
         
         X_train, X_test = feature_engineer.engineer_features(train_df, test_df)
         
@@ -314,7 +314,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         
         logger.info(f"Feature engineering completed - Features: {X_train.shape[1]}")
         
-        logger.info("3. Model training phase (Multi-model with ensemble)")
+        logger.info("3. Model training phase")
         
         trainer = CTRTrainer(config)
         logger.info("CTR Trainer initialized")
@@ -338,7 +338,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             logger.info(f"Available memory before split: {available_memory:.1f}GB")
         
         X_train_split, X_val_split, y_train_split, y_val_split = safe_train_test_split(
-            X_train, y_train, test_size=0.3, random_state=42
+            X_train, y_train, test_size=0.2, random_state=42
         )
         
         logger.info(f"Data split completed - train: {X_train_split.shape}, validation: {X_val_split.shape}")
@@ -520,7 +520,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.info("Submission file generation started")
         logger.info(f"Test data size: {len(X_test)} rows")
         
-        batch_size = 50000
+        batch_size = 80000
         all_predictions = []
         
         if ensemble_used and ensemble_manager.final_ensemble and ensemble_manager.final_ensemble.is_fitted:

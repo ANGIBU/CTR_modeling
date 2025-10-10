@@ -134,47 +134,10 @@ class Config:
     )
     
     MODEL_TRAINING_CONFIG = {
-        'lightgbm': {
-            'max_depth': 8,
-            'num_leaves': 63,
-            'min_data_in_leaf': 200,
-            'feature_fraction': 0.8,
-            'bagging_fraction': 0.8,
-            'bagging_freq': 5,
-            'lambda_l1': 0.1,
-            'lambda_l2': 0.1,
-            'min_gain_to_split': 0.02,
-            'max_cat_threshold': 32,
-            'cat_smooth': 10.0,
-            'cat_l2': 10.0,
-            'learning_rate': 0.05,
-            'num_iterations': 800,
-            'scale_pos_weight': 51.43,
-            'is_unbalance': True,
-            'device': 'gpu' if GPU_AVAILABLE else 'cpu'
-        },
-        'xgboost': {
-            'objective': 'binary:logistic',
-            'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
-            'max_depth': 8,
-            'learning_rate': 0.05,
-            'n_estimators': 500,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'min_child_weight': 1,
-            'gamma': 0,
-            'alpha': 0,
-            'lambda': 1,
-            'scale_pos_weight': 51.43,
-            'gpu_id': 0 if GPU_AVAILABLE else None,
-            'verbosity': 0,
-            'seed': 42,
-            'n_jobs': -1
-        },
         'xgboost_gpu': {
             'objective': 'binary:logistic',
             'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
-            'max_depth': 6,
+            'max_depth': 8,
             'learning_rate': 0.05,
             'subsample': 0.9,
             'colsample_bytree': 0.8,
@@ -227,7 +190,8 @@ class Config:
         'cleanup_after_each_step': True,
         'intermediate_storage': False,
         'use_nvtabular': NVTABULAR_ENABLED,
-        'normalize_continuous': False
+        'normalize_continuous': False,
+        'tree_model_optimized': True
     }
     
     CV_FOLDS = 5
@@ -235,7 +199,7 @@ class Config:
     RANDOM_STATE = 42
     USE_CROSS_VALIDATION = True
     
-    EARLY_STOPPING_ROUNDS = 30
+    EARLY_STOPPING_ROUNDS = 20
     EARLY_STOPPING_TOLERANCE = 1e-5
     
     OPTUNA_N_TRIALS = 150
@@ -244,7 +208,7 @@ class Config:
     OPTUNA_VERBOSITY = 1
     
     ENSEMBLE_CONFIG = {
-        'voting_weights': {'lightgbm': 0.45, 'xgboost': 0.35, 'logistic': 0.2},
+        'voting_weights': {'xgboost_gpu': 0.7, 'logistic': 0.3},
         'stacking_cv_folds': 5,
         'blending_ratio': 0.8,
         'diversity_threshold': 0.03,
