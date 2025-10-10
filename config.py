@@ -137,11 +137,11 @@ class Config:
         'xgboost_gpu': {
             'objective': 'binary:logistic',
             'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
-            'max_depth': 6,
-            'learning_rate': 0.1,
-            'subsample': 0.9,
-            'colsample_bytree': 0.9,
-            'scale_pos_weight': 51.43,
+            'max_depth': 7,
+            'learning_rate': 0.05,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'scale_pos_weight': 15.0,
             'min_child_weight': 5,
             'gamma': 0.1,
             'reg_alpha': 0.05,
@@ -221,14 +221,14 @@ class Config:
     
     CALIBRATION_METHOD = 'isotonic'
     CALIBRATION_CV_FOLDS = 3
-    CALIBRATION_MANDATORY = False
+    CALIBRATION_MANDATORY = True
     
     EVALUATION_CONFIG = {
         'ap_weight': 0.5,
         'wll_weight': 0.5,
         'target_combined_score': 0.35,
         'target_ctr': 0.0191,
-        'ctr_tolerance': 0.001,
+        'ctr_tolerance': 0.0005,
         'bias_penalty_weight': 5.0,
         'calibration_weight': 0.4,
         'pos_weight': 51.43,
@@ -239,12 +239,12 @@ class Config:
     }
     
     CTR_BIAS_CORRECTION = {
-        'enable': False,
+        'enable': True,
         'target_ctr': 0.0191,
         'correction_factor': 1.0,
-        'post_processing': False,
+        'post_processing': True,
         'clip_range': (0.0001, 0.5),
-        'bias_threshold': 0.0003,
+        'bias_threshold': 0.0005,
         'calibration_strength': 1.0,
         'prediction_scaling': 1.0
     }

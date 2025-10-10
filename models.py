@@ -303,8 +303,13 @@ class BaseModel(ABC):
             return False
     
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Probability predictions (no calibration by default)"""
-        return self.predict_proba_raw(X)
+        """Probability predictions with calibration if available"""
+        raw_pred = self.predict_proba_raw(X)
+        
+        if self.is_calibrated and self.ctr_calibrator and self.ctr_calibrator.is_fitted:
+            return self.ctr_calibrator.transform(raw_pred)
+        
+        return raw_pred
     
     @abstractmethod
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
@@ -327,11 +332,11 @@ class XGBoostGPUModel(BaseModel):
         default_params = {
             'objective': 'binary:logistic',
             'tree_method': 'gpu_hist' if TORCH_GPU_AVAILABLE else 'hist',
-            'max_depth': 6,
-            'learning_rate': 0.1,
-            'subsample': 0.9,
-            'colsample_bytree': 0.9,
-            'scale_pos_weight': 51.43,
+            'max_depth': 7,
+            'learning_rate': 0.05,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'scale_pos_weight': 15.0,
             'min_child_weight': 5,
             'gamma': 0.1,
             'reg_alpha': 0.05,

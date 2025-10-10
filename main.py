@@ -189,6 +189,35 @@ def safe_train_test_split(X, y, test_size=0.3, random_state=42):
         split_point = int(len(X) * (1 - test_size))
         return X.iloc[:split_point], X.iloc[split_point:], y.iloc[:split_point], y.iloc[split_point:]
 
+def apply_ctr_postprocessing(predictions: np.ndarray, target_ctr: float = 0.0191, bias_threshold: float = 0.0005) -> np.ndarray:
+    """Apply CTR post-processing to align predictions with target CTR"""
+    try:
+        current_ctr = predictions.mean()
+        ctr_bias = abs(current_ctr - target_ctr)
+        
+        logger.info(f"CTR Post-processing - Current: {current_ctr:.4f}, Target: {target_ctr:.4f}, Bias: {ctr_bias:.6f}")
+        
+        if ctr_bias > bias_threshold:
+            if current_ctr > 0:
+                correction_factor = target_ctr / current_ctr
+                corrected = predictions * correction_factor
+                corrected = np.clip(corrected, 1e-7, 1 - 1e-7)
+                
+                final_ctr = corrected.mean()
+                logger.info(f"CTR correction applied: {current_ctr:.4f} -> {final_ctr:.4f} (factor: {correction_factor:.4f})")
+                
+                return corrected
+            else:
+                logger.warning("Current CTR is zero, cannot apply correction")
+                return predictions
+        else:
+            logger.info(f"CTR within threshold ({bias_threshold:.6f}), no correction needed")
+            return predictions
+            
+    except Exception as e:
+        logger.error(f"CTR post-processing failed: {e}")
+        return predictions
+
 def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[str, Any]]:
     """Execute complete CTR modeling pipeline"""
     try:
@@ -341,6 +370,15 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 )
                 
                 if model is not None and hasattr(model, 'is_fitted') and model.is_fitted:
+                    if config.CALIBRATION_MANDATORY and not model.is_calibrated:
+                        logger.info(f"{model_name}: Applying mandatory calibration")
+                        calibration_success = model.apply_calibration(X_val_split, y_val_split, method=config.CALIBRATION_METHOD)
+                        
+                        if calibration_success:
+                            logger.info(f"{model_name}: Calibration applied successfully")
+                        else:
+                            logger.warning(f"{model_name}: Calibration failed, using raw predictions")
+                    
                     trained_models[model_name] = model
                     model_performances[model_name] = performance
                     
@@ -476,6 +514,9 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         best_model = trained_models[best_model_name]
         logger.info(f"Using single model: {best_model_name}")
         
+        calibration_used = best_model.is_calibrated if hasattr(best_model, 'is_calibrated') else False
+        logger.info(f"Model calibration status: {'Enabled' if calibration_used else 'Disabled'}")
+        
         for i in range(0, len(X_test), batch_size):
             end_idx = min(i + batch_size, len(X_test))
             batch_X = X_test.iloc[i:end_idx]
@@ -502,6 +543,14 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             predictions = np.full(len(predictions), 0.0191)
         
         logger.info(f"Raw predictions - mean: {predictions.mean():.4f}, std: {predictions.std():.4f}")
+        
+        if config.CTR_BIAS_CORRECTION['enable'] and config.CTR_BIAS_CORRECTION['post_processing']:
+            predictions = apply_ctr_postprocessing(
+                predictions,
+                target_ctr=config.CTR_BIAS_CORRECTION['target_ctr'],
+                bias_threshold=config.CTR_BIAS_CORRECTION['bias_threshold']
+            )
+            logger.info(f"Post-processed predictions - mean: {predictions.mean():.4f}, std: {predictions.std():.4f}")
         
         try:
             sample_submission = pd.read_csv('data/sample_submission.csv')
@@ -539,6 +588,8 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             'ensemble_enabled': ensemble_enabled,
             'ensemble_used': ensemble_used,
             'calibration_applied': config.CALIBRATION_MANDATORY,
+            'calibration_used': calibration_used,
+            'ctr_postprocessing_applied': config.CTR_BIAS_CORRECTION['enable'] and config.CTR_BIAS_CORRECTION['post_processing'],
             'submission_file': submission_path,
             'submission_rows': len(predictions),
             'model_performances': model_performances,
@@ -560,6 +611,8 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.info(f"Execution time: {execution_time:.2f}s")
         logger.info(f"Successful models: {len(trained_models)}")
         logger.info(f"Ensemble activated: {'Yes' if ensemble_enabled else 'No'}")
+        logger.info(f"Calibration used: {'Yes' if calibration_used else 'No'}")
+        logger.info(f"CTR Post-processing: {'Yes' if results['ctr_postprocessing_applied'] else 'No'}")
         logger.info(f"GPU optimization: {'Yes' if gpu_optimization else 'No'}")
         if gpu_optimization:
             logger.info(f"GPU info: {gpu_info}")
@@ -621,7 +674,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 config=config,
                 results=results,
                 model_name=primary_model,
-                notes=f"Mode: {'Quick' if quick_mode else 'Full'}"
+                notes=f"Mode: {'Quick' if quick_mode else 'Full'}, Calibration: {'Yes' if calibration_used else 'No'}, CTR Post-proc: {'Yes' if results['ctr_postprocessing_applied'] else 'No'}"
             )
             
             logger.info("Experiment logged successfully")
@@ -672,6 +725,12 @@ def main():
                 logger.info(f"Mode: {'Quick (50 samples)' if results.get('quick_mode') else 'Full dataset (0.35+ target)'}")
                 logger.info(f"Execution time: {results['execution_time']:.2f}s")
                 logger.info(f"Successful models: {results['successful_models']}")
+                
+                if 'calibration_used' in results:
+                    logger.info(f"Calibration: {results['calibration_used']}")
+                
+                if 'ctr_postprocessing_applied' in results:
+                    logger.info(f"CTR Post-processing: {results['ctr_postprocessing_applied']}")
                 
                 if 'gpu_used' in results:
                     logger.info(f"GPU optimization: {results['gpu_used']}")
