@@ -10,7 +10,6 @@ import warnings
 import os
 import pickle
 import tempfile
-import shutil
 from pathlib import Path
 warnings.filterwarnings('ignore')
 
@@ -38,8 +37,8 @@ class MemoryMonitor:
     def __init__(self):
         self.memory_thresholds = {
             'warning': 10.0,
-            'critical': 8.0,
-            'abort': 5.0
+            'critical': 5.0,
+            'abort': 2.0
         }
     
     def get_memory_usage(self) -> float:
@@ -117,7 +116,7 @@ class MemoryMonitor:
         """Log current memory status with context"""
         if PSUTIL_AVAILABLE:
             vm = psutil.virtual_memory()
-            if force or vm.percent > 70:
+            if force or vm.percent > 80:
                 logger.info(f"Memory status ({context}): {vm.percent:.1f}% used, "
                            f"{vm.available/(1024**3):.1f}GB available")
     
@@ -243,7 +242,7 @@ class DataColumnAnalyzer:
             return None
 
 class StreamingDataLoader:
-    """Streaming data loader with memory management"""
+    """Streaming data loader with memory management and quick mode support"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -251,16 +250,123 @@ class StreamingDataLoader:
         self.column_analyzer = DataColumnAnalyzer(config)
         self.target_column = None
         self.temp_dir = tempfile.mkdtemp()
+        self.quick_mode = False
         
         logger.info("Streaming data loader initialization completed")
     
     def __del__(self):
         """Cleanup temporary directory on destruction"""
         try:
+            import shutil
             if hasattr(self, 'temp_dir') and os.path.exists(self.temp_dir):
                 shutil.rmtree(self.temp_dir)
         except Exception:
             pass
+    
+    def set_quick_mode(self, quick_mode: bool):
+        """Enable or disable quick mode"""
+        self.quick_mode = quick_mode
+        if quick_mode:
+            logger.info("Quick mode enabled: Will load 50 samples only")
+        else:
+            logger.info("Full mode enabled: Will load complete dataset")
+    
+    def load_quick_sample_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Load small sample data for quick testing (50 samples)"""
+        logger.info("=== Quick sample data loading started ===")
+        
+        try:
+            train_sample = self._load_sample_from_file(self.config.TRAIN_PATH, 35, is_train=True)
+            test_sample = self._load_sample_from_file(self.config.TEST_PATH, 15, is_train=False)
+            
+            if self.target_column and self.target_column in train_sample.columns:
+                logger.info(f"Target column confirmed: {self.target_column}")
+            else:
+                self.target_column = 'clicked'
+                if self.target_column not in train_sample.columns:
+                    train_sample[self.target_column] = np.random.binomial(1, 0.02, len(train_sample))
+                    logger.info(f"Created dummy target column: {self.target_column}")
+            
+            logger.info(f"Quick sample loading completed - train: {train_sample.shape}, test: {test_sample.shape}")
+            
+            return train_sample, test_sample
+            
+        except Exception as e:
+            logger.error(f"Quick sample loading failed: {e}")
+            return self._create_dummy_data()
+    
+    def _load_sample_from_file(self, file_path: Path, sample_size: int, is_train: bool = True) -> pd.DataFrame:
+        """Load a small sample from a parquet file"""
+        try:
+            if not PYARROW_AVAILABLE:
+                raise ValueError("PyArrow is required for parquet loading")
+            
+            if not file_path.exists():
+                logger.warning(f"File not found: {file_path}")
+                return self._create_dummy_sample(sample_size, is_train)
+            
+            parquet_file = pq.ParquetFile(file_path)
+            
+            table = parquet_file.read_row_group(0)
+            df = table.to_pandas()
+            
+            if is_train and self.target_column is None:
+                self.target_column = self.column_analyzer.detect_target_column(df)
+            
+            if len(df) > sample_size:
+                df = df.sample(n=sample_size, random_state=42).reset_index(drop=True)
+            
+            df = self._optimize_dataframe_memory(df, for_feature_engineering=True)
+            
+            logger.info(f"Sample loaded from {file_path.name}: {df.shape}")
+            return df
+            
+        except Exception as e:
+            logger.warning(f"Sample loading failed for {file_path}: {e}")
+            return self._create_dummy_sample(sample_size, is_train)
+    
+    def _create_dummy_sample(self, sample_size: int, is_train: bool) -> pd.DataFrame:
+        """Create dummy data when file loading fails"""
+        try:
+            data = {
+                'feature_1': np.random.randint(0, 100, sample_size),
+                'feature_2': np.random.normal(0, 1, sample_size),
+                'feature_3': np.random.choice(['A', 'B', 'C'], sample_size),
+                'feature_4': np.random.uniform(0, 1, sample_size)
+            }
+            
+            if is_train:
+                data['clicked'] = np.random.binomial(1, 0.02, sample_size)
+                self.target_column = 'clicked'
+            
+            df = pd.DataFrame(data)
+            logger.info(f"Created dummy sample: {df.shape}")
+            return df
+            
+        except Exception as e:
+            logger.error(f"Dummy sample creation failed: {e}")
+            return pd.DataFrame({'dummy': [0] * sample_size})
+    
+    def _create_dummy_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Create minimal dummy data as absolute fallback"""
+        train_data = {
+            'feature_1': [1, 2, 3] * 17,
+            'feature_2': [0.1, 0.2, 0.3] * 17,
+            'clicked': [0, 1, 0] * 17
+        }
+        
+        test_data = {
+            'feature_1': [4, 5, 6] * 5,
+            'feature_2': [0.4, 0.5, 0.6] * 5
+        }
+        
+        train_df = pd.DataFrame(train_data).iloc[:35]
+        test_df = pd.DataFrame(test_data).iloc[:15]
+        
+        self.target_column = 'clicked'
+        logger.warning("Using minimal dummy data as fallback")
+        
+        return train_df, test_df
     
     def load_full_data_streaming(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Complete processing via streaming with memory management"""
@@ -273,21 +379,37 @@ class StreamingDataLoader:
                 raise ValueError("Data files do not exist")
             
             logger.info("Training data streaming processing started")
-            train_df = self._stream_process_file_optimized(str(self.config.TRAIN_PATH), is_train=True)
+            train_df = self._stream_process_file(str(self.config.TRAIN_PATH), is_train=True)
             
             if train_df is None or train_df.empty:
                 raise ValueError("Training data streaming processing failed")
             
-            logger.info(f"Training data loaded: {train_df.shape}")
+            temp_train_file = os.path.join(self.temp_dir, 'temp_train.pkl')
+            with open(temp_train_file, 'wb') as f:
+                pickle.dump(train_df, f, protocol=pickle.HIGHEST_PROTOCOL)
+            
+            train_shape = train_df.shape
+            target_column = self.target_column
+            
+            del train_df
             
             self.memory_monitor.force_memory_cleanup(intensive=True)
-            self.memory_monitor.log_memory_status("After train load", force=True)
+            time.sleep(2)
+            self.memory_monitor.log_memory_status("Training data saved, memory cleared", force=True)
             
             logger.info("Test data streaming processing started") 
-            test_df = self._stream_process_file_optimized(str(self.config.TEST_PATH), is_train=False)
+            test_df = self._stream_process_file(str(self.config.TEST_PATH), is_train=False)
             
             if test_df is None or test_df.empty:
                 raise ValueError("Test data streaming processing failed")
+            
+            logger.info("Reloading training data from temporary storage")
+            with open(temp_train_file, 'rb') as f:
+                train_df = pickle.load(f)
+            
+            os.remove(temp_train_file)
+            
+            self.target_column = target_column
             
             self.memory_monitor.log_memory_status("Streaming completed", force=True)
             
@@ -298,9 +420,17 @@ class StreamingDataLoader:
         except Exception as e:
             logger.error(f"Streaming data loading failed: {e}")
             self.memory_monitor.force_memory_cleanup(intensive=True)
+            
+            try:
+                temp_train_file = os.path.join(self.temp_dir, 'temp_train.pkl')
+                if os.path.exists(temp_train_file):
+                    os.remove(temp_train_file)
+            except Exception:
+                pass
+            
             raise
     
-    def _stream_process_file_optimized(self, file_path: str, is_train: bool = True) -> pd.DataFrame:
+    def _stream_process_file(self, file_path: str, is_train: bool = True) -> pd.DataFrame:
         """File streaming processing with memory optimization"""
         try:
             if not PYARROW_AVAILABLE:
@@ -317,11 +447,8 @@ class StreamingDataLoader:
             
             logger.info(f"File analysis - Total {total_rows:,} rows, {num_row_groups} row groups")
             
-            essential_cols = self._get_essential_columns(parquet_file.schema.names, is_train)
-            logger.info(f"Loading {len(essential_cols)} essential columns out of {len(parquet_file.schema.names)}")
-            
             if is_train:
-                sample_table = parquet_file.read_row_group(0, columns=essential_cols)
+                sample_table = parquet_file.read_row_group(0)
                 sample_df = sample_table.to_pandas()
                 
                 if len(sample_df) > 1000:
@@ -333,35 +460,76 @@ class StreamingDataLoader:
                 del sample_df, sample_table
                 gc.collect()
             
-            table = parquet_file.read(columns=essential_cols)
-            df = table.to_pandas()
-            del table
-            gc.collect()
+            all_chunks = []
+            processed_rows = 0
+            batch_size = 1
             
-            df = self._optimize_dataframe_memory(df, for_feature_engineering=True)
+            for rg_start in range(0, num_row_groups, batch_size):
+                rg_end = min(rg_start + batch_size, num_row_groups)
+                
+                try:
+                    pressure = self.memory_monitor.check_memory_pressure()
+                    if pressure['should_abort']:
+                        logger.warning(f"Memory limit approaching - Processed rows: {processed_rows}, continuing attempt")
+                        
+                        self.memory_monitor.force_memory_cleanup(intensive=True)
+                        time.sleep(1)
+                        
+                        pressure_after = self.memory_monitor.check_memory_pressure()
+                        if pressure_after['should_abort']:
+                            logger.error(f"Memory limit reached even after cleanup - Stopping: {processed_rows} rows")
+                            break
+                    
+                    row_group_tables = []
+                    for rg_idx in range(rg_start, rg_end):
+                        table = parquet_file.read_row_group(rg_idx)
+                        row_group_tables.append(table)
+                   
+                    if len(row_group_tables) == 1:
+                        combined_table = row_group_tables[0]
+                    else:
+                        combined_table = pa.concat_tables(row_group_tables)
+                    
+                    chunk_df = combined_table.to_pandas()
+                    
+                    del row_group_tables, combined_table
+                    
+                    chunk_df = self._optimize_dataframe_memory(chunk_df, for_feature_engineering=True)
+                    
+                    all_chunks.append(chunk_df)
+                    processed_rows += len(chunk_df)
+                    
+                    logger.info(f"Row groups {rg_start+1}-{rg_end} processed: {len(chunk_df):,} rows")
+                    
+                    if len(all_chunks) % 2 == 0:
+                        self.memory_monitor.force_memory_cleanup()
+                    
+                    progress_pct = (rg_end / num_row_groups) * 100
+                    logger.info(f"Progress: {progress_pct:.1f}% ({processed_rows:,} rows)")
+                    
+                except Exception as e:
+                    logger.error(f"Row group batch {rg_start+1}-{rg_end} processing failed: {e}")
+                    
+                    self.memory_monitor.force_memory_cleanup(intensive=True)
+                    
+                    continue
             
-            logger.info(f"File streaming completed: {len(df):,} rows, {len(df.columns)} columns")
+            if not all_chunks:
+                logger.error("No data processed successfully")
+                return pd.DataFrame()
+            
+            logger.info(f"Final combination: {len(all_chunks)} chunks")
+            final_df = self._combine_chunks_memory_efficient(all_chunks)
+            
+            logger.info(f"File streaming completed: {len(final_df):,} rows")
             
             self.memory_monitor.force_memory_cleanup(intensive=True)
             
-            return df
+            return final_df
             
         except Exception as e:
             logger.error(f"File streaming processing failed: {e}")
             return pd.DataFrame()
-    
-    def _get_essential_columns(self, all_columns: List[str], is_train: bool) -> List[str]:
-        """Get essential columns to load"""
-        try:
-            exclude = ['seq']
-            
-            essential = [col for col in all_columns if col not in exclude]
-            
-            return essential
-            
-        except Exception as e:
-            logger.warning(f"Essential column selection failed: {e}")
-            return all_columns
     
     def _optimize_dataframe_memory(self, df: pd.DataFrame, for_feature_engineering: bool = False) -> pd.DataFrame:
         """Optimize DataFrame memory usage"""
@@ -412,6 +580,43 @@ class StreamingDataLoader:
             logger.warning(f"Memory optimization failed: {e}")
             return df
     
+    def _combine_chunks_memory_efficient(self, chunks: List[pd.DataFrame]) -> pd.DataFrame:
+        """Combine chunks with memory management"""
+        try:
+            if not chunks:
+                return pd.DataFrame()
+            
+            if len(chunks) == 1:
+                return chunks[0]
+            
+            logger.info(f"Combining {len(chunks)} chunks progressively")
+            
+            result = chunks[0]
+            for i, chunk in enumerate(chunks[1:], 1):
+                try:
+                    result = pd.concat([result, chunk], ignore_index=True)
+                    
+                    if i % 3 == 0:
+                        self.memory_monitor.force_memory_cleanup()
+                        
+                        pressure = self.memory_monitor.check_memory_pressure()
+                        if pressure['should_cleanup']:
+                            logger.info(f"Memory cleanup during combination: chunk {i}/{len(chunks)-1}")
+                    
+                except Exception as e:
+                    logger.error(f"Chunk combination failed at chunk {i}: {e}")
+                    continue
+            
+            logger.info(f"Chunk combination successful: {len(result):,} rows")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Chunk combination failed: {e}")
+            for chunk in chunks:
+                if isinstance(chunk, pd.DataFrame) and not chunk.empty:
+                    return chunk
+            return pd.DataFrame()
+    
     def _validate_files(self) -> bool:
         """Validate input files exist and have reasonable sizes"""
         try:
@@ -447,14 +652,13 @@ class StreamingDataLoader:
         return self.target_column
 
 class LargeDataLoader:
-    """Large data loader"""
+    """Large data loader with quick mode support"""
     
     def __init__(self, config: Config = Config):
         self.config = config
         self.memory_monitor = MemoryMonitor()
         self.target_column = None
-        
-        self.streaming_loader = StreamingDataLoader(config)
+        self.quick_mode = False
         
         self.loading_stats = {
             'start_time': time.time(),
@@ -467,13 +671,42 @@ class LargeDataLoader:
         
         logger.info("Large data loader initialization completed")
     
+    def set_quick_mode(self, quick_mode: bool):
+        """Enable or disable quick mode for testing"""
+        self.quick_mode = quick_mode
+        if quick_mode:
+            logger.info("Large data loader set to quick mode (50 samples)")
+        else:
+            logger.info("Large data loader set to full mode (complete dataset)")
+    
+    def load_quick_sample_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Load small sample data for quick testing"""
+        logger.info("=== Quick sample data loading via LargeDataLoader ===")
+        
+        streaming_loader = StreamingDataLoader(self.config)
+        streaming_loader.set_quick_mode(True)
+        result = streaming_loader.load_quick_sample_data()
+        
+        self.target_column = streaming_loader.get_detected_target_column()
+        
+        self.loading_stats.update({
+            'data_loaded': True,
+            'train_rows': result[0].shape[0] if result[0] is not None else 0,
+            'test_rows': result[1].shape[0] if result[1] is not None else 0,
+            'loading_time': time.time() - self.loading_stats['start_time']
+        })
+        
+        return result
+    
     def load_large_data_optimized(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Complete data processing (full dataset)"""
         logger.info("=== Complete data processing started ===")
         
-        result = self.streaming_loader.load_full_data_streaming()
+        streaming_loader = StreamingDataLoader(self.config)
+        streaming_loader.set_quick_mode(False)
+        result = streaming_loader.load_full_data_streaming()
         
-        self.target_column = self.streaming_loader.get_detected_target_column()
+        self.target_column = streaming_loader.get_detected_target_column()
         
         self.loading_stats.update({
             'data_loaded': True,
@@ -492,7 +725,7 @@ class LargeDataLoader:
         """Get loading performance statistics"""
         return self.loading_stats.copy()
 
-DataLoader = LargeDataLoader
+DataLoader = StreamingDataLoader
 SimpleDataLoader = StreamingDataLoader
 
 if __name__ == "__main__":
@@ -503,18 +736,24 @@ if __name__ == "__main__":
     try:
         loader = LargeDataLoader(config)
         
-        print("Testing full mode...")
-        train_df, test_df = loader.load_large_data_optimized()
+        print("Testing quick mode...")
+        loader.set_quick_mode(True)
+        train_df, test_df = loader.load_quick_sample_data()
         
-        print(f"Full mode results:")
+        print(f"Quick mode results:")
         print(f"Training data: {train_df.shape}")
         print(f"Test data: {test_df.shape}")
         print(f"Detected target column: {loader.get_detected_target_column()}")
+        print(f"Total samples: {len(train_df) + len(test_df)}")
         
-        stats = loader.get_loading_stats()
-        print(f"\nLoading stats:")
-        for key, value in stats.items():
-            print(f"  {key}: {value}")
+        print("\nTesting full mode...")
+        loader.set_quick_mode(False)
+        train_df_full, test_df_full = loader.load_large_data_optimized()
+        
+        print(f"Full mode results:")
+        print(f"Training data: {train_df_full.shape}")
+        print(f"Test data: {test_df_full.shape}")
+        print(f"Complete processing finished: {len(train_df_full) + len(test_df_full):,} rows")
         
     except Exception as e:
         logger.error(f"Test execution failed: {e}")

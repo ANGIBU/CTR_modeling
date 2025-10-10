@@ -26,7 +26,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 class CTRInferenceEngine:
-    """CTR prediction dedicated real-time inference engine"""
+    """CTR prediction dedicated real-time inference engine - final complete version"""
     
     def __init__(self, model_dir: str = "models"):
         self.model_dir = Path(model_dir)
@@ -82,7 +82,7 @@ class CTRInferenceEngine:
         }
     
     def load_models(self) -> bool:
-        """Load saved models"""
+        """Load saved models - ensemble support"""
         logger.info(f"Model loading started: {self.model_dir}")
         
         if not self.model_dir.exists():
@@ -244,10 +244,10 @@ class CTRInferenceEngine:
     
     def predict_single(self, input_data: Dict[str, Any], 
                       model_name: Optional[str] = None, 
-                      use_calibration: bool = False,
+                      use_calibration: bool = True,
                       use_ensemble: bool = True,
-                      use_postprocessing: bool = False) -> Dict[str, Any]:
-        """Single CTR prediction"""
+                      use_postprocessing: bool = True) -> Dict[str, Any]:
+        """Single CTR prediction - final complete version"""
         start_time = time.time()
         
         try:
@@ -294,12 +294,18 @@ class CTRInferenceEngine:
                     else:
                         raw_prediction = model.predict_proba(df)[0]
                     
-                    if use_calibration and hasattr(model, 'is_calibrated') and model.is_calibrated:
+                    if (use_calibration and 
+                        hasattr(model, 'is_calibrated') and 
+                        model.is_calibrated and 
+                        hasattr(model, 'predict_proba')):
                         prediction_proba = model.predict_proba(df)[0]
                         calibration_applied = True
                         
                         with self.lock:
                             self.inference_stats['calibration_stats']['calibrated_predictions'] += 1
+                            if raw_prediction != prediction_proba:
+                                improvement = abs(prediction_proba - self.ctr_baseline) - abs(raw_prediction - self.ctr_baseline)
+                                self.inference_stats['calibration_stats']['calibration_improvements'].append(improvement)
                     else:
                         prediction_proba = raw_prediction
                         
@@ -308,6 +314,16 @@ class CTRInferenceEngine:
                     
                     with self.lock:
                         self.inference_stats['ensemble_stats']['single_model_predictions'] += 1
+                
+                if use_postprocessing:
+                    original_prediction = prediction_proba
+                    prediction_proba = self.postprocessor.apply_postprocessing(
+                        np.array([prediction_proba]), 
+                        target_ctr=self.ctr_baseline
+                    )[0]
+                    
+                    if abs(prediction_proba - original_prediction) > 1e-6:
+                        postprocessing_applied = True
                 
                 prediction_proba = max(0.0001, min(0.9999, prediction_proba))
                 
@@ -357,6 +373,14 @@ class CTRInferenceEngine:
                 'timestamp': time.time()
             }
             
+            if calibration_applied and hasattr(self.models.get(model_name or list(self.models.keys())[0]), 'calibrator'):
+                model_obj = self.models.get(model_name or list(self.models.keys())[0])
+                if model_obj and model_obj.calibrator:
+                    calibration_summary = model_obj.calibrator.get_calibration_summary()
+                    result['calibration_method'] = calibration_summary.get('best_method', 'unknown')
+                    if calibration_summary.get('calibration_scores'):
+                        result['calibration_quality'] = max(calibration_summary['calibration_scores'].values())
+            
             return result
             
         except Exception as e:
@@ -383,14 +407,17 @@ class CTRInferenceEngine:
     
     def predict_batch(self, input_data: List[Dict[str, Any]], 
                      model_name: Optional[str] = None,
-                     use_calibration: bool = False,
+                     use_calibration: bool = True,
                      use_ensemble: bool = True,
-                     use_postprocessing: bool = False) -> List[Dict[str, Any]]:
-        """Batch CTR prediction"""
+                     use_postprocessing: bool = True) -> List[Dict[str, Any]]:
+        """Batch CTR prediction - final complete version"""
         batch_size = 15000
         results = []
         
         logger.info(f"Batch CTR prediction started: {len(input_data)} samples")
+        logger.info(f"Settings - Calibration: {'On' if use_calibration else 'Off'}, "
+                   f"Ensemble: {'On' if use_ensemble else 'Off'}, "
+                   f"Postprocessing: {'On' if use_postprocessing else 'Off'}")
         
         for i in range(0, len(input_data), batch_size):
             batch = input_data[i:i + batch_size]
@@ -407,6 +434,7 @@ class CTRInferenceEngine:
                 start_time = time.time()
                 ensemble_used = False
                 calibration_applied = False
+                postprocessing_applied = False
                 
                 try:
                     if use_ensemble and self.ensemble_manager is not None:
@@ -433,7 +461,10 @@ class CTRInferenceEngine:
                         else:
                             raw_predictions = model.predict_proba(combined_df)
                         
-                        if use_calibration and hasattr(model, 'is_calibrated') and model.is_calibrated:
+                        if (use_calibration and 
+                            hasattr(model, 'is_calibrated') and 
+                            model.is_calibrated and 
+                            hasattr(model, 'predict_proba')):
                             predictions_proba = model.predict_proba(combined_df)
                             calibration_applied = True
                         else:
@@ -441,6 +472,16 @@ class CTRInferenceEngine:
                         
                         with self.lock:
                             self.inference_stats['ensemble_stats']['single_model_predictions'] += len(batch)
+                    
+                    if use_postprocessing:
+                        original_predictions = predictions_proba.copy()
+                        predictions_proba = self.postprocessor.apply_postprocessing(
+                            predictions_proba, 
+                            target_ctr=self.ctr_baseline
+                        )
+                        
+                        if not np.allclose(predictions_proba, original_predictions, atol=1e-6):
+                            postprocessing_applied = True
                     
                     predictions_proba = np.clip(predictions_proba, 0.0001, 0.9999)
                     
@@ -456,9 +497,20 @@ class CTRInferenceEngine:
                     prediction_method = "default"
                     calibration_applied = False
                     ensemble_used = False
+                    postprocessing_applied = False
                 
                 predictions_binary = (predictions_proba >= 0.5).astype(int)
                 latency = (time.time() - start_time) * 1000
+                
+                with self.lock:
+                    if calibration_applied:
+                        self.inference_stats['calibration_stats']['calibrated_predictions'] += len(batch)
+                        for raw_pred, cal_pred in zip(raw_predictions, predictions_proba):
+                            if raw_pred != cal_pred:
+                                improvement = abs(cal_pred - self.ctr_baseline) - abs(raw_pred - self.ctr_baseline)
+                                self.inference_stats['calibration_stats']['calibration_improvements'].append(improvement)
+                    else:
+                        self.inference_stats['calibration_stats']['raw_predictions'] += len(batch)
                 
                 for j, (item, prob, raw_prob, binary) in enumerate(zip(batch, predictions_proba, raw_predictions, predictions_binary)):
                     confidence = abs(prob - 0.5) * 2
@@ -483,12 +535,18 @@ class CTRInferenceEngine:
                         'model_used': prediction_method,
                         'ensemble_used': ensemble_used,
                         'calibration_applied': calibration_applied,
-                        'postprocessing_applied': False,
+                        'postprocessing_applied': postprocessing_applied,
                         'batch_latency_ms': latency,
                         'batch_index': i + j,
                         'recommendation': 'show' if prob > self.ctr_baseline else 'skip',
                         'timestamp': time.time()
                     }
+                    
+                    if calibration_applied and model_name and model_name in self.models:
+                        model_obj = self.models[model_name]
+                        if hasattr(model_obj, 'calibrator') and model_obj.calibrator:
+                            calibration_summary = model_obj.calibrator.get_calibration_summary()
+                            result['calibration_method'] = calibration_summary.get('best_method', 'unknown')
                     
                     results.append(result)
                 
@@ -522,11 +580,14 @@ class CTRInferenceEngine:
     
     def predict_test_data(self, test_df: pd.DataFrame, 
                          model_name: Optional[str] = None,
-                         use_calibration: bool = False,
+                         use_calibration: bool = True,
                          use_ensemble: bool = True,
-                         use_postprocessing: bool = False) -> np.ndarray:
-        """Full test data prediction (for submission)"""
+                         use_postprocessing: bool = True) -> np.ndarray:
+        """Full test data prediction (for submission) - final complete version"""
         logger.info(f"Test data prediction started: {len(test_df):,} rows")
+        logger.info(f"Settings - Calibration: {'On' if use_calibration else 'Off'}, "
+                   f"Ensemble: {'On' if use_ensemble else 'Off'}, "
+                   f"Postprocessing: {'On' if use_postprocessing else 'Off'}")
         
         if not self.is_loaded:
             raise ValueError("Models not loaded")
@@ -576,6 +637,7 @@ class CTRInferenceEngine:
             batch_size = 80000
         
         predictions = []
+        raw_predictions = []
         
         for i in range(0, len(processed_df), batch_size):
             end_idx = min(i + batch_size, len(processed_df))
@@ -583,10 +645,12 @@ class CTRInferenceEngine:
             
             try:
                 ensemble_used = False
+                calibration_applied = False
                 
                 if ensemble_available:
                     try:
                         batch_pred = self.ensemble_manager.predict_with_best_ensemble(batch_df)
+                        batch_raw_pred = batch_pred.copy()
                         ensemble_used = True
                         logger.debug(f"Batch {i//batch_size + 1}: Using ensemble prediction")
                     except Exception as e:
@@ -597,28 +661,79 @@ class CTRInferenceEngine:
                     model = self.models[model_name]
                     
                     if hasattr(model, 'predict_proba_raw'):
-                        batch_pred = model.predict_proba_raw(batch_df)
+                        batch_raw_pred = model.predict_proba_raw(batch_df)
                     else:
-                        batch_pred = model.predict_proba(batch_df)
+                        batch_raw_pred = model.predict_proba(batch_df)
                     
-                    if use_calibration and hasattr(model, 'is_calibrated') and model.is_calibrated:
+                    if (use_calibration and 
+                        hasattr(model, 'is_calibrated') and 
+                        model.is_calibrated):
                         batch_pred = model.predict_proba(batch_df)
+                        calibration_applied = True
+                    else:
+                        batch_pred = batch_raw_pred
+                
+                if use_postprocessing:
+                    original_batch_pred = batch_pred.copy()
+                    batch_pred = self.postprocessor.apply_postprocessing(
+                        batch_pred,
+                        target_ctr=self.ctr_baseline
+                    )
+                    
+                    if not np.allclose(batch_pred, original_batch_pred, atol=1e-6):
+                        logger.debug(f"Batch {i//batch_size + 1}: Postprocessing applied")
                 
                 batch_pred = np.clip(batch_pred, 0.0001, 0.9999)
+                batch_raw_pred = np.clip(batch_raw_pred, 0.0001, 0.9999)
                 
                 predictions.extend(batch_pred)
+                raw_predictions.extend(batch_raw_pred)
                 
-                logger.info(f"Batch {i//batch_size + 1} completed ({i:,}~{end_idx:,})")
+                logger.info(f"Batch {i//batch_size + 1} completed ({i:,}~{end_idx:,}) - "
+                          f"Ensemble: {'Yes' if ensemble_used else 'No'}, "
+                          f"Calibration: {'Yes' if calibration_applied else 'No'}")
                 
             except Exception as e:
                 logger.warning(f"Batch prediction failed: {e}")
                 batch_pred = np.full(len(batch_df), self.ctr_baseline)
+                batch_raw_pred = np.full(len(batch_df), self.ctr_baseline)
                 predictions.extend(batch_pred)
+                raw_predictions.extend(batch_raw_pred)
             
             if i % (batch_size * 10) == 0:
                 gc.collect()
         
         predictions = np.array(predictions)
+        raw_predictions = np.array(raw_predictions)
+        
+        current_ctr = predictions.mean()
+        target_ctr = self.ctr_baseline
+        
+        if abs(current_ctr - target_ctr) > 0.002:
+            logger.info(f"CTR correction: {current_ctr:.4f} → {target_ctr:.4f}")
+            correction_factor = target_ctr / current_ctr if current_ctr > 0 else 1.0
+            predictions = predictions * correction_factor
+            predictions = np.clip(predictions, 0.0001, 0.9999)
+        
+        if ensemble_available and len(raw_predictions) == len(predictions):
+            try:
+                raw_ctr = raw_predictions.mean()
+                final_ctr = predictions.mean()
+                
+                logger.info(f"Final prediction analysis:")
+                logger.info(f"  - Raw CTR: {raw_ctr:.4f}")
+                logger.info(f"  - Final CTR: {final_ctr:.4f}")
+                logger.info(f"  - Target CTR: {target_ctr:.4f}")
+                logger.info(f"  - Method used: {'Ensemble' if ensemble_used else 'Single Model'}")
+                
+                if use_calibration and calibration_applied:
+                    logger.info(f"  - Calibration: Applied")
+                    
+                if use_postprocessing:
+                    logger.info(f"  - Postprocessing: Applied")
+                
+            except Exception as e:
+                logger.warning(f"Prediction analysis failed: {e}")
         
         logger.info(f"Test data prediction completed: {len(predictions):,}")
         return predictions
@@ -632,7 +747,7 @@ class CTRInferenceEngine:
         self.inference_stats['average_latency_ms'] = new_avg
     
     def get_inference_stats(self) -> Dict[str, Any]:
-        """Return inference statistics"""
+        """Return inference statistics - final complete version"""
         stats = self.inference_stats.copy()
         
         total = stats['total_requests']
@@ -655,10 +770,46 @@ class CTRInferenceEngine:
             stats['ctr_min'] = 0.0
             stats['ctr_max'] = 0.0
         
+        calibration_stats = stats['calibration_stats']
+        total_predictions = calibration_stats['calibrated_predictions'] + calibration_stats['raw_predictions']
+        
+        if total_predictions > 0:
+            calibration_stats['calibration_rate'] = calibration_stats['calibrated_predictions'] / total_predictions
+        else:
+            calibration_stats['calibration_rate'] = 0.0
+        
+        if calibration_stats['calibration_improvements']:
+            improvements = np.array(calibration_stats['calibration_improvements'])
+            calibration_stats['avg_improvement'] = float(improvements.mean())
+            calibration_stats['improvement_std'] = float(improvements.std())
+            calibration_stats['positive_improvements'] = int(np.sum(improvements > 0))
+            calibration_stats['total_improvements'] = len(improvements)
+        else:
+            calibration_stats['avg_improvement'] = 0.0
+            calibration_stats['improvement_std'] = 0.0
+            calibration_stats['positive_improvements'] = 0
+            calibration_stats['total_improvements'] = 0
+        
+        ensemble_stats = stats['ensemble_stats']
+        total_ensemble_predictions = ensemble_stats['ensemble_predictions'] + ensemble_stats['single_model_predictions']
+        
+        if total_ensemble_predictions > 0:
+            ensemble_stats['ensemble_usage_rate'] = ensemble_stats['ensemble_predictions'] / total_ensemble_predictions
+        else:
+            ensemble_stats['ensemble_usage_rate'] = 0.0
+        
+        if ensemble_stats['ensemble_improvements']:
+            ensemble_improvements = np.array(ensemble_stats['ensemble_improvements'])
+            ensemble_stats['avg_ensemble_improvement'] = float(ensemble_improvements.mean())
+            ensemble_stats['positive_ensemble_improvements'] = int(np.sum(ensemble_improvements > 0))
+        else:
+            ensemble_stats['avg_ensemble_improvement'] = 0.0
+            ensemble_stats['positive_ensemble_improvements'] = 0
+        
         return stats
     
     def health_check(self) -> Dict[str, Any]:
-        """System status check"""
+        """System status check - final complete version"""
         calibrated_models = 0
         calibration_methods = {}
         
@@ -697,23 +848,91 @@ class CTRInferenceEngine:
         }
 
 class CTRPostProcessor:
-    """CTR prediction post-processing class - simplified"""
+    """CTR prediction post-processing class"""
     
     def __init__(self):
         self.outlier_threshold_low = 0.0001
         self.outlier_threshold_high = 0.9999
+        self.diversity_threshold = 1000
         
     def apply_postprocessing(self, predictions: np.ndarray, 
-                           target_ctr: float = 0.0191,
-                           apply_outlier_clipping: bool = True) -> np.ndarray:
-        """Apply simplified post-processing"""
+                           target_ctr: float = 0.0201,
+                           apply_outlier_clipping: bool = True,
+                           apply_diversity_enhancement: bool = True,
+                           apply_ctr_alignment: bool = True) -> np.ndarray:
+        """Apply complete post-processing"""
         
         processed = predictions.copy()
         
         if apply_outlier_clipping:
-            processed = np.clip(processed, self.outlier_threshold_low, self.outlier_threshold_high)
+            processed = self._clip_outliers(processed)
+        
+        if apply_diversity_enhancement:
+            processed = self._enhance_diversity(processed)
+        
+        if apply_ctr_alignment:
+            processed = self._align_ctr(processed, target_ctr)
+        
+        processed = np.clip(processed, self.outlier_threshold_low, self.outlier_threshold_high)
         
         return processed
+    
+    def _clip_outliers(self, predictions: np.ndarray) -> np.ndarray:
+        """Remove outliers"""
+        try:
+            q1 = np.percentile(predictions, 1)
+            q99 = np.percentile(predictions, 99)
+            
+            outlier_low = max(q1 * 0.1, self.outlier_threshold_low)
+            outlier_high = min(q99 * 1.1, self.outlier_threshold_high)
+            
+            clipped = np.clip(predictions, outlier_low, outlier_high)
+            
+            return clipped
+            
+        except Exception as e:
+            logger.warning(f"Outlier removal failed: {e}")
+            return predictions
+    
+    def _enhance_diversity(self, predictions: np.ndarray) -> np.ndarray:
+        """Enhance prediction diversity"""
+        try:
+            unique_count = len(np.unique(predictions))
+            
+            if unique_count < self.diversity_threshold:
+                noise_scale = max(predictions.std() * 0.008, 1e-6)
+                noise = np.random.normal(0, noise_scale, len(predictions))
+                
+                enhanced = predictions + noise
+                enhanced = np.clip(enhanced, self.outlier_threshold_low, self.outlier_threshold_high)
+                
+                return enhanced
+            
+            return predictions
+            
+        except Exception as e:
+            logger.warning(f"Diversity enhancement failed: {e}")
+            return predictions
+    
+    def _align_ctr(self, predictions: np.ndarray, target_ctr: float) -> np.ndarray:
+        """CTR alignment"""
+        try:
+            current_ctr = predictions.mean()
+            
+            if abs(current_ctr - target_ctr) > 0.001:
+                if current_ctr > 0:
+                    correction_factor = target_ctr / current_ctr
+                    aligned = predictions * correction_factor
+                    
+                    aligned = np.clip(aligned, self.outlier_threshold_low, self.outlier_threshold_high)
+                    
+                    return aligned
+            
+            return predictions
+            
+        except Exception as e:
+            logger.warning(f"CTR alignment failed: {e}")
+            return predictions
 
 class MemoryMonitor:
     """Memory monitoring class"""
@@ -758,19 +977,25 @@ class MemoryMonitor:
             }
 
 class CTRPredictionAPI:
-    """CTR prediction API"""
+    """CTR prediction API - final complete version"""
     
     def __init__(self, model_dir: str = "models"):
         self.engine = CTRInferenceEngine(model_dir)
         self.api_stats = {
             'api_calls': 0,
             'api_errors': 0,
-            'start_time': time.time()
+            'start_time': time.time(),
+            'feature_usage': {
+                'calibration_requests': 0,
+                'ensemble_requests': 0,
+                'postprocessing_requests': 0,
+                'full_pipeline_requests': 0
+            }
         }
     
     def initialize(self) -> bool:
         """Initialize CTR prediction API"""
-        logger.info("CTR prediction API initialization started")
+        logger.info("CTR prediction API initialization started (final complete version)")
         
         success = self.engine.load_models()
         
@@ -778,7 +1003,10 @@ class CTRPredictionAPI:
             health_check = self.engine.health_check()
             logger.info(f"CTR prediction API initialization completed")
             logger.info(f"Total models: {health_check['models_count']}")
+            logger.info(f"Calibrated models: {health_check['calibrated_models_count']}")
+            logger.info(f"Calibration rate: {health_check['calibration_rate']:.2%}")
             logger.info(f"Ensemble available: {health_check['ensemble_status']['available']}")
+            logger.info(f"Postprocessor available: {health_check['postprocessor_available']}")
         else:
             logger.error("CTR prediction API initialization failed")
         
@@ -786,10 +1014,21 @@ class CTRPredictionAPI:
     
     def predict_ctr(self, user_id: str, ad_id: str, context: Dict[str, Any] = None, 
                    model_name: Optional[str] = None, 
-                   use_calibration: bool = False,
-                   use_ensemble: bool = True) -> Dict[str, Any]:
-        """Main CTR prediction API"""
+                   use_calibration: bool = True,
+                   use_ensemble: bool = True,
+                   use_postprocessing: bool = True) -> Dict[str, Any]:
+        """Main CTR prediction API - final complete version"""
         self.api_stats['api_calls'] += 1
+        
+        if use_calibration and use_ensemble and use_postprocessing:
+            self.api_stats['feature_usage']['full_pipeline_requests'] += 1
+        else:
+            if use_calibration:
+                self.api_stats['feature_usage']['calibration_requests'] += 1
+            if use_ensemble:
+                self.api_stats['feature_usage']['ensemble_requests'] += 1
+            if use_postprocessing:
+                self.api_stats['feature_usage']['postprocessing_requests'] += 1
         
         try:
             input_data = {
@@ -803,7 +1042,7 @@ class CTRPredictionAPI:
                 model_name, 
                 use_calibration,
                 use_ensemble,
-                False
+                use_postprocessing
             )
             
             api_response = {
@@ -814,10 +1053,22 @@ class CTRPredictionAPI:
                 'recommendation': result['recommendation'],
                 'confidence': result['confidence'],
                 'ctr_category': result['ctr_category'],
+                'processing_pipeline': {
+                    'ensemble_used': result.get('ensemble_used', False),
+                    'calibration_applied': result.get('calibration_applied', False),
+                    'postprocessing_applied': result.get('postprocessing_applied', False),
+                    'calibration_method': result.get('calibration_method', 'none'),
+                    'calibration_quality': result.get('calibration_quality', 0.0)
+                },
                 'expected_revenue': result['ctr_prediction'] * context.get('bid_amount', 1.0) if context else result['ctr_prediction'],
                 'model_info': {
                     'model_name': result['model_used'],
-                    'version': 'v3.1'
+                    'version': 'v3.0_final',
+                    'features_supported': {
+                        'calibration': True,
+                        'ensemble': True,
+                        'postprocessing': True
+                    }
                 },
                 'performance': {
                     'latency_ms': result['latency_ms'],
@@ -839,11 +1090,23 @@ class CTRPredictionAPI:
                 'recommendation': 'skip',
                 'confidence': 0.0,
                 'ctr_category': 'low',
+                'processing_pipeline': {
+                    'ensemble_used': False,
+                    'calibration_applied': False,
+                    'postprocessing_applied': False,
+                    'calibration_method': 'none',
+                    'calibration_quality': 0.0
+                },
                 'expected_revenue': 0.0,
                 'error': str(e),
                 'model_info': {
                     'model_name': 'unknown',
-                    'version': 'v3.1'
+                    'version': 'v3.0_final',
+                    'features_supported': {
+                        'calibration': True,
+                        'ensemble': True,
+                        'postprocessing': True
+                    }
                 },
                 'performance': {
                     'latency_ms': 0.0,
@@ -853,34 +1116,42 @@ class CTRPredictionAPI:
     
     def predict_submission(self, test_df: pd.DataFrame, 
                           model_name: Optional[str] = None,
-                          use_calibration: bool = False,
-                          use_ensemble: bool = True) -> pd.DataFrame:
-        """Generate submission predictions"""
-        logger.info(f"Submission prediction generation started")
+                          use_calibration: bool = True,
+                          use_ensemble: bool = True,
+                          use_postprocessing: bool = True) -> pd.DataFrame:
+        """Generate submission predictions - final complete version"""
+        logger.info(f"Submission prediction generation started (final complete version)")
+        logger.info(f"Pipeline settings - Calibration: {'On' if use_calibration else 'Off'}, "
+                   f"Ensemble: {'On' if use_ensemble else 'Off'}, "
+                   f"Postprocessing: {'On' if use_postprocessing else 'Off'}")
         
         predictions = self.engine.predict_test_data(
             test_df, 
             model_name, 
             use_calibration,
             use_ensemble,
-            False
+            use_postprocessing
         )
         
+        # Load sample submission to get proper ID format
         try:
             sample_submission = pd.read_csv('data/sample_submission.csv')
             if len(sample_submission) != len(predictions):
                 logger.warning(f"Sample submission length ({len(sample_submission)}) != predictions length ({len(predictions)})")
+                # Generate IDs in same format as sample
                 submission = pd.DataFrame({
                     'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
                     'clicked': predictions
                 })
             else:
+                # Use IDs from sample submission
                 submission = pd.DataFrame({
                     'ID': sample_submission['ID'].values,
                     'clicked': predictions
                 })
         except Exception as e:
             logger.warning(f"Could not load sample submission: {e}")
+            # Fallback: generate IDs in expected format
             submission = pd.DataFrame({
                 'ID': [f"TEST_{i:07d}" for i in range(len(predictions))],
                 'clicked': predictions
@@ -890,19 +1161,33 @@ class CTRPredictionAPI:
         
         avg_prediction = predictions.mean()
         logger.info(f"Average predicted CTR: {avg_prediction:.4f}")
+        logger.info(f"Difference from target CTR: {abs(avg_prediction - self.engine.ctr_baseline):.4f}")
         logger.info(f"Prediction range: {predictions.min():.4f} ~ {predictions.max():.4f}")
         
         return submission
     
     def get_api_status(self) -> Dict[str, Any]:
-        """API status information"""
+        """API status information - final complete version"""
         uptime = time.time() - self.api_stats['start_time']
+        
+        total_feature_requests = sum(self.api_stats['feature_usage'].values())
+        feature_usage_rates = {}
+        
+        if total_feature_requests > 0:
+            for feature, count in self.api_stats['feature_usage'].items():
+                feature_usage_rates[feature] = count / total_feature_requests
         
         status = {
             'api_uptime_seconds': uptime,
             'total_api_calls': self.api_stats['api_calls'],
             'api_error_count': self.api_stats['api_errors'],
             'api_success_rate': 1.0 - (self.api_stats['api_errors'] / max(1, self.api_stats['api_calls'])),
+            'feature_usage_stats': {
+                'total_feature_requests': total_feature_requests,
+                'usage_counts': self.api_stats['feature_usage'].copy(),
+                'usage_rates': feature_usage_rates,
+                'full_pipeline_rate': feature_usage_rates.get('full_pipeline_requests', 0.0)
+            },
             'engine_status': self.engine.health_check(),
             'inference_stats': self.engine.get_inference_stats()
         }
@@ -910,8 +1195,8 @@ class CTRPredictionAPI:
         return status
 
 def create_ctr_prediction_service(model_dir: str = "models") -> CTRPredictionAPI:
-    """Create CTR prediction service"""
-    logger.info("CTR prediction service creation")
+    """Create CTR prediction service - final complete version"""
+    logger.info("CTR prediction service creation (final complete version)")
     
     api = CTRPredictionAPI(model_dir)
     
@@ -942,8 +1227,17 @@ if __name__ == "__main__":
                 'position': 1,
                 'bid_amount': 0.5
             },
-            use_calibration=False,
-            use_ensemble=True
+            use_calibration=True,
+            use_ensemble=True,
+            use_postprocessing=True
         )
         
-        print("CTR prediction result:", json.dumps(test_prediction, indent=2, default=str))
+        print("CTR prediction result (full pipeline):", json.dumps(test_prediction, indent=2, default=str))
+        
+        print(f"\nFinal complete system status:")
+        print(f"Ensemble used: {test_prediction['processing_pipeline']['ensemble_used']}")
+        print(f"Calibration applied: {test_prediction['processing_pipeline']['calibration_applied']}")
+        print(f"Postprocessing applied: {test_prediction['processing_pipeline']['postprocessing_applied']}")
+        print(f"Predicted CTR: {test_prediction['ctr_prediction']:.4f}")
+        print(f"Confidence: {test_prediction['confidence']:.3f}")
+        print(f"Response time: {test_prediction['performance']['latency_ms']:.2f}ms")
