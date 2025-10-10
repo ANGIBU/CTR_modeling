@@ -189,35 +189,6 @@ def safe_train_test_split(X, y, test_size=0.3, random_state=42):
         split_point = int(len(X) * (1 - test_size))
         return X.iloc[:split_point], X.iloc[split_point:], y.iloc[:split_point], y.iloc[split_point:]
 
-def apply_ctr_postprocessing(predictions: np.ndarray, target_ctr: float = 0.0191, bias_threshold: float = 0.0005) -> np.ndarray:
-    """Apply CTR post-processing to align predictions with target CTR"""
-    try:
-        current_ctr = predictions.mean()
-        ctr_bias = abs(current_ctr - target_ctr)
-        
-        logger.info(f"CTR Post-processing - Current: {current_ctr:.4f}, Target: {target_ctr:.4f}, Bias: {ctr_bias:.6f}")
-        
-        if ctr_bias > bias_threshold:
-            if current_ctr > 0:
-                correction_factor = target_ctr / current_ctr
-                corrected = predictions * correction_factor
-                corrected = np.clip(corrected, 1e-7, 1 - 1e-7)
-                
-                final_ctr = corrected.mean()
-                logger.info(f"CTR correction applied: {current_ctr:.4f} -> {final_ctr:.4f} (factor: {correction_factor:.4f})")
-                
-                return corrected
-            else:
-                logger.warning("Current CTR is zero, cannot apply correction")
-                return predictions
-        else:
-            logger.info(f"CTR within threshold ({bias_threshold:.6f}), no correction needed")
-            return predictions
-            
-    except Exception as e:
-        logger.error(f"CTR post-processing failed: {e}")
-        return predictions
-
 def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[str, Any]]:
     """Execute complete CTR modeling pipeline"""
     try:
@@ -270,6 +241,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             from data_loader import LargeDataLoader
             from feature_engineering import CTRFeatureEngineer
             from training import CTRTrainer
+            from ensemble import CTREnsembleManager
             logger.info("All modules import completed")
         except ImportError as e:
             logger.error(f"Module import failed: {e}")
@@ -292,7 +264,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             logger.info("Quick mode: Loading sample data (50 samples)")
             train_df, test_df = data_loader.load_quick_sample_data()
         else:
-            logger.info("Full mode: Loading complete dataset")
+            logger.info("Full mode: Loading complete dataset for target score")
             train_df, test_df = data_loader.load_large_data_optimized()
         
         if train_df is None or test_df is None:
@@ -308,7 +280,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             feature_engineer.set_quick_mode(True)
             logger.info("Quick mode: Basic feature engineering only")
         else:
-            logger.info("Full mode: Tree model optimized features")
+            logger.info("Full mode: Tree model optimized features (no normalization)")
         
         X_train, X_test = feature_engineer.engineer_features(train_df, test_df)
         
@@ -318,7 +290,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         
         logger.info(f"Feature engineering completed - Features: {X_train.shape[1]}")
         
-        logger.info("3. Model training phase")
+        logger.info("3. Model training phase (Multi-model with ensemble)")
         
         trainer = CTRTrainer(config)
         logger.info("CTR Trainer initialized")
@@ -333,13 +305,28 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         available_models = trainer.get_available_models()
         logger.info(f"Available models: {available_models}")
         
+        ensemble_manager = CTREnsembleManager(config)
+        logger.info("Ensemble manager initialization completed")
+        
         if PSUTIL_AVAILABLE:
             vm = psutil.virtual_memory()
             available_memory = vm.available / (1024**3)
             logger.info(f"Available memory before split: {available_memory:.1f}GB")
+            
+            if available_memory < 8 and len(X_train) > 2000000:
+                logger.warning(f"Low memory detected, sampling data for training")
+                sample_size = min(2000000, len(X_train))
+                from sklearn.model_selection import train_test_split as simple_split
+                X_train, _, y_train, _ = simple_split(
+                    X_train, y_train, 
+                    train_size=sample_size,
+                    random_state=42,
+                    stratify=y_train
+                )
+                logger.info(f"Data sampled: {len(X_train)} samples")
         
         X_train_split, X_val_split, y_train_split, y_val_split = safe_train_test_split(
-            X_train, y_train, test_size=0.2, random_state=42
+            X_train, y_train, test_size=0.3, random_state=42
         )
         
         logger.info(f"Data split completed - train: {X_train_split.shape}, validation: {X_val_split.shape}")
@@ -348,8 +335,8 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             models_to_train = ['logistic']
             logger.info(f"Quick mode: Training only {models_to_train}")
         else:
-            models_to_train = ['xgboost_gpu']
-            logger.info(f"Full mode: Training XGBoost only (single model)")
+            models_to_train = available_models
+            logger.info(f"Full mode: Training all available models {models_to_train}")
         
         trained_models = {}
         model_performances = {}
@@ -370,17 +357,10 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 )
                 
                 if model is not None and hasattr(model, 'is_fitted') and model.is_fitted:
-                    if config.CALIBRATION_MANDATORY and not model.is_calibrated:
-                        logger.info(f"{model_name}: Applying mandatory calibration")
-                        calibration_success = model.apply_calibration(X_val_split, y_val_split, method=config.CALIBRATION_METHOD)
-                        
-                        if calibration_success:
-                            logger.info(f"{model_name}: Calibration applied successfully")
-                        else:
-                            logger.warning(f"{model_name}: Calibration failed, using raw predictions")
-                    
                     trained_models[model_name] = model
                     model_performances[model_name] = performance
+                    
+                    ensemble_manager.add_base_model(model_name, model)
                     
                     logger.info(f"{model_name} model training completed successfully")
                 else:
@@ -426,9 +406,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 'ensemble_enabled': False,
                 'submission_file': submission_path,
                 'submission_rows': len(predictions),
-                'warning': 'No models trained successfully',
-                'gpu_used': gpu_optimization,
-                'gpu_info': gpu_info
+                'warning': 'No models trained successfully'
             }
             
             try:
@@ -443,9 +421,34 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             
             return default_results
         
-        logger.info("4. Using single XGBoost model (no ensemble)")
         ensemble_enabled = False
         ensemble_used = False
+        min_models_for_ensemble = config.ENSEMBLE_CONFIG.get('min_models_for_ensemble', 2)
+        
+        if not quick_mode and len(trained_models) >= min_models_for_ensemble and config.ENSEMBLE_CONFIG.get('enable_ensemble', True):
+            logger.info(f"4. Ensemble preparation ({len(trained_models)} models available)")
+            try:
+                fitted_models = {name: model for name, model in trained_models.items() 
+                               if hasattr(model, 'is_fitted') and model.is_fitted}
+                
+                if len(fitted_models) >= min_models_for_ensemble:
+                    ensemble_manager.train_all_ensembles(X_val_split, y_val_split)
+                    ensemble_enabled = True
+                    ensemble_used = True
+                    logger.info("Ensemble preparation completed")
+                else:
+                    logger.warning(f"Only {len(fitted_models)} fitted models, skipping ensemble")
+                    ensemble_used = False
+            except Exception as e:
+                logger.warning(f"Ensemble preparation failed: {e}")
+                ensemble_used = False
+        else:
+            if quick_mode:
+                logger.info("4. Ensemble skipped (quick mode)")
+            elif len(trained_models) < min_models_for_ensemble:
+                logger.info(f"4. Ensemble skipped (insufficient models: {len(trained_models)} < {min_models_for_ensemble})")
+            else:
+                logger.info("4. Ensemble skipped (disabled in config)")
         
         usable_models = {name: model for name, model in trained_models.items()
                         if hasattr(model, 'is_fitted') and model.is_fitted}
@@ -483,9 +486,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 'execution_time': time.time() - start_time,
                 'successful_models': 0,
                 'submission_file': submission_path,
-                'warning': 'No usable models for prediction',
-                'gpu_used': gpu_optimization,
-                'gpu_info': gpu_info
+                'warning': 'No usable models for prediction'
             }
             
             try:
@@ -510,47 +511,87 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         batch_size = 50000
         all_predictions = []
         
-        best_model_name = list(trained_models.keys())[0]
-        best_model = trained_models[best_model_name]
-        logger.info(f"Using single model: {best_model_name}")
-        
-        calibration_used = best_model.is_calibrated if hasattr(best_model, 'is_calibrated') else False
-        logger.info(f"Model calibration status: {'Enabled' if calibration_used else 'Disabled'}")
-        
-        for i in range(0, len(X_test), batch_size):
-            end_idx = min(i + batch_size, len(X_test))
-            batch_X = X_test.iloc[i:end_idx]
+        if ensemble_used and ensemble_manager.final_ensemble and ensemble_manager.final_ensemble.is_fitted:
+            logger.info("Using ensemble for prediction")
             
-            try:
-                batch_pred = best_model.predict_proba(batch_X)
-            except Exception as e:
-                logger.error(f"Single model prediction failed: {e}")
-                batch_pred = np.full(len(batch_X), 0.0191)
+            for i in range(0, len(X_test), batch_size):
+                end_idx = min(i + batch_size, len(X_test))
+                batch_X = X_test.iloc[i:end_idx]
+                
+                base_predictions = {}
+                for name, model in trained_models.items():
+                    if not hasattr(model, 'is_fitted') or not model.is_fitted:
+                        logger.warning(f"Model {name} not fitted, skipping")
+                        continue
+                    
+                    try:
+                        pred = model.predict_proba(batch_X)
+                        base_predictions[name] = pred
+                    except Exception as e:
+                        logger.warning(f"Prediction failed for {name}: {e}")
+                        base_predictions[name] = np.full(len(batch_X), 0.0191)
+                
+                if not base_predictions:
+                    logger.warning(f"No predictions available for batch, using baseline")
+                    batch_pred = np.full(len(batch_X), 0.0191)
+                    all_predictions.append(batch_pred)
+                    continue
+                
+                try:
+                    batch_pred = ensemble_manager.final_ensemble.predict_proba(base_predictions)
+                except Exception as e:
+                    logger.warning(f"Ensemble prediction failed: {e}, using average")
+                    batch_pred = np.mean(list(base_predictions.values()), axis=0)
+                
+                all_predictions.append(batch_pred)
+                
+                logger.info(f"Batch {i//batch_size + 1} completed ({i:,}~{end_idx:,})")
+                
+                if i % (batch_size * 5) == 0:
+                    gc.collect()
             
-            all_predictions.append(batch_pred)
+            predictions = np.concatenate(all_predictions)
             
-            logger.info(f"Batch {i//batch_size + 1} completed ({i:,}~{end_idx:,})")
+        else:
+            best_model_name = None
+            best_model = None
             
-            if i % (batch_size * 5) == 0:
-                gc.collect()
-        
-        predictions = np.concatenate(all_predictions)
+            for name, model in trained_models.items():
+                if hasattr(model, 'is_fitted') and model.is_fitted:
+                    best_model_name = name
+                    best_model = model
+                    break
+            
+            if best_model is None:
+                logger.error("No fitted models available for prediction")
+                predictions = np.full(len(X_test), 0.0191)
+            else:
+                logger.info(f"Using single model: {best_model_name}")
+                
+                for i in range(0, len(X_test), batch_size):
+                    end_idx = min(i + batch_size, len(X_test))
+                    batch_X = X_test.iloc[i:end_idx]
+                    
+                    try:
+                        batch_pred = best_model.predict_proba(batch_X)
+                    except Exception as e:
+                        logger.error(f"Single model prediction failed: {e}")
+                        batch_pred = np.full(len(batch_X), 0.0191)
+                    
+                    all_predictions.append(batch_pred)
+                    
+                    logger.info(f"Batch {i//batch_size + 1} completed ({i:,}~{end_idx:,})")
+                    
+                    if i % (batch_size * 5) == 0:
+                        gc.collect()
+                
+                predictions = np.concatenate(all_predictions)
         
         predictions = np.clip(predictions, 1e-7, 1 - 1e-7)
         
         if np.allclose(predictions, 0.0):
             logger.warning("All predictions are zero! Using default CTR")
             predictions = np.full(len(predictions), 0.0191)
-        
-        logger.info(f"Raw predictions - mean: {predictions.mean():.4f}, std: {predictions.std():.4f}")
-        
-        if config.CTR_BIAS_CORRECTION['enable'] and config.CTR_BIAS_CORRECTION['post_processing']:
-            predictions = apply_ctr_postprocessing(
-                predictions,
-                target_ctr=config.CTR_BIAS_CORRECTION['target_ctr'],
-                bias_threshold=config.CTR_BIAS_CORRECTION['bias_threshold']
-            )
-            logger.info(f"Post-processed predictions - mean: {predictions.mean():.4f}, std: {predictions.std():.4f}")
         
         try:
             sample_submission = pd.read_csv('data/sample_submission.csv')
@@ -587,9 +628,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
             'successful_models': len(trained_models),
             'ensemble_enabled': ensemble_enabled,
             'ensemble_used': ensemble_used,
-            'calibration_applied': config.CALIBRATION_MANDATORY,
-            'calibration_used': calibration_used,
-            'ctr_postprocessing_applied': config.CTR_BIAS_CORRECTION['enable'] and config.CTR_BIAS_CORRECTION['post_processing'],
+            'calibration_applied': True,
             'submission_file': submission_path,
             'submission_rows': len(predictions),
             'model_performances': model_performances,
@@ -611,8 +650,6 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.info(f"Execution time: {execution_time:.2f}s")
         logger.info(f"Successful models: {len(trained_models)}")
         logger.info(f"Ensemble activated: {'Yes' if ensemble_enabled else 'No'}")
-        logger.info(f"Calibration used: {'Yes' if calibration_used else 'No'}")
-        logger.info(f"CTR Post-processing: {'Yes' if results['ctr_postprocessing_applied'] else 'No'}")
         logger.info(f"GPU optimization: {'Yes' if gpu_optimization else 'No'}")
         if gpu_optimization:
             logger.info(f"GPU info: {gpu_info}")
@@ -674,7 +711,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 config=config,
                 results=results,
                 model_name=primary_model,
-                notes=f"Mode: {'Quick' if quick_mode else 'Full'}, Calibration: {'Yes' if calibration_used else 'No'}, CTR Post-proc: {'Yes' if results['ctr_postprocessing_applied'] else 'No'}"
+                notes=f"Mode: {'Quick' if quick_mode else 'Full'}"
             )
             
             logger.info("Experiment logged successfully")
@@ -725,28 +762,17 @@ def main():
                 logger.info(f"Mode: {'Quick (50 samples)' if results.get('quick_mode') else 'Full dataset (0.35+ target)'}")
                 logger.info(f"Execution time: {results['execution_time']:.2f}s")
                 logger.info(f"Successful models: {results['successful_models']}")
+                logger.info(f"GPU optimization: {results['gpu_used']}")
+                if results['gpu_used']:
+                    logger.info(f"GPU info: {results['gpu_info']}")
+                logger.info(f"Target score: {results['target_score']}")
                 
-                if 'calibration_used' in results:
-                    logger.info(f"Calibration: {results['calibration_used']}")
-                
-                if 'ctr_postprocessing_applied' in results:
-                    logger.info(f"CTR Post-processing: {results['ctr_postprocessing_applied']}")
-                
-                if 'gpu_used' in results:
-                    logger.info(f"GPU optimization: {results['gpu_used']}")
-                    if results['gpu_used'] and 'gpu_info' in results:
-                        logger.info(f"GPU info: {results['gpu_info']}")
-                
-                if 'target_score' in results:
-                    logger.info(f"Target score: {results['target_score']}")
-                
-                if 'prediction_stats' in results:
-                    pred_stats = results.get('prediction_stats', {})
-                    logger.info(f"Prediction statistics:")
-                    logger.info(f"  Mean: {pred_stats.get('mean', 0):.4f}")
-                    logger.info(f"  Std: {pred_stats.get('std', 0):.4f}")
-                    logger.info(f"  Min: {pred_stats.get('min', 0):.4f}")
-                    logger.info(f"  Max: {pred_stats.get('max', 0):.4f}")
+                pred_stats = results.get('prediction_stats', {})
+                logger.info(f"Prediction statistics:")
+                logger.info(f"  Mean: {pred_stats.get('mean', 0):.4f}")
+                logger.info(f"  Std: {pred_stats.get('std', 0):.4f}")
+                logger.info(f"  Min: {pred_stats.get('min', 0):.4f}")
+                logger.info(f"  Max: {pred_stats.get('max', 0):.4f}")
                 
                 if results.get('model_performances'):
                     logger.info("\nModel Performance Summary:")

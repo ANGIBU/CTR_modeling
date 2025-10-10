@@ -105,11 +105,11 @@ class CTRHyperparameterOptimizer:
                 'objective': 'binary:logistic',
                 'tree_method': 'gpu_hist' if TORCH_GPU_AVAILABLE else 'hist',
                 'max_depth': 6,
-                'learning_rate': 0.1,
+                'learning_rate': 0.05,
                 'subsample': 0.9,
-                'colsample_bytree': 0.9,
-                'scale_pos_weight': 51.43,
-                'min_child_weight': 5,
+                'colsample_bytree': 0.8,
+                'scale_pos_weight': 1.0,
+                'min_child_weight': 10,
                 'gamma': 0.1,
                 'reg_alpha': 0.05,
                 'reg_lambda': 1.5,
@@ -186,9 +186,8 @@ class CTRModelTrainer:
         """Sample data to fit in memory"""
         memory_status = self.memory_tracker.get_memory_status()
         available_gb = memory_status['available_gb']
-        memory_percent = memory_status.get('percent', 50)
         
-        if len(X_train) > max_samples and (available_gb < 15 or memory_percent > 75):
+        if len(X_train) > max_samples and available_gb < 8:
             logger.info(f"Sampling data due to memory constraint: {len(X_train)} -> {max_samples}")
             
             try:
@@ -224,7 +223,7 @@ class CTRModelTrainer:
             memory_status = self.memory_tracker.get_memory_status()
             logger.info(f"Pre-training memory: {memory_status['available_gb']:.1f}GB available")
             
-            X_train_sampled, y_train_sampled = self._sample_for_memory(X_train, y_train, max_samples=10704179)
+            X_train_sampled, y_train_sampled = self._sample_for_memory(X_train, y_train, max_samples=5000000)
             
             best_params = self.hyperparameter_optimizer._get_default_params(model_name)
             if not best_params:
@@ -346,7 +345,7 @@ class CTRModelTrainer:
                     y_train: pd.Series,
                     X_val: Optional[pd.DataFrame] = None,
                     y_val: Optional[pd.Series] = None) -> Optional[Any]:
-        """Train individual model with memory management"""
+        """Train individual model with memory management and calibration"""
         
         if self.use_cv and X_val is None:
             return self.train_model_with_cv(model_class, model_name, X_train, y_train)
@@ -367,7 +366,7 @@ class CTRModelTrainer:
                 logger.info(f"GPU available: {memory_status.get('gpu_total_gb', 0):.1f}GB total")
                 logger.info(f"GPU usage: {memory_status.get('gpu_usage_gb', 0):.1f}GB used")
             
-            X_train_sampled, y_train_sampled = self._sample_for_memory(X_train, y_train, max_samples=10704179)
+            X_train_sampled, y_train_sampled = self._sample_for_memory(X_train, y_train, max_samples=5000000)
             
             if X_val is None or y_val is None:
                 X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
@@ -409,8 +408,6 @@ class CTRModelTrainer:
                     logger.info(f"{model_name}: Calibration applied successfully")
                 else:
                     logger.warning(f"{model_name}: Calibration failed, using raw predictions")
-            else:
-                logger.info(f"{model_name}: Calibration disabled (config.CALIBRATION_MANDATORY = False)")
             
             try:
                 if hasattr(model, 'predict_proba'):
@@ -450,7 +447,7 @@ class CTRModelTrainer:
                 'performance': self.model_performance.get(model_name, {}),
                 'training_time': time.time(),
                 'gpu_trained': self.gpu_available,
-                'calibrated': getattr(model, 'is_calibrated', False) if self.calibration_enabled else False
+                'calibrated': getattr(model, 'is_calibrated', False)
             }
             
             logger.info(f"{model_name} model training completed successfully")
@@ -569,9 +566,10 @@ class CTRTrainer(CTRModelTrainer):
             
             memory_status = self.memory_tracker.get_memory_status()
             logger.info(f"Pre-training memory: {memory_status['available_gb']:.1f}GB available")
-            memory_percent = memory_status.get('percent', 50)
             
-            X_train_sampled, y_train_sampled = self._sample_for_memory(X_train, y_train, max_samples=10704179)
+            if memory_status['available_gb'] < 8:
+                logger.warning(f"Low memory detected, sampling data")
+                X_train, y_train = self._sample_for_memory(X_train, y_train, max_samples=2000000)
             
             params = self.get_default_params_by_model_type(model_name)
             logger.info(f"Using optimized parameters for {model_name}")
@@ -586,7 +584,7 @@ class CTRTrainer(CTRModelTrainer):
                     logger.info("CPU hist method (GPU not available)")
                 logger.info(f"scale_pos_weight: {params.get('scale_pos_weight', 1.0)}")
             
-            logger.info(f"Training {model_name} model with {len(X_train_sampled)} samples")
+            logger.info(f"Training {model_name} model with {len(X_train)} samples")
             
             if model_name == 'xgboost_gpu':
                 from models import XGBoostGPUModel
@@ -606,13 +604,13 @@ class CTRTrainer(CTRModelTrainer):
             logger.info(f"{model_name} model training started")
             
             if hasattr(model, 'fit_with_params'):
-                model.fit_with_params(X_train_sampled, y_train_sampled, **params)
+                model.fit_with_params(X_train, y_train, **params)
             else:
                 if X_val is not None and y_val is not None:
-                    model.fit(X_train_sampled, y_train_sampled, X_val, y_val)
+                    model.fit(X_train, y_train, X_val, y_val)
                 else:
                     X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
-                        X_train_sampled, y_train_sampled, test_size=0.2, random_state=42, stratify=y_train_sampled
+                        X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
                     )
                     model.fit(X_train_split, y_train_split, X_val_split, y_val_split)
                     X_val = X_val_split
@@ -623,7 +621,7 @@ class CTRTrainer(CTRModelTrainer):
             if self.calibration_enabled and hasattr(model, 'apply_calibration'):
                 if X_val is None or y_val is None:
                     X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
-                        X_train_sampled, y_train_sampled, test_size=0.2, random_state=42, stratify=y_train_sampled
+                        X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
                     )
                     X_val = X_val_split
                     y_val = y_val_split
@@ -636,13 +634,11 @@ class CTRTrainer(CTRModelTrainer):
                     logger.info(f"{model_name}: Calibration applied successfully")
                 else:
                     logger.warning(f"{model_name}: Calibration failed")
-            else:
-                logger.info(f"{model_name}: Calibration disabled (config.CALIBRATION_MANDATORY = False)")
             
             try:
                 if X_val is None or y_val is None:
                     X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
-                        X_train_sampled, y_train_sampled, test_size=0.2, random_state=42, stratify=y_train_sampled
+                        X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
                     )
                     X_val = X_val_split
                     y_val = y_val_split

@@ -53,9 +53,9 @@ class MemoryMonitor:
     
     def __init__(self):
         self.memory_thresholds = {
-            'warning': 10.0,
-            'critical': 7.0,  
-            'abort': 4.0
+            'warning': 15.0,
+            'critical': 10.0,  
+            'abort': 5.0
         }
         
         self.quick_mode_thresholds = {
@@ -303,11 +303,16 @@ class BaseModel(ABC):
             return False
     
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Probability predictions with calibration if available"""
+        """Probability predictions with calibration"""
         raw_pred = self.predict_proba_raw(X)
         
-        if self.is_calibrated and self.ctr_calibrator and self.ctr_calibrator.is_fitted:
-            return self.ctr_calibrator.transform(raw_pred)
+        if self.is_calibrated and self.ctr_calibrator is not None:
+            try:
+                calibrated_pred = self.ctr_calibrator.transform(raw_pred)
+                return calibrated_pred
+            except Exception as e:
+                logger.warning(f"{self.name}: Calibration transform failed: {e}")
+                return raw_pred
         
         return raw_pred
     
@@ -323,7 +328,7 @@ class BaseModel(ABC):
         pass
 
 class XGBoostGPUModel(BaseModel):
-    """XGBoost model with GPU acceleration"""
+    """XGBoost model with GPU acceleration and calibration"""
     
     def __init__(self, name: str = "XGBoost_GPU", params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
@@ -332,12 +337,12 @@ class XGBoostGPUModel(BaseModel):
         default_params = {
             'objective': 'binary:logistic',
             'tree_method': 'gpu_hist' if TORCH_GPU_AVAILABLE else 'hist',
-            'max_depth': 7,
+            'max_depth': 6,
             'learning_rate': 0.05,
-            'subsample': 0.8,
+            'subsample': 0.9,
             'colsample_bytree': 0.8,
-            'scale_pos_weight': 15.0,
-            'min_child_weight': 5,
+            'scale_pos_weight': 1.0,
+            'min_child_weight': 10,
             'gamma': 0.1,
             'reg_alpha': 0.05,
             'reg_lambda': 1.5,
