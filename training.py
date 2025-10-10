@@ -104,12 +104,12 @@ class CTRHyperparameterOptimizer:
             params = {
                 'objective': 'binary:logistic',
                 'tree_method': 'gpu_hist' if TORCH_GPU_AVAILABLE else 'hist',
-                'max_depth': 8,
-                'learning_rate': 0.05,
+                'max_depth': 6,
+                'learning_rate': 0.1,
                 'subsample': 0.9,
-                'colsample_bytree': 0.8,
+                'colsample_bytree': 0.9,
                 'scale_pos_weight': 51.43,
-                'min_child_weight': 10,
+                'min_child_weight': 5,
                 'gamma': 0.1,
                 'reg_alpha': 0.05,
                 'reg_lambda': 1.5,
@@ -346,7 +346,7 @@ class CTRModelTrainer:
                     y_train: pd.Series,
                     X_val: Optional[pd.DataFrame] = None,
                     y_val: Optional[pd.Series] = None) -> Optional[Any]:
-        """Train individual model with memory management and calibration"""
+        """Train individual model with memory management"""
         
         if self.use_cv and X_val is None:
             return self.train_model_with_cv(model_class, model_name, X_train, y_train)
@@ -409,6 +409,8 @@ class CTRModelTrainer:
                     logger.info(f"{model_name}: Calibration applied successfully")
                 else:
                     logger.warning(f"{model_name}: Calibration failed, using raw predictions")
+            else:
+                logger.info(f"{model_name}: Calibration disabled (config.CALIBRATION_MANDATORY = False)")
             
             try:
                 if hasattr(model, 'predict_proba'):
@@ -448,7 +450,7 @@ class CTRModelTrainer:
                 'performance': self.model_performance.get(model_name, {}),
                 'training_time': time.time(),
                 'gpu_trained': self.gpu_available,
-                'calibrated': getattr(model, 'is_calibrated', False)
+                'calibrated': getattr(model, 'is_calibrated', False) if self.calibration_enabled else False
             }
             
             logger.info(f"{model_name} model training completed successfully")
@@ -634,6 +636,8 @@ class CTRTrainer(CTRModelTrainer):
                     logger.info(f"{model_name}: Calibration applied successfully")
                 else:
                     logger.warning(f"{model_name}: Calibration failed")
+            else:
+                logger.info(f"{model_name}: Calibration disabled (config.CALIBRATION_MANDATORY = False)")
             
             try:
                 if X_val is None or y_val is None:

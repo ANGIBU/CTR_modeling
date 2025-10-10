@@ -137,16 +137,16 @@ class Config:
         'xgboost_gpu': {
             'objective': 'binary:logistic',
             'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
-            'max_depth': 8,
-            'learning_rate': 0.05,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
+            'max_depth': 6,
+            'learning_rate': 0.1,
+            'subsample': 0.9,
+            'colsample_bytree': 0.9,
             'scale_pos_weight': 51.43,
-            'min_child_weight': 10,
+            'min_child_weight': 5,
             'gamma': 0.1,
             'reg_alpha': 0.05,
             'reg_lambda': 1.5,
-            'max_bin': 128,
+            'max_bin': 256,
             'gpu_id': 0 if GPU_AVAILABLE else None,
             'predictor': 'gpu_predictor' if GPU_AVAILABLE else 'cpu_predictor',
             'verbosity': 0,
@@ -216,12 +216,12 @@ class Config:
         'enable_meta_features': True,
         'use_simple_average': False,
         'min_models_for_ensemble': 2,
-        'enable_ensemble': True
+        'enable_ensemble': False
     }
     
     CALIBRATION_METHOD = 'isotonic'
     CALIBRATION_CV_FOLDS = 3
-    CALIBRATION_MANDATORY = True
+    CALIBRATION_MANDATORY = False
     
     EVALUATION_CONFIG = {
         'ap_weight': 0.5,
@@ -239,10 +239,10 @@ class Config:
     }
     
     CTR_BIAS_CORRECTION = {
-        'enable': True,
+        'enable': False,
         'target_ctr': 0.0191,
         'correction_factor': 1.0,
-        'post_processing': True,
+        'post_processing': False,
         'clip_range': (0.0001, 0.5),
         'bias_threshold': 0.0003,
         'calibration_strength': 1.0,

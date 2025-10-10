@@ -303,18 +303,8 @@ class BaseModel(ABC):
             return False
     
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Probability predictions with calibration"""
-        raw_pred = self.predict_proba_raw(X)
-        
-        if self.is_calibrated and self.ctr_calibrator is not None:
-            try:
-                calibrated_pred = self.ctr_calibrator.transform(raw_pred)
-                return calibrated_pred
-            except Exception as e:
-                logger.warning(f"{self.name}: Calibration transform failed: {e}")
-                return raw_pred
-        
-        return raw_pred
+        """Probability predictions (no calibration by default)"""
+        return self.predict_proba_raw(X)
     
     @abstractmethod
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
@@ -328,7 +318,7 @@ class BaseModel(ABC):
         pass
 
 class XGBoostGPUModel(BaseModel):
-    """XGBoost model with GPU acceleration and calibration"""
+    """XGBoost model with GPU acceleration"""
     
     def __init__(self, name: str = "XGBoost_GPU", params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
@@ -337,16 +327,16 @@ class XGBoostGPUModel(BaseModel):
         default_params = {
             'objective': 'binary:logistic',
             'tree_method': 'gpu_hist' if TORCH_GPU_AVAILABLE else 'hist',
-            'max_depth': 8,
-            'learning_rate': 0.05,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
+            'max_depth': 6,
+            'learning_rate': 0.1,
+            'subsample': 0.9,
+            'colsample_bytree': 0.9,
             'scale_pos_weight': 51.43,
-            'min_child_weight': 10,
+            'min_child_weight': 5,
             'gamma': 0.1,
             'reg_alpha': 0.05,
             'reg_lambda': 1.5,
-            'max_bin': 128,
+            'max_bin': 256,
             'gpu_id': 0 if TORCH_GPU_AVAILABLE else None,
             'predictor': 'gpu_predictor' if TORCH_GPU_AVAILABLE else 'cpu_predictor',
             'verbosity': 0,
