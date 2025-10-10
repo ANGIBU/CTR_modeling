@@ -20,13 +20,15 @@ class Config:
     MODEL_DIR = BASE_DIR / "models"
     LOG_DIR = BASE_DIR / "logs"
     OUTPUT_DIR = BASE_DIR / "output"
-    RESULTS_DIR = BASE_DIR / "results"
     
     # Data file paths
     TRAIN_PATH = DATA_DIR / "train.parquet"
     TEST_PATH = DATA_DIR / "test.parquet"
     SUBMISSION_PATH = DATA_DIR / "sample_submission.csv"
     SUBMISSION_TEMPLATE_PATH = DATA_DIR / "sample_submission.csv"
+    
+    # Experiment log path
+    EXPERIMENTS_LOG_PATH = LOG_DIR / "experiments.log"
     
     # Target column settings
     TARGET_COLUMN_CANDIDATES = [
@@ -83,137 +85,86 @@ class Config:
             'feature_fraction': 0.8,
             'bagging_fraction': 0.8,
             'bagging_freq': 5,
-            'lambda_l1': 0.5,
-            'lambda_l2': 0.5,
-            'min_gain_to_split': 0.02,
-            'max_cat_threshold': 32,
-            'cat_smooth': 10.0,
-            'cat_l2': 10.0,
             'learning_rate': 0.05,
-            'num_iterations': 800,
-            'scale_pos_weight': 52.3,
-            'is_unbalance': True
+            'n_estimators': 200,
+            'early_stopping_rounds': 10,
+            'verbosity': -1
         },
         'xgboost': {
             'max_depth': 6,
             'learning_rate': 0.05,
-            'n_estimators': 600,
+            'n_estimators': 200,
+            'min_child_weight': 5,
+            'gamma': 0.1,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
-            'min_child_weight': 10,
-            'gamma': 0.1,
-            'alpha': 0.5,
-            'lambda': 0.5,
-            'scale_pos_weight': 52.3,
-            'reg_alpha': 0.5,
-            'reg_lambda': 0.5
+            'reg_alpha': 0.1,
+            'reg_lambda': 1.0,
+            'early_stopping_rounds': 10,
+            'verbosity': 0
+        },
+        'catboost': {
+            'depth': 6,
+            'learning_rate': 0.05,
+            'iterations': 200,
+            'l2_leaf_reg': 3,
+            'border_count': 128,
+            'verbose': 0,
+            'early_stopping_rounds': 10
         },
         'logistic': {
             'C': 0.5,
             'penalty': 'l2',
             'solver': 'saga',
-            'max_iter': 4000,
-            'class_weight': 'balanced',
-            'random_state': 42,
-            'tol': 0.00005,
-            'n_jobs': 8
+            'max_iter': 100,
+            'n_jobs': -1,
+            'verbose': 0
         }
     }
     
-    # Feature engineering settings - OPTIMIZED for memory efficiency
+    # Feature engineering settings
     FEATURE_ENGINEERING_CONFIG = {
-        'enable_interaction_features': True,
-        'enable_polynomial_features': False,  # Disabled for memory
-        'enable_binning': True,
-        'enable_target_encoding': True,
-        'enable_frequency_encoding': True,
-        'enable_statistical_features': True,
-        'enable_cross_validation_encoding': True,
-        'max_interaction_degree': 2,
-        'binning_strategy': 'quantile',
-        'n_bins': 6,
-        'min_frequency': 10,
-        'target_encoding_smoothing': 20.0,
-        
-        # NEW: Feature count control
-        'target_feature_count': 250,  # Target final feature count
-        'use_feature_selection': True,  # Enable feature selection
-        'feature_selection_method': 'f_classif',  # Selection method
-        'feature_importance_threshold': 0.01,  # Importance threshold
-        
-        # NEW: Memory-optimized limits
-        'max_categorical_for_encoding': 15,  # Max categorical features for target encoding
-        'max_numeric_for_interaction': 10,  # Max numeric features for interactions
-        'max_cross_combinations': 9,  # Max cross feature combinations (3x3)
-        'max_statistical_features': 8,  # Max features for statistical operations
-        
-        # NEW: Step-by-step memory cleanup
-        'cleanup_after_each_step': True,  # Force cleanup after each feature generation step
-        'intermediate_storage': False  # Don't store intermediate features
+        'target_feature_count': 100,
+        'use_feature_selection': True,
+        'feature_selection_method': 'mutual_info',
+        'cleanup_after_each_step': True,
+        'max_categorical_for_encoding': 20,
+        'max_numeric_for_interaction': 15,
+        'interaction_max_features': 30
     }
     
-    # Cross-validation settings
+    # Training and evaluation settings
     CV_FOLDS = 5
-    CV_SHUFFLE = True
+    TEST_SIZE = 0.3
     RANDOM_STATE = 42
     
-    # Early stopping settings
-    EARLY_STOPPING_ROUNDS = 150
-    EARLY_STOPPING_TOLERANCE = 1e-5
-    
-    # Hyperparameter tuning settings
-    OPTUNA_N_TRIALS = 150
-    OPTUNA_TIMEOUT = 3600
-    OPTUNA_N_JOBS = 2
-    OPTUNA_VERBOSITY = 1
+    # Calibration settings
+    CALIBRATION_CONFIG = {
+        'enabled': False,
+        'methods': ['isotonic', 'sigmoid'],
+        'cv_folds': 3
+    }
     
     # Ensemble settings
     ENSEMBLE_CONFIG = {
-        'voting_weights': {'lightgbm': 0.45, 'xgboost': 0.35, 'logistic': 0.2},
-        'stacking_cv_folds': 5,
-        'blending_ratio': 0.8,
-        'diversity_threshold': 0.03,
-        'performance_threshold': 0.20,
-        'enable_meta_features': True,
-        'use_simple_average': False
+        'enabled': True,
+        'stacking_enabled': False,
+        'voting_enabled': False,
+        'cv_folds': 3,
+        'meta_learners': ['logistic'],
+        'voting_weights': None,
+        'target_combined_score': 0.35
     }
     
-    # Calibration settings
-    CALIBRATION_METHOD = 'isotonic'
-    CALIBRATION_CV_FOLDS = 5
-    CALIBRATION_MANDATORY = True
-    
-    # Evaluation configuration
+    # Evaluation settings
     EVALUATION_CONFIG = {
-        'ap_weight': 0.6,
-        'wll_weight': 0.4,
-        'target_combined_score': 0.34,
-        'target_ctr': 0.0191,
-        'ctr_tolerance': 0.001,
-        'bias_penalty_weight': 5.0,
-        'calibration_weight': 0.4,
-        'pos_weight': 52.3,
-        'neg_weight': 1.0,
-        'wll_normalization_factor': 1.8,
-        'ctr_bias_multiplier': 6.0
+        'metrics': ['auc', 'ap', 'log_loss'],
+        'ctr_validation_enabled': True,
+        'ctr_tolerance': 0.001
     }
     
-    # CTR bias correction settings
-    CTR_BIAS_CORRECTION = {
-        'enable': True,
-        'target_ctr': 0.0191,
-        'correction_factor': 0.25,
-        'post_processing': True,
-        'clip_range': (0.0005, 0.1),
-        'bias_threshold': 0.0003,
-        'calibration_strength': 1.5,
-        'prediction_scaling': 0.5
-    }
-    
-    # Evaluation metrics
-    PRIMARY_METRIC = 'combined_score'
-    SECONDARY_METRICS = ['ap', 'auc', 'log_loss', 'ctr_bias', 'ctr_score']
-    TARGET_COMBINED_SCORE = 0.34
+    # Target metrics
+    TARGET_COMBINED_SCORE = 0.35
     TARGET_CTR = 0.0191
     
     # Logging settings
@@ -231,17 +182,17 @@ class Config:
     # Large dataset specific settings - OPTIMIZED
     LARGE_DATASET_MODE = True
     MEMORY_EFFICIENT_SAMPLING = True
-    AGGRESSIVE_SAMPLING_THRESHOLD = 0.65  # Adjusted threshold
-    MIN_SAMPLE_SIZE = 100000  # Minimum sample size for extreme cases
-    MAX_SAMPLE_SIZE = 1000000  # Maximum sample size for normal cases
+    AGGRESSIVE_SAMPLING_THRESHOLD = 0.65
+    MIN_SAMPLE_SIZE = 100000
+    MAX_SAMPLE_SIZE = 1000000
     
     # NEW: Logistic regression sampling configuration
     LOGISTIC_SAMPLING_CONFIG = {
-        'normal_size': 1000000,      # Use 1M samples in normal memory situation
-        'warning_size': 750000,       # Use 750K samples when memory warning
-        'critical_size': 500000,      # Use 500K samples when memory critical
-        'abort_size': 100000,         # Use 100K samples when memory abort level
-        'enable_dynamic_sizing': True # Enable dynamic sample size adjustment
+        'normal_size': 1000000,
+        'warning_size': 750000,
+        'critical_size': 500000,
+        'abort_size': 100000,
+        'enable_dynamic_sizing': True
     }
     
     # RTX 4060 Ti specific settings
@@ -254,8 +205,7 @@ class Config:
             cls.DATA_DIR, 
             cls.MODEL_DIR, 
             cls.LOG_DIR, 
-            cls.OUTPUT_DIR,
-            cls.RESULTS_DIR
+            cls.OUTPUT_DIR
         ]
         created_dirs = []
         
