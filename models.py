@@ -53,9 +53,9 @@ class MemoryMonitor:
     
     def __init__(self):
         self.memory_thresholds = {
-            'warning': 15.0,
-            'critical': 10.0,  
-            'abort': 5.0
+            'warning': 10.0,
+            'critical': 7.0,  
+            'abort': 4.0
         }
         
         self.quick_mode_thresholds = {
@@ -339,14 +339,14 @@ class XGBoostGPUModel(BaseModel):
             'tree_method': 'gpu_hist' if TORCH_GPU_AVAILABLE else 'hist',
             'max_depth': 8,
             'learning_rate': 0.05,
-            'subsample': 0.9,
+            'subsample': 0.8,
             'colsample_bytree': 0.8,
             'scale_pos_weight': 51.43,
             'min_child_weight': 10,
             'gamma': 0.1,
             'reg_alpha': 0.05,
             'reg_lambda': 1.5,
-            'max_bin': 256,
+            'max_bin': 128,
             'gpu_id': 0 if TORCH_GPU_AVAILABLE else None,
             'predictor': 'gpu_predictor' if TORCH_GPU_AVAILABLE else 'cpu_predictor',
             'verbosity': 0,

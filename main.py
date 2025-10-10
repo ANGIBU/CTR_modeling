@@ -418,7 +418,9 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 'ensemble_enabled': False,
                 'submission_file': submission_path,
                 'submission_rows': len(predictions),
-                'warning': 'No models trained successfully'
+                'warning': 'No models trained successfully',
+                'gpu_used': gpu_optimization,
+                'gpu_info': gpu_info
             }
             
             try:
@@ -498,7 +500,9 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
                 'execution_time': time.time() - start_time,
                 'successful_models': 0,
                 'submission_file': submission_path,
-                'warning': 'No usable models for prediction'
+                'warning': 'No usable models for prediction',
+                'gpu_used': gpu_optimization,
+                'gpu_info': gpu_info
             }
             
             try:
@@ -520,7 +524,7 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.info("Submission file generation started")
         logger.info(f"Test data size: {len(X_test)} rows")
         
-        batch_size = 80000
+        batch_size = 50000
         all_predictions = []
         
         if ensemble_used and ensemble_manager.final_ensemble and ensemble_manager.final_ensemble.is_fitted:
@@ -778,17 +782,22 @@ def main():
                 logger.info(f"Mode: {'Quick (50 samples)' if results.get('quick_mode') else 'Full dataset (0.35+ target)'}")
                 logger.info(f"Execution time: {results['execution_time']:.2f}s")
                 logger.info(f"Successful models: {results['successful_models']}")
-                logger.info(f"GPU optimization: {results['gpu_used']}")
-                if results['gpu_used']:
-                    logger.info(f"GPU info: {results['gpu_info']}")
-                logger.info(f"Target score: {results['target_score']}")
                 
-                pred_stats = results.get('prediction_stats', {})
-                logger.info(f"Prediction statistics:")
-                logger.info(f"  Mean: {pred_stats.get('mean', 0):.4f}")
-                logger.info(f"  Std: {pred_stats.get('std', 0):.4f}")
-                logger.info(f"  Min: {pred_stats.get('min', 0):.4f}")
-                logger.info(f"  Max: {pred_stats.get('max', 0):.4f}")
+                if 'gpu_used' in results:
+                    logger.info(f"GPU optimization: {results['gpu_used']}")
+                    if results['gpu_used'] and 'gpu_info' in results:
+                        logger.info(f"GPU info: {results['gpu_info']}")
+                
+                if 'target_score' in results:
+                    logger.info(f"Target score: {results['target_score']}")
+                
+                if 'prediction_stats' in results:
+                    pred_stats = results.get('prediction_stats', {})
+                    logger.info(f"Prediction statistics:")
+                    logger.info(f"  Mean: {pred_stats.get('mean', 0):.4f}")
+                    logger.info(f"  Std: {pred_stats.get('std', 0):.4f}")
+                    logger.info(f"  Min: {pred_stats.get('min', 0):.4f}")
+                    logger.info(f"  Max: {pred_stats.get('max', 0):.4f}")
                 
                 if results.get('model_performances'):
                     logger.info("\nModel Performance Summary:")
