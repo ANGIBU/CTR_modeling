@@ -11,6 +11,13 @@ except ImportError:
     TORCH_AVAILABLE = False
     logging.warning("PyTorch not installed. GPU functions will be disabled.")
 
+try:
+    import nvtabular as nvt
+    NVTABULAR_AVAILABLE = True
+except ImportError:
+    NVTABULAR_AVAILABLE = False
+    logging.warning("NVTabular not installed. Using pandas fallback.")
+
 class Config:
     """Project-wide configuration management"""
     
@@ -60,12 +67,12 @@ class Config:
     FORCE_GPU_XGBOOST = True
     
     # NVTabular settings
-    USE_NVTABULAR = True
-    NVTABULAR_PARTITION_SIZE = '32MB'
-    NVTABULAR_OUT_FILES_PER_PROC = 8
-    NVTABULAR_SHUFFLE = True
+    USE_NVTABULAR = NVTABULAR_AVAILABLE
+    NVTABULAR_PARTITION_SIZE = '32MB' if NVTABULAR_AVAILABLE else None
+    NVTABULAR_OUT_FILES_PER_PROC = 8 if NVTABULAR_AVAILABLE else None
+    NVTABULAR_SHUFFLE = True if NVTABULAR_AVAILABLE else False
     
-    # Memory settings - optimized for NVTabular
+    # Memory settings
     MAX_MEMORY_GB = 64
     CHUNK_SIZE = 200000
     BATCH_SIZE_GPU = 32768
@@ -73,12 +80,12 @@ class Config:
     PREFETCH_FACTOR = 8
     NUM_WORKERS = 10
     
-    # Memory thresholds - relaxed for NVTabular
+    # Memory thresholds
     MEMORY_WARNING_THRESHOLD = 55
     MEMORY_CRITICAL_THRESHOLD = 60
     MEMORY_ABORT_THRESHOLD = 62
     
-    # Data size limits - full data processing
+    # Data size limits
     MAX_TRAIN_SIZE = 15000000
     MAX_TEST_SIZE = 2500000
     MAX_INTERACTION_FEATURES = 30
@@ -137,7 +144,7 @@ class Config:
         }
     }
     
-    # Feature engineering settings - simplified to 117 features
+    # Feature engineering settings
     FEATURE_ENGINEERING_CONFIG = {
         'target_feature_count': 117,
         'use_feature_selection': False,
@@ -280,6 +287,8 @@ class Config:
             'chunk_size': cls.CHUNK_SIZE,
             'expected_train_size': cls.MAX_TRAIN_SIZE,
             'expected_test_size': cls.MAX_TEST_SIZE,
+            'nvtabular_available': NVTABULAR_AVAILABLE,
+            'backend': 'nvtabular' if NVTABULAR_AVAILABLE else 'pandas'
         }
         
         requirements['train_size_adequate'] = requirements['train_file_size_mb'] > 1000
@@ -300,6 +309,7 @@ class Config:
         print(f"\nAll requirements met: {all_met}")
         if all_met:
             print("System ready for processing!")
+            print(f"Data loading backend: {requirements['backend']}")
         else:
             print("Requirements not met. Check data files and system resources.")
         
@@ -328,7 +338,9 @@ class Config:
                 'target_feature_count': cls.FEATURE_ENGINEERING_CONFIG['target_feature_count'],
                 'use_feature_selection': cls.FEATURE_ENGINEERING_CONFIG['use_feature_selection'],
                 'cleanup_after_each_step': cls.FEATURE_ENGINEERING_CONFIG['cleanup_after_each_step']
-            }
+            },
+            'use_nvtabular': cls.USE_NVTABULAR,
+            'backend': 'nvtabular' if cls.USE_NVTABULAR else 'pandas'
         }
     
     @classmethod
@@ -358,6 +370,11 @@ class Config:
                 'target_combined_score': cls.TARGET_COMBINED_SCORE,
                 'target_ctr': cls.TARGET_CTR,
                 'ctr_tolerance': cls.EVALUATION_CONFIG['ctr_tolerance']
+            },
+            'data_loading': {
+                'use_nvtabular': cls.USE_NVTABULAR,
+                'backend': 'nvtabular' if cls.USE_NVTABULAR else 'pandas',
+                'partition_size': cls.NVTABULAR_PARTITION_SIZE
             }
         }
 
