@@ -11,15 +11,8 @@ except ImportError:
     TORCH_AVAILABLE = False
     logging.warning("PyTorch not installed. GPU functions will be disabled.")
 
-try:
-    import nvtabular as nvt
-    NVTABULAR_AVAILABLE = True
-except ImportError:
-    NVTABULAR_AVAILABLE = False
-    logging.warning("NVTabular not installed. Using pandas fallback.")
-
 class Config:
-    """Project-wide configuration management"""
+    """Project-wide configuration management for Windows environment"""
     
     # Basic path settings
     BASE_DIR = Path(__file__).parent
@@ -66,29 +59,29 @@ class Config:
     GPU_OPTIMIZATION_LEVEL = 3
     FORCE_GPU_XGBOOST = True
     
-    # NVTabular settings
-    USE_NVTABULAR = NVTABULAR_AVAILABLE
-    NVTABULAR_PARTITION_SIZE = '32MB' if NVTABULAR_AVAILABLE else None
-    NVTABULAR_OUT_FILES_PER_PROC = 8 if NVTABULAR_AVAILABLE else None
-    NVTABULAR_SHUFFLE = True if NVTABULAR_AVAILABLE else False
+    # Windows environment - NVTabular not available
+    USE_NVTABULAR = False
+    NVTABULAR_PARTITION_SIZE = None
+    NVTABULAR_OUT_FILES_PER_PROC = None
+    NVTABULAR_SHUFFLE = False
     
-    # Memory settings
-    MAX_MEMORY_GB = 64
-    CHUNK_SIZE = 200000
+    # Memory settings for Windows
+    MAX_MEMORY_GB = 34
+    CHUNK_SIZE = 500000
     BATCH_SIZE_GPU = 32768
     BATCH_SIZE_CPU = 8192
-    PREFETCH_FACTOR = 8
-    NUM_WORKERS = 10
+    PREFETCH_FACTOR = 4
+    NUM_WORKERS = 6
     
     # Memory thresholds
-    MEMORY_WARNING_THRESHOLD = 55
-    MEMORY_CRITICAL_THRESHOLD = 60
-    MEMORY_ABORT_THRESHOLD = 62
+    MEMORY_WARNING_THRESHOLD = 50
+    MEMORY_CRITICAL_THRESHOLD = 55
+    MEMORY_ABORT_THRESHOLD = 60
     
     # Data size limits
-    MAX_TRAIN_SIZE = 15000000
-    MAX_TEST_SIZE = 2500000
-    MAX_INTERACTION_FEATURES = 30
+    MAX_TRAIN_SIZE = 10704179
+    MAX_TEST_SIZE = 1527298
+    MAX_INTERACTION_FEATURES = 0
     
     # Model training settings
     MODEL_TRAINING_CONFIG = {
@@ -103,14 +96,14 @@ class Config:
             'n_estimators': 800,
             'early_stopping_rounds': 50,
             'verbosity': -1,
-            'device': 'gpu',
+            'device': 'gpu' if GPU_AVAILABLE else 'cpu',
             'gpu_platform_id': 0,
             'gpu_device_id': 0
         },
         'xgboost': {
-            'tree_method': 'gpu_hist',
-            'gpu_id': 0,
-            'predictor': 'gpu_predictor',
+            'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
+            'gpu_id': 0 if GPU_AVAILABLE else None,
+            'predictor': 'gpu_predictor' if GPU_AVAILABLE else 'cpu_predictor',
             'max_depth': 8,
             'learning_rate': 0.1,
             'n_estimators': 500,
@@ -123,17 +116,6 @@ class Config:
             'early_stopping_rounds': 50,
             'verbosity': 0
         },
-        'catboost': {
-            'depth': 6,
-            'learning_rate': 0.05,
-            'iterations': 500,
-            'l2_leaf_reg': 3,
-            'border_count': 128,
-            'verbose': 0,
-            'early_stopping_rounds': 50,
-            'task_type': 'GPU',
-            'devices': '0'
-        },
         'logistic': {
             'C': 0.5,
             'penalty': 'l2',
@@ -144,7 +126,7 @@ class Config:
         }
     }
     
-    # Feature engineering settings
+    # Feature engineering settings - based on reference notebook
     FEATURE_ENGINEERING_CONFIG = {
         'target_feature_count': 117,
         'use_feature_selection': False,
@@ -154,7 +136,18 @@ class Config:
         'max_numeric_for_interaction': 0,
         'interaction_max_features': 0,
         'disable_normalization_for_trees': True,
-        'use_original_features_only': True
+        'use_original_features_only': True,
+        'categorical_columns': ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour'],
+        'continuous_columns': (
+            [f'feat_a_{i}' for i in range(1, 19)] +
+            [f'feat_b_{i}' for i in range(1, 7)] +
+            [f'feat_c_{i}' for i in range(1, 9)] +
+            [f'feat_d_{i}' for i in range(1, 7)] +
+            [f'feat_e_{i}' for i in range(1, 11)] +
+            [f'history_a_{i}' for i in range(1, 8)] +
+            [f'history_b_{i}' for i in range(1, 31)] +
+            [f'l_feat_{i}' for i in range(1, 28)]
+        )
     }
     
     # Training and evaluation settings
@@ -210,7 +203,7 @@ class Config:
     MEMORY_EFFICIENT_SAMPLING = False
     AGGRESSIVE_SAMPLING_THRESHOLD = 0.95
     MIN_SAMPLE_SIZE = 10000000
-    MAX_SAMPLE_SIZE = 12000000
+    MAX_SAMPLE_SIZE = 10704179
     
     # Logistic regression sampling configuration
     LOGISTIC_SAMPLING_CONFIG = {
@@ -287,13 +280,14 @@ class Config:
             'chunk_size': cls.CHUNK_SIZE,
             'expected_train_size': cls.MAX_TRAIN_SIZE,
             'expected_test_size': cls.MAX_TEST_SIZE,
-            'nvtabular_available': NVTABULAR_AVAILABLE,
-            'backend': 'nvtabular' if NVTABULAR_AVAILABLE else 'pandas'
+            'nvtabular_available': False,
+            'backend': 'pandas',
+            'gpu_available': cls.GPU_AVAILABLE
         }
         
         requirements['train_size_adequate'] = requirements['train_file_size_mb'] > 1000
         requirements['test_size_adequate'] = requirements['test_file_size_mb'] > 100
-        requirements['memory_adequate'] = requirements['memory_available'] > 40
+        requirements['memory_adequate'] = requirements['memory_available'] > 30
         
         for key, value in requirements.items():
             print(f"  {key}: {value}")
@@ -310,6 +304,7 @@ class Config:
         if all_met:
             print("System ready for processing!")
             print(f"Data loading backend: {requirements['backend']}")
+            print(f"GPU available: {requirements['gpu_available']}")
         else:
             print("Requirements not met. Check data files and system resources.")
         
@@ -339,8 +334,8 @@ class Config:
                 'use_feature_selection': cls.FEATURE_ENGINEERING_CONFIG['use_feature_selection'],
                 'cleanup_after_each_step': cls.FEATURE_ENGINEERING_CONFIG['cleanup_after_each_step']
             },
-            'use_nvtabular': cls.USE_NVTABULAR,
-            'backend': 'nvtabular' if cls.USE_NVTABULAR else 'pandas'
+            'use_nvtabular': False,
+            'backend': 'pandas'
         }
     
     @classmethod
@@ -372,9 +367,9 @@ class Config:
                 'ctr_tolerance': cls.EVALUATION_CONFIG['ctr_tolerance']
             },
             'data_loading': {
-                'use_nvtabular': cls.USE_NVTABULAR,
-                'backend': 'nvtabular' if cls.USE_NVTABULAR else 'pandas',
-                'partition_size': cls.NVTABULAR_PARTITION_SIZE
+                'use_nvtabular': False,
+                'backend': 'pandas',
+                'chunk_size': cls.CHUNK_SIZE
             }
         }
 

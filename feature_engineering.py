@@ -2,28 +2,19 @@
 
 import pandas as pd
 import numpy as np
-from typing import Tuple, Dict, List, Optional, Any, Union
+from typing import Tuple, Dict, List, Optional, Any
 import logging
 import time
 import gc
 import warnings
-import os
-import pickle
-import tempfile
-from pathlib import Path
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.feature_selection import SelectKBest, f_classif
-from sklearn.model_selection import KFold
-import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-import joblib
+from sklearn.preprocessing import LabelEncoder
 from config import Config
 from data_loader import MemoryMonitor
 
 logger = logging.getLogger(__name__)
 
 class CTRFeatureEngineer:
-    """CTR feature engineering class - simplified to 117 features"""
+    """CTR feature engineering based on reference notebook approach"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -33,7 +24,6 @@ class CTRFeatureEngineer:
         self.memory_efficient_mode = True
         
         self.label_encoders = {}
-        self.scalers = {}
         self.feature_stats = {}
         self.generated_features = []
         self.numerical_features = []
@@ -43,11 +33,12 @@ class CTRFeatureEngineer:
         self.final_feature_columns = []
         self.target_column = None
         
-        self.target_feature_count = config.FEATURE_ENGINEERING_CONFIG.get('target_feature_count', 117)
-        self.use_feature_selection = config.FEATURE_ENGINEERING_CONFIG.get('use_feature_selection', False)
-        self.disable_normalization_for_trees = config.FEATURE_ENGINEERING_CONFIG.get('disable_normalization_for_trees', True)
-        self.use_original_features_only = config.FEATURE_ENGINEERING_CONFIG.get('use_original_features_only', True)
-        self.feature_importance_scores = {}
+        self.target_feature_count = 117
+        self.expected_categorical = ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour']
+        self.expected_continuous_patterns = [
+            'feat_a_', 'feat_b_', 'feat_c_', 'feat_d_', 'feat_e_',
+            'history_a_', 'history_b_', 'l_feat_'
+        ]
         
         self.processing_stats = {
             'start_time': None,
@@ -78,13 +69,13 @@ class CTRFeatureEngineer:
                          train_df: pd.DataFrame, 
                          test_df: pd.DataFrame, 
                          target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Main feature engineering pipeline entry point"""
+        """Main feature engineering pipeline based on reference notebook"""
         if self.quick_mode:
             logger.info("=== Quick Mode Feature Engineering Started ===")
             return self.create_quick_features(train_df, test_df, target_col)
         else:
-            logger.info("=== Simplified Feature Engineering Started (117 features) ===")
-            return self.create_simplified_features(train_df, test_df, target_col)
+            logger.info("=== Reference Notebook Style Feature Engineering (117 features) ===")
+            return self.create_reference_features(train_df, test_df, target_col)
     
     def create_quick_features(self,
                             train_df: pd.DataFrame,
@@ -120,12 +111,12 @@ class CTRFeatureEngineer:
             logger.error(f"Quick feature engineering failed: {e}")
             return self._create_minimal_features(train_df, test_df, target_col)
     
-    def create_simplified_features(self, 
-                                   train_df: pd.DataFrame, 
-                                   test_df: pd.DataFrame, 
-                                   target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create simplified features - 117 features matching top performer"""
-        logger.info("Creating simplified features (117 target)")
+    def create_reference_features(self, 
+                                  train_df: pd.DataFrame, 
+                                  test_df: pd.DataFrame, 
+                                  target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Create features following reference notebook methodology"""
+        logger.info("Creating features based on reference notebook approach")
         
         try:
             self._initialize_processing(train_df, test_df, target_col)
@@ -133,9 +124,9 @@ class CTRFeatureEngineer:
             X_train, X_test, y_train = self._prepare_basic_data(train_df, test_df, target_col)
             self._force_memory_cleanup()
             
-            self._classify_original_features(X_train)
+            self._identify_feature_types(X_train)
             
-            X_train, X_test = self._prepare_original_features(X_train, X_test)
+            X_train, X_test = self._prepare_features_minimal(X_train, X_test)
             self._force_memory_cleanup()
             
             X_train, X_test = self._encode_categorical_minimal(X_train, X_test)
@@ -146,72 +137,65 @@ class CTRFeatureEngineer:
             
             self._finalize_processing(X_train, X_test)
             
-            logger.info(f"=== Simplified feature engineering completed: {X_train.shape} ===")
+            logger.info(f"=== Reference feature engineering completed: {X_train.shape} ===")
             
             return X_train, X_test
             
         except Exception as e:
-            logger.error(f"Simplified feature engineering failed: {e}")
+            logger.error(f"Reference feature engineering failed: {e}")
             self._force_memory_cleanup()
             
             logger.warning("Falling back to basic features")
             return self._create_basic_features_only(train_df, test_df, target_col)
     
-    def _force_memory_cleanup(self):
-        """Force memory cleanup"""
-        gc.collect()
-        self.memory_monitor.force_memory_cleanup()
-    
-    def _classify_original_features(self, X: pd.DataFrame):
-        """Classify original features based on top performer strategy"""
+    def _identify_feature_types(self, X: pd.DataFrame):
+        """Identify categorical and continuous features based on reference notebook"""
         try:
-            # TRUE CATEGORICAL (5 types expected)
-            true_categorical = []
+            # Identify categorical features
+            categorical_features = []
             for col in X.columns:
                 col_lower = col.lower()
-                if any(cat in col_lower for cat in ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour']):
-                    if X[col].nunique() < 50:
-                        true_categorical.append(col)
+                for expected_cat in self.expected_categorical:
+                    if expected_cat in col_lower:
+                        if X[col].nunique() < 1000:
+                            categorical_features.append(col)
+                            break
             
-            self.categorical_features = true_categorical
+            self.categorical_features = categorical_features
             
-            # CONTINUOUS (all remaining numeric features)
+            # Identify continuous features
             continuous_features = []
             for col in X.columns:
-                if col not in true_categorical:
-                    if X[col].dtype in ['int64', 'float64', 'float32', 'int32']:
-                        continuous_features.append(col)
+                if col not in categorical_features:
+                    for pattern in self.expected_continuous_patterns:
+                        if pattern in col:
+                            if X[col].dtype in ['int64', 'float64', 'float32', 'int32']:
+                                continuous_features.append(col)
+                            break
             
             self.numerical_features = continuous_features
             
-            logger.info(f"Feature classification - Categorical: {len(self.categorical_features)}, Continuous: {len(self.numerical_features)}")
+            logger.info(f"Feature identification - Categorical: {len(self.categorical_features)}, "
+                       f"Continuous: {len(self.numerical_features)}")
             logger.info(f"Categorical features: {self.categorical_features}")
             
         except Exception as e:
-            logger.error(f"Feature classification failed: {e}")
+            logger.error(f"Feature identification failed: {e}")
             self.numerical_features = list(X.select_dtypes(include=[np.number]).columns)
             self.categorical_features = []
     
-    def _prepare_original_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Prepare original features with minimal processing"""
+    def _prepare_features_minimal(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Prepare features with minimal processing following reference notebook"""
         try:
-            logger.info("Preparing original features with minimal processing")
+            logger.info("Preparing features with minimal processing")
             
-            # Convert all to numeric
+            # Fill missing values with 0
             for col in X_train.columns:
                 try:
                     if X_train[col].dtype == 'object' or X_train[col].dtype == 'category':
-                        # Label encode string columns
-                        train_unique = set(X_train[col].fillna('missing').astype(str).unique())
-                        test_unique = set(X_test[col].fillna('missing').astype(str).unique())
-                        all_unique = sorted(train_unique | test_unique)
-                        
-                        mapping = {val: idx for idx, val in enumerate(all_unique)}
-                        
-                        X_train[col] = X_train[col].fillna('missing').astype(str).map(mapping).fillna(0).astype('float32')
-                        X_test[col] = X_test[col].fillna('missing').astype(str).map(mapping).fillna(0).astype('float32')
+                        X_train[col] = X_train[col].fillna('missing')
+                        X_test[col] = X_test[col].fillna('missing')
                     else:
-                        # Numeric columns - just convert to float32
                         X_train[col] = X_train[col].fillna(0).astype('float32')
                         X_test[col] = X_test[col].fillna(0).astype('float32')
                         
@@ -228,20 +212,23 @@ class CTRFeatureEngineer:
             return X_train, X_test
     
     def _encode_categorical_minimal(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Minimal categorical encoding - use Categorify approach"""
+        """Minimal categorical encoding following Categorify approach"""
         try:
             logger.info("Applying minimal categorical encoding")
             
             for col in self.categorical_features:
                 if col in X_train.columns and col in X_test.columns:
                     try:
-                        # Already encoded in _prepare_original_features
-                        # Just ensure float32 type
-                        if X_train[col].dtype != 'float32':
-                            X_train[col] = X_train[col].astype('float32')
-                        if X_test[col].dtype != 'float32':
-                            X_test[col] = X_test[col].astype('float32')
-                            
+                        # Label encoding
+                        train_unique = set(X_train[col].fillna('missing').astype(str).unique())
+                        test_unique = set(X_test[col].fillna('missing').astype(str).unique())
+                        all_unique = sorted(train_unique | test_unique)
+                        
+                        mapping = {val: idx for idx, val in enumerate(all_unique)}
+                        
+                        X_train[col] = X_train[col].fillna('missing').astype(str).map(mapping).fillna(0).astype('float32')
+                        X_test[col] = X_test[col].fillna('missing').astype(str).map(mapping).fillna(0).astype('float32')
+                        
                     except Exception as e:
                         logger.warning(f"Encoding failed for {col}: {e}")
                         continue
@@ -252,6 +239,11 @@ class CTRFeatureEngineer:
         except Exception as e:
             logger.error(f"Categorical encoding failed: {e}")
             return X_train, X_test
+    
+    def _force_memory_cleanup(self):
+        """Force memory cleanup"""
+        gc.collect()
+        self.memory_monitor.force_memory_cleanup()
     
     def _convert_to_numeric_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Convert categorical columns to numeric using label encoding"""
@@ -306,7 +298,7 @@ class CTRFeatureEngineer:
             
             self.original_feature_order = sorted([col for col in train_df.columns if col != self.target_column])
             
-            mode_info = "QUICK MODE" if self.quick_mode else "SIMPLIFIED MODE"
+            mode_info = "QUICK MODE" if self.quick_mode else "REFERENCE NOTEBOOK MODE"
             logger.info(f"Feature engineering initialization ({mode_info})")
             logger.info(f"Initial data: Training {train_df.shape}, Test {test_df.shape}")
             logger.info(f"Target column: {self.target_column}")
@@ -358,6 +350,7 @@ class CTRFeatureEngineer:
             
             X_test = test_df.copy()
             
+            # Remove ID columns
             id_cols = [col for col in X_train.columns if 'id' in col.lower() or 'ID' in col]
             if id_cols:
                 X_train = X_train.drop(columns=id_cols, errors='ignore')
