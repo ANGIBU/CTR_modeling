@@ -27,6 +27,16 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
 
+try:
+    import cudf
+    import nvtabular as nvt
+    from nvtabular import ops
+    from merlin.io import Dataset
+    NVTABULAR_AVAILABLE = True
+except ImportError:
+    NVTABULAR_AVAILABLE = False
+    logging.warning("NVTabular not available. Install with: pip install nvtabular cudf")
+
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -241,8 +251,8 @@ class DataColumnAnalyzer:
         except Exception:
             return None
 
-class StreamingDataLoader:
-    """Streaming data loader with memory management and quick mode support"""
+class NVTabularDataLoader:
+    """NVTabular-based data loader with GPU acceleration"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -252,7 +262,11 @@ class StreamingDataLoader:
         self.temp_dir = tempfile.mkdtemp()
         self.quick_mode = False
         
-        logger.info("Streaming data loader initialization completed")
+        if not NVTABULAR_AVAILABLE:
+            logger.error("NVTabular is not available. Please install: pip install nvtabular cudf")
+            raise ImportError("NVTabular is required for this data loader")
+        
+        logger.info("NVTabular data loader initialization completed")
     
     def __del__(self):
         """Cleanup temporary directory on destruction"""
@@ -272,7 +286,7 @@ class StreamingDataLoader:
             logger.info("Full mode enabled: Will load complete dataset")
     
     def load_quick_sample_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Load small sample data for quick testing (50 samples)"""
+        """Load small sample data for quick testing"""
         logger.info("=== Quick sample data loading started ===")
         
         try:
@@ -315,8 +329,6 @@ class StreamingDataLoader:
             
             if len(df) > sample_size:
                 df = df.sample(n=sample_size, random_state=42).reset_index(drop=True)
-            
-            df = self._optimize_dataframe_memory(df, for_feature_engineering=True)
             
             logger.info(f"Sample loaded from {file_path.name}: {df.shape}")
             return df
@@ -368,253 +380,79 @@ class StreamingDataLoader:
         
         return train_df, test_df
     
-    def load_full_data_streaming(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Complete processing via streaming with memory management"""
-        logger.info("=== Full data streaming loading started ===")
+    def load_full_data_nvtabular(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Load full data using NVTabular with GPU acceleration"""
+        logger.info("=== NVTabular full data loading started ===")
         
         try:
-            self.memory_monitor.log_memory_status("Streaming start", force=True)
+            self.memory_monitor.log_memory_status("NVTabular loading start", force=True)
             
             if not self._validate_files():
                 raise ValueError("Data files do not exist")
             
-            logger.info("Training data streaming processing started")
-            train_df = self._stream_process_file(str(self.config.TRAIN_PATH), is_train=True)
+            logger.info("Processing training data with NVTabular")
+            train_df = self._load_with_nvtabular(str(self.config.TRAIN_PATH), is_train=True)
             
             if train_df is None or train_df.empty:
-                raise ValueError("Training data streaming processing failed")
+                raise ValueError("Training data loading failed")
             
-            temp_train_file = os.path.join(self.temp_dir, 'temp_train.pkl')
-            with open(temp_train_file, 'wb') as f:
-                pickle.dump(train_df, f, protocol=pickle.HIGHEST_PROTOCOL)
-            
-            train_shape = train_df.shape
-            target_column = self.target_column
-            
-            del train_df
-            
-            self.memory_monitor.force_memory_cleanup(intensive=True)
-            time.sleep(2)
-            self.memory_monitor.log_memory_status("Training data saved, memory cleared", force=True)
-            
-            logger.info("Test data streaming processing started") 
-            test_df = self._stream_process_file(str(self.config.TEST_PATH), is_train=False)
+            logger.info("Processing test data with NVTabular")
+            test_df = self._load_with_nvtabular(str(self.config.TEST_PATH), is_train=False)
             
             if test_df is None or test_df.empty:
-                raise ValueError("Test data streaming processing failed")
+                raise ValueError("Test data loading failed")
             
-            logger.info("Reloading training data from temporary storage")
-            with open(temp_train_file, 'rb') as f:
-                train_df = pickle.load(f)
+            self.memory_monitor.log_memory_status("NVTabular loading completed", force=True)
             
-            os.remove(temp_train_file)
-            
-            self.target_column = target_column
-            
-            self.memory_monitor.log_memory_status("Streaming completed", force=True)
-            
-            logger.info(f"=== Full data streaming completed - Training: {train_df.shape}, Test: {test_df.shape} ===")
+            logger.info(f"=== NVTabular loading completed - Training: {train_df.shape}, Test: {test_df.shape} ===")
             
             return train_df, test_df
             
         except Exception as e:
-            logger.error(f"Streaming data loading failed: {e}")
+            logger.error(f"NVTabular data loading failed: {e}")
             self.memory_monitor.force_memory_cleanup(intensive=True)
-            
-            try:
-                temp_train_file = os.path.join(self.temp_dir, 'temp_train.pkl')
-                if os.path.exists(temp_train_file):
-                    os.remove(temp_train_file)
-            except Exception:
-                pass
-            
             raise
     
-    def _stream_process_file(self, file_path: str, is_train: bool = True) -> pd.DataFrame:
-        """File streaming processing with memory optimization"""
+    def _load_with_nvtabular(self, file_path: str, is_train: bool = True) -> pd.DataFrame:
+        """Load data using NVTabular Dataset"""
         try:
-            if not PYARROW_AVAILABLE:
-                raise ValueError("PyArrow is required")
+            logger.info(f"Loading with NVTabular: {file_path}")
             
-            pressure = self.memory_monitor.check_memory_pressure()
-            if pressure['should_abort']:
-                logger.error(f"Insufficient memory for processing: {pressure['available_gb']:.1f}GB available")
-                raise MemoryError(f"Insufficient memory: {pressure['available_gb']:.1f}GB available")
+            # Create NVTabular Dataset with partition size
+            dataset = Dataset(
+                file_path,
+                engine='parquet',
+                part_size=self.config.NVTABULAR_PARTITION_SIZE
+            )
             
-            parquet_file = pq.ParquetFile(file_path)
-            total_rows = parquet_file.metadata.num_rows
-            num_row_groups = parquet_file.num_row_groups
+            logger.info(f"NVTabular Dataset created with partition size: {self.config.NVTABULAR_PARTITION_SIZE}")
             
-            logger.info(f"File analysis - Total {total_rows:,} rows, {num_row_groups} row groups")
+            # Detect target column from first batch
+            if is_train and self.target_column is None:
+                sample_batch = dataset.to_ddf().head(1000)
+                sample_pd = sample_batch.to_pandas() if hasattr(sample_batch, 'to_pandas') else sample_batch
+                self.target_column = self.column_analyzer.detect_target_column(sample_pd)
+                logger.info(f"Target column detected: {self.target_column}")
             
-            if is_train:
-                sample_table = parquet_file.read_row_group(0)
-                sample_df = sample_table.to_pandas()
-                
-                if len(sample_df) > 1000:
-                    sample_df = sample_df.sample(n=1000, random_state=42)
-                
-                self.target_column = self.column_analyzer.detect_target_column(sample_df)
-                logger.info(f"Detected target column: {self.target_column}")
-                
-                del sample_df, sample_table
-                gc.collect()
+            # Convert to DataFrame
+            logger.info("Converting NVTabular Dataset to DataFrame")
+            ddf = dataset.to_ddf()
+            df = ddf.compute()
             
-            all_chunks = []
-            processed_rows = 0
-            batch_size = 1
+            # Convert cuDF to pandas if necessary
+            if hasattr(df, 'to_pandas'):
+                df = df.to_pandas()
             
-            for rg_start in range(0, num_row_groups, batch_size):
-                rg_end = min(rg_start + batch_size, num_row_groups)
-                
-                try:
-                    pressure = self.memory_monitor.check_memory_pressure()
-                    if pressure['should_abort']:
-                        logger.warning(f"Memory limit approaching - Processed rows: {processed_rows}, continuing attempt")
-                        
-                        self.memory_monitor.force_memory_cleanup(intensive=True)
-                        time.sleep(1)
-                        
-                        pressure_after = self.memory_monitor.check_memory_pressure()
-                        if pressure_after['should_abort']:
-                            logger.error(f"Memory limit reached even after cleanup - Stopping: {processed_rows} rows")
-                            break
-                    
-                    row_group_tables = []
-                    for rg_idx in range(rg_start, rg_end):
-                        table = parquet_file.read_row_group(rg_idx)
-                        row_group_tables.append(table)
-                   
-                    if len(row_group_tables) == 1:
-                        combined_table = row_group_tables[0]
-                    else:
-                        combined_table = pa.concat_tables(row_group_tables)
-                    
-                    chunk_df = combined_table.to_pandas()
-                    
-                    del row_group_tables, combined_table
-                    
-                    chunk_df = self._optimize_dataframe_memory(chunk_df, for_feature_engineering=True)
-                    
-                    all_chunks.append(chunk_df)
-                    processed_rows += len(chunk_df)
-                    
-                    logger.info(f"Row groups {rg_start+1}-{rg_end} processed: {len(chunk_df):,} rows")
-                    
-                    if len(all_chunks) % 2 == 0:
-                        self.memory_monitor.force_memory_cleanup()
-                    
-                    progress_pct = (rg_end / num_row_groups) * 100
-                    logger.info(f"Progress: {progress_pct:.1f}% ({processed_rows:,} rows)")
-                    
-                except Exception as e:
-                    logger.error(f"Row group batch {rg_start+1}-{rg_end} processing failed: {e}")
-                    
-                    self.memory_monitor.force_memory_cleanup(intensive=True)
-                    
-                    continue
+            logger.info(f"NVTabular loading completed: {df.shape}")
             
-            if not all_chunks:
-                logger.error("No data processed successfully")
-                return pd.DataFrame()
-            
-            logger.info(f"Final combination: {len(all_chunks)} chunks")
-            final_df = self._combine_chunks_memory_efficient(all_chunks)
-            
-            logger.info(f"File streaming completed: {len(final_df):,} rows")
-            
-            self.memory_monitor.force_memory_cleanup(intensive=True)
-            
-            return final_df
-            
-        except Exception as e:
-            logger.error(f"File streaming processing failed: {e}")
-            return pd.DataFrame()
-    
-    def _optimize_dataframe_memory(self, df: pd.DataFrame, for_feature_engineering: bool = False) -> pd.DataFrame:
-        """Optimize DataFrame memory usage"""
-        try:
-            for col in df.columns:
-                col_type = df[col].dtype
-                
-                if col_type == 'int64':
-                    min_val = df[col].min()
-                    max_val = df[col].max()
-                    
-                    if min_val >= 0:
-                        if max_val < 255:
-                            df[col] = df[col].astype('uint8')
-                        elif max_val < 65535:
-                            df[col] = df[col].astype('uint16')
-                        elif max_val < 4294967295:
-                            df[col] = df[col].astype('uint32')
-                    else:
-                        if min_val > -128 and max_val < 127:
-                            df[col] = df[col].astype('int8')
-                        elif min_val > -32768 and max_val < 32767:
-                            df[col] = df[col].astype('int16')
-                        elif min_val > -2147483648 and max_val < 2147483647:
-                            df[col] = df[col].astype('int32')
-                
-                elif col_type == 'float64':
-                    df[col] = df[col].astype('float32')
-                
-                elif col_type == 'object':
-                    if for_feature_engineering:
-                        unique_ratio = df[col].nunique() / len(df)
-                        if unique_ratio < 0.3:
-                            try:
-                                df[col] = df[col].astype('category')
-                            except:
-                                pass
-                    else:
-                        if df[col].nunique() / len(df) < 0.5:
-                            try:
-                                df[col] = df[col].astype('category')
-                            except:
-                                pass
+            # Memory cleanup
+            del dataset, ddf
+            self.memory_monitor.force_memory_cleanup()
             
             return df
             
         except Exception as e:
-            logger.warning(f"Memory optimization failed: {e}")
-            return df
-    
-    def _combine_chunks_memory_efficient(self, chunks: List[pd.DataFrame]) -> pd.DataFrame:
-        """Combine chunks with memory management"""
-        try:
-            if not chunks:
-                return pd.DataFrame()
-            
-            if len(chunks) == 1:
-                return chunks[0]
-            
-            logger.info(f"Combining {len(chunks)} chunks progressively")
-            
-            result = chunks[0]
-            for i, chunk in enumerate(chunks[1:], 1):
-                try:
-                    result = pd.concat([result, chunk], ignore_index=True)
-                    
-                    if i % 3 == 0:
-                        self.memory_monitor.force_memory_cleanup()
-                        
-                        pressure = self.memory_monitor.check_memory_pressure()
-                        if pressure['should_cleanup']:
-                            logger.info(f"Memory cleanup during combination: chunk {i}/{len(chunks)-1}")
-                    
-                except Exception as e:
-                    logger.error(f"Chunk combination failed at chunk {i}: {e}")
-                    continue
-            
-            logger.info(f"Chunk combination successful: {len(result):,} rows")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Chunk combination failed: {e}")
-            for chunk in chunks:
-                if isinstance(chunk, pd.DataFrame) and not chunk.empty:
-                    return chunk
+            logger.error(f"NVTabular loading failed: {e}")
             return pd.DataFrame()
     
     def _validate_files(self) -> bool:
@@ -652,7 +490,7 @@ class StreamingDataLoader:
         return self.target_column
 
 class LargeDataLoader:
-    """Large data loader with quick mode support"""
+    """Large data loader with NVTabular support"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -683,11 +521,14 @@ class LargeDataLoader:
         """Load small sample data for quick testing"""
         logger.info("=== Quick sample data loading via LargeDataLoader ===")
         
-        streaming_loader = StreamingDataLoader(self.config)
-        streaming_loader.set_quick_mode(True)
-        result = streaming_loader.load_quick_sample_data()
-        
-        self.target_column = streaming_loader.get_detected_target_column()
+        if NVTABULAR_AVAILABLE:
+            nvt_loader = NVTabularDataLoader(self.config)
+            nvt_loader.set_quick_mode(True)
+            result = nvt_loader.load_quick_sample_data()
+            self.target_column = nvt_loader.get_detected_target_column()
+        else:
+            logger.warning("NVTabular not available, using fallback loader")
+            result = self._fallback_load_sample()
         
         self.loading_stats.update({
             'data_loaded': True,
@@ -699,14 +540,17 @@ class LargeDataLoader:
         return result
     
     def load_large_data_optimized(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Complete data processing (full dataset)"""
+        """Load complete data with NVTabular optimization"""
         logger.info("=== Complete data processing started ===")
         
-        streaming_loader = StreamingDataLoader(self.config)
-        streaming_loader.set_quick_mode(False)
-        result = streaming_loader.load_full_data_streaming()
-        
-        self.target_column = streaming_loader.get_detected_target_column()
+        if NVTABULAR_AVAILABLE:
+            nvt_loader = NVTabularDataLoader(self.config)
+            nvt_loader.set_quick_mode(False)
+            result = nvt_loader.load_full_data_nvtabular()
+            self.target_column = nvt_loader.get_detected_target_column()
+        else:
+            logger.error("NVTabular is required for full data loading")
+            raise ImportError("Please install NVTabular: pip install nvtabular cudf")
         
         self.loading_stats.update({
             'data_loaded': True,
@@ -717,6 +561,20 @@ class LargeDataLoader:
         
         return result
     
+    def _fallback_load_sample(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Fallback sample loading without NVTabular"""
+        try:
+            train_df = pd.read_parquet(self.config.TRAIN_PATH).head(35)
+            test_df = pd.read_parquet(self.config.TEST_PATH).head(15)
+            
+            if 'clicked' in train_df.columns:
+                self.target_column = 'clicked'
+            
+            return train_df, test_df
+        except Exception as e:
+            logger.error(f"Fallback loading failed: {e}")
+            return pd.DataFrame(), pd.DataFrame()
+    
     def get_detected_target_column(self) -> Optional[str]:
         """Return detected target column name"""
         return self.target_column
@@ -725,8 +583,8 @@ class LargeDataLoader:
         """Get loading performance statistics"""
         return self.loading_stats.copy()
 
-DataLoader = StreamingDataLoader
-SimpleDataLoader = StreamingDataLoader
+DataLoader = LargeDataLoader
+SimpleDataLoader = LargeDataLoader
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
@@ -746,14 +604,15 @@ if __name__ == "__main__":
         print(f"Detected target column: {loader.get_detected_target_column()}")
         print(f"Total samples: {len(train_df) + len(test_df)}")
         
-        print("\nTesting full mode...")
-        loader.set_quick_mode(False)
-        train_df_full, test_df_full = loader.load_large_data_optimized()
-        
-        print(f"Full mode results:")
-        print(f"Training data: {train_df_full.shape}")
-        print(f"Test data: {test_df_full.shape}")
-        print(f"Complete processing finished: {len(train_df_full) + len(test_df_full):,} rows")
+        if NVTABULAR_AVAILABLE:
+            print("\nTesting full mode with NVTabular...")
+            loader.set_quick_mode(False)
+            train_df_full, test_df_full = loader.load_large_data_optimized()
+            
+            print(f"Full mode results:")
+            print(f"Training data: {train_df_full.shape}")
+            print(f"Test data: {test_df_full.shape}")
+            print(f"Complete processing finished: {len(train_df_full) + len(test_df_full):,} rows")
         
     except Exception as e:
         logger.error(f"Test execution failed: {e}")

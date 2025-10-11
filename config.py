@@ -45,7 +45,7 @@ class Config:
         'typical_ctr_range': (0.005, 0.05)
     }
     
-    # GPU and hardware settings - RTX 4060 Ti 16GB optimization
+    # GPU and hardware settings
     if TORCH_AVAILABLE:
         DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         GPU_AVAILABLE = torch.cuda.is_available()
@@ -59,7 +59,13 @@ class Config:
     GPU_OPTIMIZATION_LEVEL = 3
     FORCE_GPU_XGBOOST = True
     
-    # Memory settings - 64GB RAM system optimization
+    # NVTabular settings
+    USE_NVTABULAR = True
+    NVTABULAR_PARTITION_SIZE = '32MB'
+    NVTABULAR_OUT_FILES_PER_PROC = 8
+    NVTABULAR_SHUFFLE = True
+    
+    # Memory settings - optimized for NVTabular
     MAX_MEMORY_GB = 64
     CHUNK_SIZE = 200000
     BATCH_SIZE_GPU = 32768
@@ -67,17 +73,17 @@ class Config:
     PREFETCH_FACTOR = 8
     NUM_WORKERS = 10
     
-    # Memory thresholds - adjusted for full data usage
-    MEMORY_WARNING_THRESHOLD = 52
-    MEMORY_CRITICAL_THRESHOLD = 58
+    # Memory thresholds - relaxed for NVTabular
+    MEMORY_WARNING_THRESHOLD = 55
+    MEMORY_CRITICAL_THRESHOLD = 60
     MEMORY_ABORT_THRESHOLD = 62
     
-    # Data size limits - increased for full data usage
+    # Data size limits - full data processing
     MAX_TRAIN_SIZE = 15000000
     MAX_TEST_SIZE = 2500000
-    MAX_INTERACTION_FEATURES = 80
+    MAX_INTERACTION_FEATURES = 30
     
-    # Model training settings - GPU XGBoost focused
+    # Model training settings
     MODEL_TRAINING_CONFIG = {
         'lightgbm': {
             'max_depth': 6,
@@ -87,7 +93,7 @@ class Config:
             'bagging_fraction': 0.8,
             'bagging_freq': 5,
             'learning_rate': 0.05,
-            'n_estimators': 500,
+            'n_estimators': 800,
             'early_stopping_rounds': 50,
             'verbosity': -1,
             'device': 'gpu',
@@ -131,16 +137,17 @@ class Config:
         }
     }
     
-    # Feature engineering settings - increased limits
+    # Feature engineering settings - simplified to 117 features
     FEATURE_ENGINEERING_CONFIG = {
-        'target_feature_count': 500,
+        'target_feature_count': 117,
         'use_feature_selection': False,
         'feature_selection_method': 'mutual_info',
         'cleanup_after_each_step': True,
-        'max_categorical_for_encoding': 30,
-        'max_numeric_for_interaction': 20,
-        'interaction_max_features': 50,
-        'disable_normalization_for_trees': True
+        'max_categorical_for_encoding': 5,
+        'max_numeric_for_interaction': 0,
+        'interaction_max_features': 0,
+        'disable_normalization_for_trees': True,
+        'use_original_features_only': True
     }
     
     # Training and evaluation settings
@@ -193,17 +200,17 @@ class Config:
     
     # Large dataset specific settings
     LARGE_DATASET_MODE = True
-    MEMORY_EFFICIENT_SAMPLING = True
-    AGGRESSIVE_SAMPLING_THRESHOLD = 0.80
-    MIN_SAMPLE_SIZE = 3000000
+    MEMORY_EFFICIENT_SAMPLING = False
+    AGGRESSIVE_SAMPLING_THRESHOLD = 0.95
+    MIN_SAMPLE_SIZE = 10000000
     MAX_SAMPLE_SIZE = 12000000
     
-    # Logistic regression sampling configuration - increased for full data usage
+    # Logistic regression sampling configuration
     LOGISTIC_SAMPLING_CONFIG = {
-        'normal_size': 8000000,
-        'warning_size': 5000000,
-        'critical_size': 3000000,
-        'abort_size': 1000000,
+        'normal_size': 10000000,
+        'warning_size': 8000000,
+        'critical_size': 5000000,
+        'abort_size': 3000000,
         'enable_dynamic_sizing': True
     }
     

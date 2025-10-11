@@ -54,9 +54,9 @@ class MemoryMonitor:
     
     def __init__(self):
         self.memory_thresholds = {
-            'warning': 52.0,
-            'critical': 58.0,
-            'abort': 62.0
+            'warning': 45.0,
+            'critical': 50.0,
+            'abort': 55.0
         }
         
         self.quick_mode_thresholds = {
@@ -411,11 +411,7 @@ class BaseModel(ABC):
             memory_status = self.memory_monitor.get_memory_status()
             
             if memory_status['level'] == 'abort':
-                logger.error(f"{self.name}: Insufficient memory for training")
-                return None
-            elif memory_status['level'] == 'critical':
-                self._simplify_for_memory()
-                logger.warning(f"{self.name}: Memory critical - simplified parameters")
+                logger.warning(f"{self.name}: Low memory ({memory_status['available_gb']:.1f}GB), attempting to proceed")
             
             return fit_function(*args, **kwargs)
             
@@ -581,7 +577,7 @@ class BaseModel(ABC):
         pass
 
 class LogisticModel(BaseModel):
-    """Logistic Regression model with relaxed sampling"""
+    """Logistic Regression model"""
     
     def __init__(self, name: str = "LogisticRegression", params: Dict[str, Any] = None):
         if not SKLEARN_AVAILABLE:
@@ -635,7 +631,7 @@ class LogisticModel(BaseModel):
         logger.info(f"{self.name}: Quick mode parameters applied")
     
     def _safe_sampling(self, X_train: pd.DataFrame, y_train: pd.Series, target_size: int) -> Tuple[pd.DataFrame, pd.Series]:
-        """Safe stratified sampling - RELAXED for full data usage"""
+        """Safe stratified sampling"""
         try:
             current_size = len(X_train)
             
@@ -667,7 +663,7 @@ class LogisticModel(BaseModel):
     
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
             X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Training with relaxed sampling for full data usage"""
+        """Training"""
         logger.info(f"{self.name} model training started (data: {len(X_train):,})")
         start_time = time.time()
         
@@ -677,25 +673,10 @@ class LogisticModel(BaseModel):
             if self.quick_mode:
                 self._apply_quick_mode_params()
             
-            # RELAXED: Increased sampling sizes for better model performance
             memory_status = self.memory_monitor.get_memory_status()
             
-            if memory_status['level'] == 'abort':
-                target_size = 1000000
-                X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
-            elif memory_status['level'] == 'critical':
-                target_size = 3000000
-                X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
-            elif memory_status['level'] == 'warning' and len(X_train) > 5000000:
-                target_size = 5000000
-                X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
-            else:
-                # Use full data or up to 8M samples
-                if len(X_train) > 8000000:
-                    target_size = 8000000
-                    X_train_sample, y_train_sample = self._safe_sampling(X_train, y_train, target_size)
-                else:
-                    X_train_sample, y_train_sample = X_train, y_train
+            # No sampling - use all data
+            X_train_sample, y_train_sample = X_train, y_train
             
             X_train_clean = self._safe_data_preprocessing(X_train_sample, fit_scaler=True)
             
@@ -779,7 +760,6 @@ class LightGBMModel(BaseModel):
         self.model = None
         self.use_scaling = False
         
-        # GPU support
         try:
             import torch
             if torch.cuda.is_available():
@@ -852,13 +832,12 @@ class LightGBMModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X, batch_size=50000)
 
 class XGBoostModel(BaseModel):
-    """XGBoost model with FORCED GPU support"""
+    """XGBoost model with GPU support"""
     
     def __init__(self, name: str = "XGBoost", params: Dict[str, Any] = None):
         if not XGBOOST_AVAILABLE:
             raise ImportError("XGBoost is not installed.")
         
-        # FORCE GPU params
         default_params = {
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
@@ -868,10 +847,10 @@ class XGBoostModel(BaseModel):
             'max_depth': 8,
             'learning_rate': 0.1,
             'n_estimators': 500,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
             'min_child_weight': 10,
             'gamma': 0.1,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
             'reg_alpha': 0.5,
             'reg_lambda': 0.5,
             'random_state': 42,
