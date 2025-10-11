@@ -151,7 +151,6 @@ class CTRFeatureEngineer:
     def _identify_feature_types(self, X: pd.DataFrame):
         """Identify categorical and continuous features based on reference notebook"""
         try:
-            # Identify categorical features
             categorical_features = []
             for col in X.columns:
                 col_lower = col.lower()
@@ -163,7 +162,6 @@ class CTRFeatureEngineer:
             
             self.categorical_features = categorical_features
             
-            # Identify continuous features
             continuous_features = []
             for col in X.columns:
                 if col not in categorical_features:
@@ -189,7 +187,6 @@ class CTRFeatureEngineer:
         try:
             logger.info("Preparing features with minimal processing")
             
-            # Fill missing values with 0
             for col in X_train.columns:
                 try:
                     if X_train[col].dtype == 'object' or X_train[col].dtype == 'category':
@@ -219,7 +216,6 @@ class CTRFeatureEngineer:
             for col in self.categorical_features:
                 if col in X_train.columns and col in X_test.columns:
                     try:
-                        # Label encoding
                         train_unique = set(X_train[col].fillna('missing').astype(str).unique())
                         test_unique = set(X_test[col].fillna('missing').astype(str).unique())
                         all_unique = sorted(train_unique | test_unique)
@@ -339,7 +335,7 @@ class CTRFeatureEngineer:
     
     def _prepare_basic_data(self, train_df: pd.DataFrame, test_df: pd.DataFrame,
                            target_col: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
-        """Prepare basic data"""
+        """Prepare basic data with proper column removal"""
         try:
             if target_col in train_df.columns:
                 y_train = train_df[target_col].copy()
@@ -353,8 +349,45 @@ class CTRFeatureEngineer:
             # Remove ID columns
             id_cols = [col for col in X_train.columns if 'id' in col.lower() or 'ID' in col]
             if id_cols:
+                logger.info(f"Removing ID columns: {id_cols}")
                 X_train = X_train.drop(columns=id_cols, errors='ignore')
                 X_test = X_test.drop(columns=id_cols, errors='ignore')
+            
+            # Remove 'seq' column explicitly
+            if 'seq' in X_train.columns:
+                logger.info("Removing 'seq' column from training data")
+                X_train = X_train.drop(columns=['seq'])
+            
+            if 'seq' in X_test.columns:
+                logger.info("Removing 'seq' column from test data")
+                X_test = X_test.drop(columns=['seq'])
+            
+            # Remove all object type columns that are not expected categorical features
+            object_cols_train = X_train.select_dtypes(include=['object']).columns.tolist()
+            object_cols_test = X_test.select_dtypes(include=['object']).columns.tolist()
+            
+            # Keep only expected categorical columns
+            expected_cats_lower = [cat.lower() for cat in self.expected_categorical]
+            
+            cols_to_remove_train = [col for col in object_cols_train 
+                                   if not any(exp_cat in col.lower() for exp_cat in expected_cats_lower)]
+            cols_to_remove_test = [col for col in object_cols_test 
+                                  if not any(exp_cat in col.lower() for exp_cat in expected_cats_lower)]
+            
+            if cols_to_remove_train:
+                logger.info(f"Removing unexpected object columns from train: {cols_to_remove_train}")
+                X_train = X_train.drop(columns=cols_to_remove_train, errors='ignore')
+            
+            if cols_to_remove_test:
+                logger.info(f"Removing unexpected object columns from test: {cols_to_remove_test}")
+                X_test = X_test.drop(columns=cols_to_remove_test, errors='ignore')
+            
+            # Ensure only numeric and expected categorical columns remain
+            remaining_object_cols_train = X_train.select_dtypes(include=['object']).columns.tolist()
+            remaining_object_cols_test = X_test.select_dtypes(include=['object']).columns.tolist()
+            
+            logger.info(f"Remaining object columns in train: {remaining_object_cols_train}")
+            logger.info(f"Remaining object columns in test: {remaining_object_cols_test}")
             
             logger.info(f"Data preparation completed - Train: {X_train.shape}, Test: {X_test.shape}")
             return X_train, X_test, y_train
@@ -424,14 +457,31 @@ class CTRFeatureEngineer:
             return X_train, X_test
     
     def _final_data_cleanup(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Final data cleanup"""
+        """Final data cleanup with strict type checking"""
         try:
+            logger.info("Starting final data cleanup")
+            
+            # Remove any remaining non-numeric columns
+            non_numeric_train = X_train.select_dtypes(exclude=[np.number]).columns.tolist()
+            non_numeric_test = X_test.select_dtypes(exclude=[np.number]).columns.tolist()
+            
+            if non_numeric_train:
+                logger.warning(f"Removing remaining non-numeric columns from train: {non_numeric_train}")
+                X_train = X_train.drop(columns=non_numeric_train)
+            
+            if non_numeric_test:
+                logger.warning(f"Removing remaining non-numeric columns from test: {non_numeric_test}")
+                X_test = X_test.drop(columns=non_numeric_test)
+            
+            # Replace inf values
             X_train = X_train.replace([np.inf, -np.inf], 0)
             X_test = X_test.replace([np.inf, -np.inf], 0)
             
+            # Fill NA
             X_train = X_train.fillna(0)
             X_test = X_test.fillna(0)
             
+            # Convert to float32
             for col in X_train.columns:
                 if col in X_test.columns:
                     try:
@@ -439,8 +489,13 @@ class CTRFeatureEngineer:
                             X_train[col] = X_train[col].astype('float32')
                         if X_test[col].dtype != 'float32':
                             X_test[col] = X_test[col].astype('float32')
-                    except:
+                    except Exception as e:
+                        logger.warning(f"Type conversion failed for {col}: {e}")
                         pass
+            
+            # Final verification
+            logger.info(f"Final data types - Train: {X_train.dtypes.value_counts().to_dict()}")
+            logger.info(f"Final data types - Test: {X_test.dtypes.value_counts().to_dict()}")
             
             return X_train, X_test
             

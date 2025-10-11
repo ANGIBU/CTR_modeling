@@ -464,29 +464,61 @@ class BaseModel(ABC):
             return np.array([])
     
     def _safe_data_preprocessing(self, X: pd.DataFrame, fit_scaler: bool = False) -> pd.DataFrame:
-        """Safe data preprocessing"""
+        """Safe data preprocessing with strict validation"""
         try:
             X_processed = X.copy()
             
+            # Remove non-numeric columns except expected categoricals
+            non_numeric_cols = X_processed.select_dtypes(exclude=[np.number]).columns.tolist()
+            if non_numeric_cols:
+                logger.warning(f"{self.name}: Removing non-numeric columns: {non_numeric_cols}")
+                X_processed = X_processed.drop(columns=non_numeric_cols)
+            
+            # Verify all columns are numeric
+            remaining_types = X_processed.dtypes.unique()
+            if not all(np.issubdtype(dtype, np.number) for dtype in remaining_types):
+                logger.error(f"{self.name}: Non-numeric data types detected after cleanup: {remaining_types}")
+                # Force convert to numeric
+                for col in X_processed.columns:
+                    try:
+                        X_processed[col] = pd.to_numeric(X_processed[col], errors='coerce')
+                    except Exception as e:
+                        logger.error(f"{self.name}: Failed to convert {col} to numeric: {e}")
+                        X_processed[col] = 0.0
+            
+            # Handle missing values
             numeric_columns = X_processed.select_dtypes(include=[np.number]).columns
             X_processed[numeric_columns] = X_processed[numeric_columns].fillna(0)
             
-            categorical_columns = X_processed.select_dtypes(include=['object', 'category']).columns
-            for col in categorical_columns:
-                X_processed[col] = X_processed[col].fillna('missing')
-            
+            # Handle infinity
             X_processed = X_processed.replace([np.inf, -np.inf], 0)
             
+            # Scale if needed
             if self.use_scaling and len(numeric_columns) > 0:
                 if fit_scaler:
                     X_processed[numeric_columns] = self.scaler.fit_transform(X_processed[numeric_columns])
                 else:
                     X_processed[numeric_columns] = self.scaler.transform(X_processed[numeric_columns])
             
+            # Final verification
+            if X_processed.empty:
+                logger.error(f"{self.name}: Data preprocessing resulted in empty dataframe")
+                raise ValueError("Data preprocessing failed - empty result")
+            
+            # Log final state
+            logger.debug(f"{self.name}: Preprocessing complete - shape: {X_processed.shape}, dtypes: {X_processed.dtypes.value_counts().to_dict()}")
+            
             return X_processed
             
         except Exception as e:
             logger.warning(f"{self.name}: Data preprocessing failed: {e}")
+            # Last resort: return numeric columns only with zero fill
+            try:
+                X_numeric = X.select_dtypes(include=[np.number]).fillna(0)
+                if not X_numeric.empty:
+                    return X_numeric
+            except:
+                pass
             return X
     
     def _ensure_feature_consistency(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -606,7 +638,6 @@ class XGBoostModel(BaseModel):
         if not XGBOOST_AVAILABLE:
             raise ImportError("XGBoost is not installed.")
         
-        # RTX 4060 Ti optimized parameters
         default_params = {
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
