@@ -7,7 +7,6 @@ import logging
 import time
 import gc
 import warnings
-from sklearn.preprocessing import LabelEncoder
 from config import Config
 from data_loader import MemoryMonitor
 
@@ -121,15 +120,15 @@ class CTRFeatureEngineer:
         try:
             self._initialize_processing(train_df, test_df, target_col)
             
-            X_train, X_test, y_train = self._prepare_basic_data(train_df, test_df, target_col)
+            X_train, X_test, y_train = self._prepare_reference_data(train_df, test_df, target_col)
             self._force_memory_cleanup()
             
-            self._identify_feature_types(X_train)
+            self._identify_feature_types_reference(X_train)
             
-            X_train, X_test = self._prepare_features_minimal(X_train, X_test)
+            X_train, X_test = self._prepare_features_reference(X_train, X_test)
             self._force_memory_cleanup()
             
-            X_train, X_test = self._encode_categorical_minimal(X_train, X_test)
+            X_train, X_test = self._encode_categorical_reference(X_train, X_test)
             self._force_memory_cleanup()
             
             X_train, X_test = self._final_data_cleanup(X_train, X_test)
@@ -148,15 +147,57 @@ class CTRFeatureEngineer:
             logger.warning("Falling back to basic features")
             return self._create_basic_features_only(train_df, test_df, target_col)
     
-    def _identify_feature_types(self, X: pd.DataFrame):
+    def _prepare_reference_data(self, train_df: pd.DataFrame, test_df: pd.DataFrame,
+                               target_col: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
+        """Prepare data following reference notebook approach"""
+        try:
+            logger.info("Preparing data (reference approach)")
+            
+            if target_col in train_df.columns:
+                y_train = train_df[target_col].copy()
+                X_train = train_df.drop(columns=[target_col])
+            else:
+                y_train = pd.Series([0] * len(train_df))
+                X_train = train_df.copy()
+            
+            X_test = test_df.copy()
+            
+            if 'seq' in X_train.columns:
+                logger.info("Removing 'seq' column from training data")
+                X_train = X_train.drop(columns=['seq'])
+            
+            if 'seq' in X_test.columns:
+                logger.info("Removing 'seq' column from test data")
+                X_test = X_test.drop(columns=['seq'])
+            
+            id_cols = [col for col in X_train.columns 
+                      if ('id' in col.lower() or 'ID' in col) 
+                      and col.lower() not in ['inventory_id']]
+            
+            if id_cols:
+                logger.info(f"Removing ID columns (preserving inventory_id): {id_cols}")
+                X_train = X_train.drop(columns=id_cols, errors='ignore')
+                X_test = X_test.drop(columns=id_cols, errors='ignore')
+            
+            logger.info(f"Data preparation completed - Train: {X_train.shape}, Test: {X_test.shape}")
+            logger.info(f"Columns preserved: {X_train.columns.tolist()}")
+            
+            return X_train, X_test, y_train
+            
+        except Exception as e:
+            logger.error(f"Reference data preparation failed: {e}")
+            raise
+    
+    def _identify_feature_types_reference(self, X: pd.DataFrame):
         """Identify categorical and continuous features based on reference notebook"""
         try:
+            logger.info("Identifying feature types (reference approach)")
+            
             categorical_features = []
-            for col in X.columns:
-                col_lower = col.lower()
-                for expected_cat in self.expected_categorical:
-                    if expected_cat in col_lower:
-                        if X[col].nunique() < 1000:
+            for expected_cat in self.expected_categorical:
+                for col in X.columns:
+                    if expected_cat in col.lower():
+                        if X[col].nunique() < 10000:
                             categorical_features.append(col)
                             break
             
@@ -169,29 +210,30 @@ class CTRFeatureEngineer:
                         if pattern in col:
                             if X[col].dtype in ['int64', 'float64', 'float32', 'int32']:
                                 continuous_features.append(col)
-                            break
+                                break
             
             self.numerical_features = continuous_features
             
             logger.info(f"Feature identification - Categorical: {len(self.categorical_features)}, "
                        f"Continuous: {len(self.numerical_features)}")
             logger.info(f"Categorical features: {self.categorical_features}")
+            logger.info(f"Total features: {len(self.categorical_features) + len(self.numerical_features)}")
             
         except Exception as e:
             logger.error(f"Feature identification failed: {e}")
             self.numerical_features = list(X.select_dtypes(include=[np.number]).columns)
             self.categorical_features = []
     
-    def _prepare_features_minimal(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Prepare features with minimal processing following reference notebook"""
+    def _prepare_features_reference(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Prepare features with reference notebook approach (no normalization)"""
         try:
-            logger.info("Preparing features with minimal processing")
+            logger.info("Preparing features (reference approach - no normalization)")
             
             for col in X_train.columns:
                 try:
-                    if X_train[col].dtype == 'object' or X_train[col].dtype == 'category':
-                        X_train[col] = X_train[col].fillna('missing')
-                        X_test[col] = X_test[col].fillna('missing')
+                    if col in self.categorical_features:
+                        X_train[col] = X_train[col].fillna(-1).astype('int32')
+                        X_test[col] = X_test[col].fillna(-1).astype('int32')
                     else:
                         X_train[col] = X_train[col].fillna(0).astype('float32')
                         X_test[col] = X_test[col].fillna(0).astype('float32')
@@ -208,22 +250,24 @@ class CTRFeatureEngineer:
             logger.error(f"Feature preparation failed: {e}")
             return X_train, X_test
     
-    def _encode_categorical_minimal(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Minimal categorical encoding following Categorify approach"""
+    def _encode_categorical_reference(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Categorical encoding following Categorify approach from reference"""
         try:
-            logger.info("Applying minimal categorical encoding")
+            logger.info("Applying categorical encoding (Categorify style)")
             
             for col in self.categorical_features:
                 if col in X_train.columns and col in X_test.columns:
                     try:
-                        train_unique = set(X_train[col].fillna('missing').astype(str).unique())
-                        test_unique = set(X_test[col].fillna('missing').astype(str).unique())
+                        train_unique = set(X_train[col].fillna(-1).astype(str).unique())
+                        test_unique = set(X_test[col].fillna(-1).astype(str).unique())
                         all_unique = sorted(train_unique | test_unique)
                         
                         mapping = {val: idx for idx, val in enumerate(all_unique)}
                         
-                        X_train[col] = X_train[col].fillna('missing').astype(str).map(mapping).fillna(0).astype('float32')
-                        X_test[col] = X_test[col].fillna('missing').astype(str).map(mapping).fillna(0).astype('float32')
+                        X_train[col] = X_train[col].fillna(-1).astype(str).map(mapping).fillna(0).astype('float32')
+                        X_test[col] = X_test[col].fillna(-1).astype(str).map(mapping).fillna(0).astype('float32')
+                        
+                        logger.info(f"Encoded {col}: {len(all_unique)} unique values")
                         
                     except Exception as e:
                         logger.warning(f"Encoding failed for {col}: {e}")
@@ -346,7 +390,6 @@ class CTRFeatureEngineer:
             
             X_test = test_df.copy()
             
-            # Remove ID columns except inventory_id
             id_cols = [col for col in X_train.columns 
                       if ('id' in col.lower() or 'ID' in col) 
                       and col.lower() != 'inventory_id']
@@ -356,7 +399,6 @@ class CTRFeatureEngineer:
                 X_train = X_train.drop(columns=id_cols, errors='ignore')
                 X_test = X_test.drop(columns=id_cols, errors='ignore')
             
-            # Remove 'seq' column explicitly
             if 'seq' in X_train.columns:
                 logger.info("Removing 'seq' column from training data")
                 X_train = X_train.drop(columns=['seq'])
@@ -365,11 +407,9 @@ class CTRFeatureEngineer:
                 logger.info("Removing 'seq' column from test data")
                 X_test = X_test.drop(columns=['seq'])
             
-            # Remove all object type columns that are not expected categorical features
             object_cols_train = X_train.select_dtypes(include=['object']).columns.tolist()
             object_cols_test = X_test.select_dtypes(include=['object']).columns.tolist()
             
-            # Keep only expected categorical columns
             expected_cats_lower = [cat.lower() for cat in self.expected_categorical]
             
             cols_to_remove_train = [col for col in object_cols_train 
@@ -385,7 +425,6 @@ class CTRFeatureEngineer:
                 logger.info(f"Removing unexpected object columns from test: {cols_to_remove_test}")
                 X_test = X_test.drop(columns=cols_to_remove_test, errors='ignore')
             
-            # Verify inventory_id is preserved
             if 'inventory_id' in X_train.columns:
                 logger.info(f"inventory_id preserved in training data (unique values: {X_train['inventory_id'].nunique()})")
             else:
@@ -396,7 +435,6 @@ class CTRFeatureEngineer:
             else:
                 logger.warning("inventory_id not found in test data")
             
-            # Ensure only numeric and expected categorical columns remain
             remaining_object_cols_train = X_train.select_dtypes(include=['object']).columns.tolist()
             remaining_object_cols_test = X_test.select_dtypes(include=['object']).columns.tolist()
             
@@ -475,7 +513,6 @@ class CTRFeatureEngineer:
         try:
             logger.info("Starting final data cleanup")
             
-            # Remove any remaining non-numeric columns
             non_numeric_train = X_train.select_dtypes(exclude=[np.number]).columns.tolist()
             non_numeric_test = X_test.select_dtypes(exclude=[np.number]).columns.tolist()
             
@@ -487,15 +524,12 @@ class CTRFeatureEngineer:
                 logger.warning(f"Removing remaining non-numeric columns from test: {non_numeric_test}")
                 X_test = X_test.drop(columns=non_numeric_test)
             
-            # Replace inf values
             X_train = X_train.replace([np.inf, -np.inf], 0)
             X_test = X_test.replace([np.inf, -np.inf], 0)
             
-            # Fill NA
             X_train = X_train.fillna(0)
             X_test = X_test.fillna(0)
             
-            # Convert to float32
             for col in X_train.columns:
                 if col in X_test.columns:
                     try:
@@ -507,7 +541,6 @@ class CTRFeatureEngineer:
                         logger.warning(f"Type conversion failed for {col}: {e}")
                         pass
             
-            # Final verification
             logger.info(f"Final data types - Train: {X_train.dtypes.value_counts().to_dict()}")
             logger.info(f"Final data types - Test: {X_test.dtypes.value_counts().to_dict()}")
             

@@ -66,7 +66,7 @@ class Config:
     NVTABULAR_SHUFFLE = False
     
     # Memory settings for Windows
-    MAX_MEMORY_GB = 34
+    MAX_MEMORY_GB = 45
     CHUNK_SIZE = 100000
     BATCH_SIZE_GPU = 32768
     BATCH_SIZE_CPU = 8192
@@ -85,6 +85,21 @@ class Config:
     
     # Model training settings
     MODEL_TRAINING_CONFIG = {
+        'xgboost': {
+            'objective': 'binary:logistic',
+            'eval_metric': 'logloss',
+            'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
+            'gpu_id': 0 if GPU_AVAILABLE else None,
+            'predictor': 'gpu_predictor' if GPU_AVAILABLE else 'cpu_predictor',
+            'max_depth': 8,
+            'learning_rate': 0.1,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'scale_pos_weight': 51.43,
+            'early_stopping_rounds': 20,
+            'verbosity': 0,
+            'seed': 42
+        },
         'lightgbm': {
             'objective': 'binary',
             'metric': 'binary_logloss',
@@ -96,41 +111,23 @@ class Config:
             'bagging_fraction': 0.8,
             'bagging_freq': 5,
             'learning_rate': 0.05,
-            'n_estimators': 800,
+            'n_estimators': 200,
             'early_stopping_rounds': 50,
             'verbosity': -1,
             'device': 'cpu',
             'n_jobs': 6,
             'is_unbalance': True,
-            'scale_pos_weight': 51.3
-        },
-        'xgboost': {
-            'objective': 'binary:logistic',
-            'eval_metric': 'logloss',
-            'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
-            'gpu_id': 0 if GPU_AVAILABLE else None,
-            'predictor': 'gpu_predictor' if GPU_AVAILABLE else 'cpu_predictor',
-            'max_depth': 8,
-            'learning_rate': 0.1,
-            'n_estimators': 500,
-            'min_child_weight': 10,
-            'gamma': 0.1,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'reg_alpha': 0.5,
-            'reg_lambda': 0.5,
-            'scale_pos_weight': 51.3,
-            'early_stopping_rounds': 50,
-            'verbosity': 0
+            'scale_pos_weight': 51.43
         },
         'logistic': {
             'C': 0.5,
             'penalty': 'l2',
             'solver': 'saga',
-            'max_iter': 2000,
+            'max_iter': 1000,
             'n_jobs': -1,
             'verbose': 0,
-            'class_weight': 'balanced'
+            'class_weight': 'balanced',
+            'tol': 0.0001
         }
     }
     
@@ -166,14 +163,14 @@ class Config:
     
     # Calibration settings
     CALIBRATION_CONFIG = {
-        'enabled': True,
+        'enabled': False,
         'methods': ['isotonic'],
         'cv_folds': 3
     }
     
     # Ensemble settings
     ENSEMBLE_CONFIG = {
-        'enabled': True,
+        'enabled': False,
         'stacking_enabled': False,
         'voting_enabled': False,
         'cv_folds': 3,
@@ -213,15 +210,6 @@ class Config:
     AGGRESSIVE_SAMPLING_THRESHOLD = 0.95
     MIN_SAMPLE_SIZE = 10000000
     MAX_SAMPLE_SIZE = 10704179
-    
-    # Logistic regression sampling configuration
-    LOGISTIC_SAMPLING_CONFIG = {
-        'normal_size': 10000000,
-        'warning_size': 8000000,
-        'critical_size': 5000000,
-        'abort_size': 3000000,
-        'enable_dynamic_sizing': True
-    }
     
     # RTX 4060 Ti specific settings
     RTX_4060_TI_OPTIMIZATION = True
@@ -332,12 +320,6 @@ class Config:
                 'critical': cls.MEMORY_CRITICAL_THRESHOLD,
                 'abort': cls.MEMORY_ABORT_THRESHOLD
             },
-            'sampling_config': {
-                'aggressive_threshold': cls.AGGRESSIVE_SAMPLING_THRESHOLD,
-                'min_sample_size': cls.MIN_SAMPLE_SIZE,
-                'max_sample_size': cls.MAX_SAMPLE_SIZE
-            },
-            'logistic_sampling': cls.LOGISTIC_SAMPLING_CONFIG,
             'feature_engineering': {
                 'target_feature_count': cls.FEATURE_ENGINEERING_CONFIG['target_feature_count'],
                 'use_feature_selection': cls.FEATURE_ENGINEERING_CONFIG['use_feature_selection'],
@@ -363,12 +345,6 @@ class Config:
                 'step_cleanup_enabled': cls.FEATURE_ENGINEERING_CONFIG['cleanup_after_each_step'],
                 'max_categorical_encoding': cls.FEATURE_ENGINEERING_CONFIG['max_categorical_for_encoding'],
                 'max_numeric_interaction': cls.FEATURE_ENGINEERING_CONFIG['max_numeric_for_interaction']
-            },
-            'sampling_optimizations': {
-                'logistic_normal': cls.LOGISTIC_SAMPLING_CONFIG['normal_size'],
-                'logistic_warning': cls.LOGISTIC_SAMPLING_CONFIG['warning_size'],
-                'logistic_critical': cls.LOGISTIC_SAMPLING_CONFIG['critical_size'],
-                'dynamic_sizing': cls.LOGISTIC_SAMPLING_CONFIG['enable_dynamic_sizing']
             },
             'performance_targets': {
                 'target_combined_score': cls.TARGET_COMBINED_SCORE,

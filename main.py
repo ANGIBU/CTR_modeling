@@ -30,10 +30,15 @@ except ImportError as e:
     print(f"Essential package import failed: {e}")
     sys.exit(1)
 
-# Create logs directory before logging setup
+try:
+    from sklearn.model_selection import StratifiedKFold
+    import xgboost as xgb
+except ImportError as e:
+    print(f"Required package import failed: {e}")
+    sys.exit(1)
+
 os.makedirs('logs', exist_ok=True)
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -133,59 +138,33 @@ def validate_environment() -> bool:
         logger.error(f"Environment validation failed: {e}")
         return False
 
-def safe_train_test_split(X: pd.DataFrame, y: pd.Series, 
-                         test_size: float = 0.3, 
-                         random_state: int = 42) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-    """Safe train test split with guaranteed class distribution"""
-    try:
-        from sklearn.model_selection import train_test_split
-        
-        unique_classes = np.unique(y)
-        
-        if len(unique_classes) < 2:
-            logger.warning("Only one class in target variable. Performing simple split.")
-            X_train, X_val, y_train, y_val = train_test_split(
-                X, y, test_size=test_size, random_state=random_state
-            )
-        else:
-            X_train, X_val, y_train, y_val = train_test_split(
-                X, y, test_size=test_size, random_state=random_state, stratify=y
-            )
-        
-        val_unique_classes = np.unique(y_val)
-        if len(val_unique_classes) < 2:
-            logger.warning("Validation set has only one class. Adjusting split.")
-            positive_indices = np.where(y == 1)[0]
-            negative_indices = np.where(y == 0)[0]
-            
-            if len(positive_indices) >= 1 and len(negative_indices) >= 1:
-                val_pos_idx = np.random.choice(positive_indices, size=min(1, len(positive_indices)), replace=False)
-                val_neg_idx = np.random.choice(negative_indices, size=min(2, len(negative_indices)), replace=False)
-                val_indices = np.concatenate([val_pos_idx, val_neg_idx])
-                train_indices = np.setdiff1d(np.arange(len(y)), val_indices)
-                
-                X_train = X.iloc[train_indices]
-                X_val = X.iloc[val_indices]
-                y_train = y.iloc[train_indices]
-                y_val = y.iloc[val_indices]
-            else:
-                X_train, X_val, y_train, y_val = train_test_split(
-                    X, y, test_size=test_size, random_state=random_state
-                )
-        
-        return X_train, X_val, y_train, y_val
-        
-    except Exception as e:
-        logger.error(f"Train test split failed: {e}")
-        split_point = int(len(X) * (1 - test_size))
-        return X.iloc[:split_point], X.iloc[split_point:], y.iloc[:split_point], y.iloc[split_point:]
+def calculate_weighted_logloss(y_true: np.ndarray, y_pred: np.ndarray, eps: float = 1e-15) -> float:
+    """Calculate Weighted LogLoss with 50:50 class weights"""
+    y_pred = np.clip(y_pred, eps, 1 - eps)
+    
+    mask_0 = (y_true == 0)
+    mask_1 = (y_true == 1)
+    
+    ll_0 = -np.mean(np.log(1 - y_pred[mask_0])) if mask_0.sum() > 0 else 0
+    ll_1 = -np.mean(np.log(y_pred[mask_1])) if mask_1.sum() > 0 else 0
+    
+    return 0.5 * ll_0 + 0.5 * ll_1
 
-def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[str, Any]]:
-    """Execute complete CTR modeling pipeline"""
+def calculate_competition_score(y_true: np.ndarray, y_pred: np.ndarray) -> Tuple[float, float, float]:
+    """Calculate competition score: 0.5*AP + 0.5*(1/(1+WLL))"""
+    from sklearn.metrics import average_precision_score
+    
+    ap = average_precision_score(y_true, y_pred)
+    wll = calculate_weighted_logloss(y_true, y_pred)
+    score = 0.5 * ap + 0.5 * (1 / (1 + wll))
+    return score, ap, wll
+
+def execute_5fold_cv_xgboost(config, quick_mode: bool = False) -> Optional[Dict[str, Any]]:
+    """Execute 5-Fold CV XGBoost training (reference notebook style)"""
     try:
         start_time = time.time()
         
-        logger.info("=== Pipeline execution started ===")
+        logger.info("=== 5-Fold CV XGBoost Pipeline Started ===")
         
         if quick_mode:
             logger.info("QUICK MODE: Running with 50 samples for rapid testing")
@@ -218,8 +197,6 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         try:
             from data_loader import LargeDataLoader
             from feature_engineering import CTRFeatureEngineer
-            from training import CTRTrainer
-            from ensemble import CTREnsembleManager
             logger.info("All modules import completed")
         except ImportError as e:
             logger.error(f"Module import failed: {e}")
@@ -266,113 +243,117 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         
         logger.info(f"Feature engineering completed - Features: {X_train.shape[1]}")
         
-        logger.info("3. Model training phase")
-        
-        trainer = CTRTrainer(config)
-        logger.info("CTR Trainer initialized")
+        logger.info("3. XGBoost 5-Fold CV training phase")
         
         target_column = data_loader.get_detected_target_column()
         if target_column not in train_df.columns:
             logger.error(f"Target column '{target_column}' not found")
             return None
         
-        y_train = train_df[target_column]
+        y_train = train_df[target_column].values
         
-        available_models = trainer.get_available_models()
-        logger.info(f"Available models: {available_models}")
+        pos_ratio = y_train.mean()
+        scale_pos_weight = (1 - pos_ratio) / pos_ratio
         
-        ensemble_manager = CTREnsembleManager(config)
-        logger.info("Ensemble manager initialization completed")
+        logger.info(f"Positive ratio: {pos_ratio:.4f}")
+        logger.info(f"Scale pos weight: {scale_pos_weight:.2f}")
         
-        X_train_split, X_val_split, y_train_split, y_val_split = safe_train_test_split(
-            X_train, y_train, test_size=0.3, random_state=42
-        )
+        params = {
+            'objective': 'binary:logistic',
+            'eval_metric': 'logloss',
+            'tree_method': 'gpu_hist' if gpu_optimization else 'hist',
+            'max_depth': 8,
+            'learning_rate': 0.1,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'scale_pos_weight': scale_pos_weight,
+            'seed': 42,
+            'verbosity': 0
+        }
         
-        logger.info(f"Data split completed - train: {X_train_split.shape}, validation: {X_val_split.shape}")
+        if gpu_optimization:
+            params.update({
+                'gpu_id': 0,
+                'predictor': 'gpu_predictor'
+            })
         
-        if quick_mode:
-            models_to_train = ['logistic']
-            logger.info(f"Quick mode: Training only {models_to_train}")
-        else:
-            models_to_train = available_models
-            logger.info(f"Full mode: Training all models {models_to_train}")
+        n_folds = 5
+        skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
         
-        trained_models = {}
-        model_performances = {}
+        cv_scores = []
+        cv_ap = []
+        cv_wll = []
         
-        for model_name in models_to_train:
-            logger.info(f"=== {model_name} model training started ===")
+        oof_predictions = np.zeros(len(X_train))
+        
+        logger.info(f"Starting {n_folds}-Fold Cross-Validation")
+        
+        X_train_np = X_train.values if hasattr(X_train, 'values') else X_train
+        
+        for fold, (train_idx, val_idx) in enumerate(skf.split(X_train_np, y_train), 1):
+            logger.info(f"\n=== Fold {fold}/{n_folds} ===")
+            fold_start = time.time()
             
+            logger.info(f"Train: {len(train_idx):,} | Val: {len(val_idx):,}")
+            
+            dtrain = xgb.DMatrix(X_train_np[train_idx], label=y_train[train_idx])
+            dval = xgb.DMatrix(X_train_np[val_idx], label=y_train[val_idx])
+            
+            logger.info("Training...")
+            
+            num_boost_round = 50 if quick_mode else 200
+            
+            model = xgb.train(
+                params, dtrain,
+                num_boost_round=num_boost_round,
+                evals=[(dval, 'val')],
+                early_stopping_rounds=20,
+                verbose_eval=False
+            )
+            
+            y_pred = model.predict(dval)
+            oof_predictions[val_idx] = y_pred
+            
+            score, ap, wll = calculate_competition_score(y_train[val_idx], y_pred)
+            
+            cv_scores.append(score)
+            cv_ap.append(ap)
+            cv_wll.append(wll)
+            
+            logger.info(f"Results:")
+            logger.info(f"  Score: {score:.6f}")
+            logger.info(f"  AP: {ap:.6f}")
+            logger.info(f"  WLL: {wll:.6f}")
+            logger.info(f"  Best iteration: {model.best_iteration}")
+            logger.info(f"Time: {time.time() - fold_start:.1f}s")
+            
+            del dtrain, dval, model
             force_memory_cleanup()
-            
-            try:
-                model, performance = trainer.train_model(
-                    model_name=model_name,
-                    X_train=X_train_split,
-                    y_train=y_train_split,
-                    X_val=X_val_split,
-                    y_val=y_val_split,
-                    quick_mode=quick_mode
-                )
-                
-                if model is not None:
-                    trained_models[model_name] = model
-                    model_performances[model_name] = performance
-                    
-                    ensemble_manager.add_base_model(model_name, model)
-                    
-                    logger.info(f"{model_name} model training completed - added to ensemble")
-                else:
-                    logger.warning(f"{model_name} model training failed")
-                
-            except Exception as e:
-                logger.error(f"{model_name} model training failed: {e}")
-                continue
         
-        logger.info(f"Training completed: {len(trained_models)} models trained")
+        logger.info("\n=== Final Cross-Validation Results ===")
+        logger.info(f"Competition Score: {np.mean(cv_scores):.6f} ± {np.std(cv_scores):.6f}")
+        logger.info(f"Average Precision: {np.mean(cv_ap):.6f} ± {np.std(cv_ap):.6f}")
+        logger.info(f"Weighted LogLoss: {np.mean(cv_wll):.6f} ± {np.std(cv_wll):.6f}")
+        logger.info(f"All fold scores: {[f'{s:.6f}' for s in cv_scores]}")
         
-        logger.info("4. Ensemble training phase")
+        logger.info("4. Training final model on full data")
         
-        ensemble_enabled = False
-        ensemble_used = False
+        dtrain_full = xgb.DMatrix(X_train_np, label=y_train)
         
-        if len(trained_models) >= 1:
-            try:
-                logger.info("Ensemble training started")
-                ensemble_manager.train_all_ensembles(X_val_split, y_val_split)
-                ensemble_manager.evaluate_ensembles(X_val_split, y_val_split)
-                ensemble_enabled = True
-                logger.info("Ensemble training completed")
-            except Exception as e:
-                logger.warning(f"Ensemble training failed: {e}")
-        else:
-            logger.warning("Insufficient models for ensemble (minimum 1 required)")
+        num_boost_round = 50 if quick_mode else 200
+        
+        final_model = xgb.train(
+            params, dtrain_full,
+            num_boost_round=num_boost_round,
+            verbose_eval=False
+        )
         
         logger.info("5. Inference phase")
         
-        try:
-            if ensemble_enabled:
-                try:
-                    predictions, success = ensemble_manager.predict_with_best_ensemble(X_test)
-                    ensemble_used = success
-                    logger.info(f"Ensemble prediction completed (success: {success})")
-                except Exception as e:
-                    logger.warning(f"Ensemble prediction failed: {e}")
-                    ensemble_used = False
-            
-            if not ensemble_used and trained_models:
-                primary_model_name = list(trained_models.keys())[0]
-                primary_model = trained_models[primary_model_name]
-                predictions = primary_model.predict_proba(X_test)
-                logger.info(f"Single model prediction completed ({primary_model_name})")
-            elif not trained_models:
-                logger.error("No trained models available for prediction")
-                return None
+        X_test_np = X_test.values if hasattr(X_test, 'values') else X_test
+        dtest = xgb.DMatrix(X_test_np)
         
-        except Exception as e:
-            logger.error(f"Inference failed: {e}")
-            return None
-        
+        predictions = final_model.predict(dtest)
         predictions = np.clip(predictions, 0.0, 1.0)
         
         try:
@@ -413,21 +394,18 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         results = {
             'quick_mode': quick_mode,
             'execution_time': execution_time,
-            'successful_models': len(trained_models),
-            'ensemble_enabled': ensemble_enabled,
-            'ensemble_used': ensemble_used,
-            'calibration_applied': False,
+            'cv_scores': cv_scores,
+            'cv_mean': np.mean(cv_scores),
+            'cv_std': np.std(cv_scores),
             'submission_file': submission_path,
             'submission_rows': len(predictions),
-            'model_performances': model_performances,
-            'prediction_stats': prediction_stats
+            'prediction_stats': prediction_stats,
+            'gpu_used': gpu_optimization
         }
         
         logger.info(f"Mode: {'QUICK (50 samples)' if quick_mode else 'FULL dataset'}")
         logger.info(f"Execution time: {execution_time:.2f}s")
-        logger.info(f"Successful models: {len(trained_models)}")
-        logger.info(f"Ensemble activated: {'Yes' if ensemble_enabled else 'No'}")
-        logger.info(f"Ensemble actually used: {'Yes' if ensemble_used else 'No'}")
+        logger.info(f"CV Score: {np.mean(cv_scores):.6f} ± {np.std(cv_scores):.6f}")
         logger.info(f"Submission file: {len(predictions)} rows")
         
         if PSUTIL_AVAILABLE:
@@ -443,19 +421,6 @@ def execute_final_pipeline(config, quick_mode: bool = False) -> Optional[Dict[st
         logger.error(f"Pipeline execution failed: {e}")
         logger.error(f"Detailed error: {traceback.format_exc()}")
         return None
-
-def reproduce_score_validation() -> bool:
-    """Validate score reproduction capability"""
-    try:
-        logger.info("=== Score reproduction validation started ===")
-        
-        logger.info("=== Score reproduction validation completed ===")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Score reproduction failed: {e}")
-        logger.error(f"Detailed error: {traceback.format_exc()}")
-        return False
 
 def main():
     """Main execution function with argument parsing"""
@@ -488,55 +453,20 @@ def main():
             config = Config
             config.setup_directories()
             
-            results = execute_final_pipeline(config, quick_mode=args.quick)
+            results = execute_5fold_cv_xgboost(config, quick_mode=args.quick)
             
             if results:
                 logger.info("Training mode completed successfully")
                 logger.info(f"Mode: {'Quick (50 samples)' if results.get('quick_mode') else 'Full dataset'}")
                 logger.info(f"Execution time: {results['execution_time']:.2f}s")
-                logger.info(f"Successful models: {results['successful_models']}")
-                logger.info(f"Ensemble enabled: {results['ensemble_enabled']}")
-                logger.info(f"Ensemble used: {results['ensemble_used']}")
-                logger.info(f"Calibration applied: {results['calibration_applied']}")
-                
-                try:
-                    primary_model = list(results.get('model_performances', {}).keys())[0] if results.get('model_performances') else 'unknown'
-                    
-                    log_training_experiment(
-                        model_name=primary_model,
-                        config=config,
-                        results=results,
-                        execution_time=results['execution_time'],
-                        quick_mode=args.quick
-                    )
-                    
-                    logger.info("Experiment logged successfully")
-                    
-                except Exception as e:
-                    logger.warning(f"Experiment logging failed: {e}")
+                logger.info(f"CV Score: {results['cv_mean']:.6f} ± {results['cv_std']:.6f}")
                 
                 logger.info("=" * 80)
                 logger.info("TRAINING SUMMARY")
                 logger.info("=" * 80)
                 logger.info(f"Mode: {'Quick (50 samples)' if results.get('quick_mode') else 'Full dataset'}")
-                logger.info(f"Models trained: {results['successful_models']}")
-                logger.info(f"Ensemble used: {'Yes' if results['ensemble_used'] else 'No'}")
+                logger.info(f"5-Fold CV Score: {results['cv_mean']:.6f} ± {results['cv_std']:.6f}")
                 logger.info("")
-                logger.info("MODEL PERFORMANCE:")
-                logger.info("-" * 80)
-                
-                for model_name, perf in results.get('model_performances', {}).items():
-                    logger.info(f"{model_name}:")
-                    if 'auc' in perf:
-                        logger.info(f"  AUC: {perf.get('auc', 0.0):.4f}")
-                    if 'ap' in perf:
-                        logger.info(f"  AP: {perf.get('ap', 0.0):.4f}")
-                    if 'actual_ctr' in perf:
-                        logger.info(f"  Actual CTR: {perf.get('actual_ctr', 0.0):.6f}")
-                    if 'predicted_ctr' in perf:
-                        logger.info(f"  Predicted CTR: {perf.get('predicted_ctr', 0.0):.6f}")
-                    logger.info("")
-                
                 logger.info("PREDICTION STATISTICS:")
                 logger.info("-" * 80)
                 pred_stats = results.get('prediction_stats', {})
@@ -545,7 +475,6 @@ def main():
                 logger.info(f"Min: {pred_stats.get('min', 0.0):.6f}")
                 logger.info(f"Max: {pred_stats.get('max', 0.0):.6f}")
                 logger.info("")
-                logger.info(f"Experiment log: {Config.EXPERIMENTS_LOG_PATH}")
                 logger.info("=" * 80)
                 
             else:
@@ -558,12 +487,7 @@ def main():
         
         elif args.mode == "reproduce":
             logger.info("Score reproduction mode started")
-            reproduction_success = reproduce_score_validation()
-            if reproduction_success:
-                logger.info("Score reproduction mode completed successfully")
-            else:
-                logger.error("Score reproduction mode failed")
-                sys.exit(1)
+            logger.info("Score reproduction mode completed")
         
         logger.info("=== CTR modeling system completed successfully ===")
         force_memory_cleanup()
