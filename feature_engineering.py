@@ -19,7 +19,6 @@ class CTRFeatureEngineer:
         self.config = config
         self.memory_monitor = MemoryMonitor()
         
-        self.quick_mode = False
         self.memory_efficient_mode = True
         
         self.label_encoders = {}
@@ -55,26 +54,13 @@ class CTRFeatureEngineer:
         else:
             logger.info("Memory efficient mode disabled")
     
-    def set_quick_mode(self, enabled: bool):
-        """Enable or disable quick mode for rapid testing"""
-        self.quick_mode = enabled
-        if enabled:
-            logger.info("Quick mode enabled")
-            self.memory_efficient_mode = True
-        else:
-            logger.info("Quick mode disabled")
-    
     def engineer_features(self, 
                          train_df: pd.DataFrame, 
                          test_df: pd.DataFrame, 
                          target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Main feature engineering pipeline based on reference notebook"""
-        if self.quick_mode:
-            logger.info("=== Quick Mode Feature Engineering Started ===")
-            return self.create_quick_features(train_df, test_df, target_col)
-        else:
-            logger.info("=== Reference Notebook Style Feature Engineering (117 features) ===")
-            return self.create_reference_features(train_df, test_df, target_col)
+        logger.info("=== Reference Notebook Style Feature Engineering (117 features) ===")
+        return self.create_reference_features(train_df, test_df, target_col)
     
     def create_quick_features(self,
                             train_df: pd.DataFrame,
@@ -338,8 +324,7 @@ class CTRFeatureEngineer:
             
             self.original_feature_order = sorted([col for col in train_df.columns if col != self.target_column])
             
-            mode_info = "QUICK MODE" if self.quick_mode else "REFERENCE NOTEBOOK MODE"
-            logger.info(f"Feature engineering initialization ({mode_info})")
+            logger.info(f"Feature engineering initialization")
             logger.info(f"Initial data: Training {train_df.shape}, Test {test_df.shape}")
             logger.info(f"Target column: {self.target_column}")
             logger.info(f"Original feature count: {len(self.original_feature_order)}")

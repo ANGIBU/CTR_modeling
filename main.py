@@ -159,15 +159,12 @@ def calculate_competition_score(y_true: np.ndarray, y_pred: np.ndarray) -> Tuple
     score = 0.5 * ap + 0.5 * (1 / (1 + wll))
     return score, ap, wll
 
-def execute_5fold_cv_xgboost(config, quick_mode: bool = False) -> Optional[Dict[str, Any]]:
+def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
     """Execute 5-Fold CV XGBoost training (reference notebook style)"""
     try:
         start_time = time.time()
         
         logger.info("=== 5-Fold CV XGBoost Pipeline Started ===")
-        
-        if quick_mode:
-            logger.info("QUICK MODE: Running with 50 samples for rapid testing")
         
         force_memory_cleanup()
         
@@ -206,21 +203,13 @@ def execute_5fold_cv_xgboost(config, quick_mode: bool = False) -> Optional[Dict[
         data_loader = LargeDataLoader(config)
         logger.info("Large data loader initialization completed")
         
-        if quick_mode:
-            data_loader.set_quick_mode(True)
-            logger.info("Large data loader set to quick mode (50 samples)")
-        
         if PSUTIL_AVAILABLE:
             vm = psutil.virtual_memory()
             available_memory = vm.available / (1024**3)
             logger.info(f"Pre-loading memory status: available {available_memory:.1f}GB")
         
-        if quick_mode:
-            logger.info("Quick mode: Loading sample data (50 samples)")
-            train_df, test_df = data_loader.load_quick_sample_data()
-        else:
-            logger.info("Full mode: Loading complete dataset")
-            train_df, test_df = data_loader.load_large_data_optimized()
+        logger.info("Loading complete dataset")
+        train_df, test_df = data_loader.load_large_data_optimized()
         
         if train_df is None or test_df is None:
             logger.error("Data loading failed")
@@ -230,10 +219,6 @@ def execute_5fold_cv_xgboost(config, quick_mode: bool = False) -> Optional[Dict[
         
         logger.info("2. Feature engineering phase")
         feature_engineer = CTRFeatureEngineer(config)
-        
-        if quick_mode:
-            feature_engineer.set_quick_mode(True)
-            logger.info("Quick mode: Basic feature engineering only")
         
         X_train, X_test = feature_engineer.engineer_features(train_df, test_df)
         
@@ -301,11 +286,9 @@ def execute_5fold_cv_xgboost(config, quick_mode: bool = False) -> Optional[Dict[
             
             logger.info("Training...")
             
-            num_boost_round = 50 if quick_mode else 200
-            
             model = xgb.train(
                 params, dtrain,
-                num_boost_round=num_boost_round,
+                num_boost_round=200,
                 evals=[(dval, 'val')],
                 early_stopping_rounds=20,
                 verbose_eval=False
@@ -340,11 +323,9 @@ def execute_5fold_cv_xgboost(config, quick_mode: bool = False) -> Optional[Dict[
         
         dtrain_full = xgb.DMatrix(X_train_np, label=y_train)
         
-        num_boost_round = 50 if quick_mode else 200
-        
         final_model = xgb.train(
             params, dtrain_full,
-            num_boost_round=num_boost_round,
+            num_boost_round=200,
             verbose_eval=False
         )
         
@@ -392,7 +373,6 @@ def execute_5fold_cv_xgboost(config, quick_mode: bool = False) -> Optional[Dict[
         }
         
         results = {
-            'quick_mode': quick_mode,
             'execution_time': execution_time,
             'cv_scores': cv_scores,
             'cv_mean': np.mean(cv_scores),
@@ -403,7 +383,6 @@ def execute_5fold_cv_xgboost(config, quick_mode: bool = False) -> Optional[Dict[
             'gpu_used': gpu_optimization
         }
         
-        logger.info(f"Mode: {'QUICK (50 samples)' if quick_mode else 'FULL dataset'}")
         logger.info(f"Execution time: {execution_time:.2f}s")
         logger.info(f"CV Score: {np.mean(cv_scores):.6f} ± {np.std(cv_scores):.6f}")
         logger.info(f"Submission file: {len(predictions)} rows")
@@ -432,8 +411,6 @@ def main():
     parser = argparse.ArgumentParser(description="CTR modeling system")
     parser.add_argument("--mode", choices=["train", "inference", "reproduce"], 
                        default="train", help="Execution mode")
-    parser.add_argument("--quick", action="store_true",
-                       help="Quick execution mode (50 samples for testing)")
     
     args = parser.parse_args()
     
@@ -445,7 +422,7 @@ def main():
             sys.exit(1)
         
         if args.mode == "train":
-            logger.info(f"Training mode started {'(QUICK MODE)' if args.quick else '(FULL MODE)'}")
+            logger.info(f"Training mode started")
             
             from config import Config
             from experiment_logger import log_training_experiment
@@ -453,18 +430,16 @@ def main():
             config = Config
             config.setup_directories()
             
-            results = execute_5fold_cv_xgboost(config, quick_mode=args.quick)
+            results = execute_5fold_cv_xgboost(config)
             
             if results:
                 logger.info("Training mode completed successfully")
-                logger.info(f"Mode: {'Quick (50 samples)' if results.get('quick_mode') else 'Full dataset'}")
                 logger.info(f"Execution time: {results['execution_time']:.2f}s")
                 logger.info(f"CV Score: {results['cv_mean']:.6f} ± {results['cv_std']:.6f}")
                 
                 logger.info("=" * 80)
                 logger.info("TRAINING SUMMARY")
                 logger.info("=" * 80)
-                logger.info(f"Mode: {'Quick (50 samples)' if results.get('quick_mode') else 'Full dataset'}")
                 logger.info(f"5-Fold CV Score: {results['cv_mean']:.6f} ± {results['cv_std']:.6f}")
                 logger.info("")
                 logger.info("PREDICTION STATISTICS:")

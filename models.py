@@ -114,17 +114,8 @@ class BaseModel(ABC):
         self.is_fitted = False
         self.feature_names = None
         self.memory_monitor = MemoryMonitor()
-        self.quick_mode = False
         self.training_time = 0.0
         self.validation_score = 0.0
-        
-    def set_quick_mode(self, enabled: bool):
-        """Set quick mode"""
-        self.quick_mode = enabled
-        if enabled:
-            logger.info(f"{self.name}: Quick mode enabled")
-        else:
-            logger.info(f"{self.name}: Full mode enabled")
     
     @abstractmethod
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
@@ -186,8 +177,6 @@ class XGBoostModel(BaseModel):
             
             logger.info(f"{self.name}: Starting XGBoost training")
             
-            num_boost_round = 50 if self.quick_mode else 200
-            
             if X_val is not None and y_val is not None and len(X_val) > 0:
                 X_val_clean = X_val.fillna(0).astype('float32')
                 
@@ -197,7 +186,7 @@ class XGBoostModel(BaseModel):
                 self.model = xgb.train(
                     self.params,
                     dtrain,
-                    num_boost_round=num_boost_round,
+                    num_boost_round=200,
                     evals=[(dval, 'val')],
                     early_stopping_rounds=20,
                     verbose_eval=False
@@ -208,7 +197,7 @@ class XGBoostModel(BaseModel):
                 self.model = xgb.train(
                     self.params,
                     dtrain,
-                    num_boost_round=num_boost_round,
+                    num_boost_round=200,
                     verbose_eval=False
                 )
             
@@ -469,8 +458,6 @@ class ModelFactory:
                 
                 ModelFactory._factory_logged = True
             
-            quick_mode = kwargs.get('quick_mode', False)
-            
             if model_type.lower() == 'xgboost':
                 if not XGBOOST_AVAILABLE:
                     raise ImportError("XGBoost is not installed.")
@@ -486,9 +473,6 @@ class ModelFactory:
                 
             else:
                 raise ValueError(f"Unsupported model type: {model_type}")
-            
-            if quick_mode:
-                model.set_quick_mode(True)
             
             logger.info(f"{model_type} model creation complete")
             return model
