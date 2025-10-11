@@ -67,7 +67,7 @@ class Config:
     
     # Memory settings for Windows
     MAX_MEMORY_GB = 34
-    CHUNK_SIZE = 500000
+    CHUNK_SIZE = 100000
     BATCH_SIZE_GPU = 32768
     BATCH_SIZE_CPU = 8192
     PREFETCH_FACTOR = 4
@@ -86,9 +86,12 @@ class Config:
     # Model training settings
     MODEL_TRAINING_CONFIG = {
         'lightgbm': {
+            'objective': 'binary',
+            'metric': 'binary_logloss',
+            'boosting_type': 'gbdt',
+            'num_leaves': 31,
             'max_depth': 6,
-            'num_leaves': 63,
-            'min_data_in_leaf': 200,
+            'min_child_samples': 20,
             'feature_fraction': 0.8,
             'bagging_fraction': 0.8,
             'bagging_freq': 5,
@@ -96,11 +99,14 @@ class Config:
             'n_estimators': 800,
             'early_stopping_rounds': 50,
             'verbosity': -1,
-            'device': 'gpu' if GPU_AVAILABLE else 'cpu',
-            'gpu_platform_id': 0,
-            'gpu_device_id': 0
+            'device': 'cpu',
+            'n_jobs': 6,
+            'is_unbalance': True,
+            'scale_pos_weight': 51.3
         },
         'xgboost': {
+            'objective': 'binary:logistic',
+            'eval_metric': 'logloss',
             'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
             'gpu_id': 0 if GPU_AVAILABLE else None,
             'predictor': 'gpu_predictor' if GPU_AVAILABLE else 'cpu_predictor',
@@ -113,6 +119,7 @@ class Config:
             'colsample_bytree': 0.8,
             'reg_alpha': 0.5,
             'reg_lambda': 0.5,
+            'scale_pos_weight': 51.3,
             'early_stopping_rounds': 50,
             'verbosity': 0
         },
@@ -122,11 +129,12 @@ class Config:
             'solver': 'saga',
             'max_iter': 2000,
             'n_jobs': -1,
-            'verbose': 0
+            'verbose': 0,
+            'class_weight': 'balanced'
         }
     }
     
-    # Feature engineering settings - based on reference notebook
+    # Feature engineering settings
     FEATURE_ENGINEERING_CONFIG = {
         'target_feature_count': 117,
         'use_feature_selection': False,
@@ -137,6 +145,7 @@ class Config:
         'interaction_max_features': 0,
         'disable_normalization_for_trees': True,
         'use_original_features_only': True,
+        'preserve_inventory_id': True,
         'categorical_columns': ['gender', 'age_group', 'inventory_id', 'day_of_week', 'hour'],
         'continuous_columns': (
             [f'feat_a_{i}' for i in range(1, 19)] +
@@ -157,7 +166,7 @@ class Config:
     
     # Calibration settings
     CALIBRATION_CONFIG = {
-        'enabled': False,
+        'enabled': True,
         'methods': ['isotonic'],
         'cv_folds': 3
     }

@@ -346,10 +346,13 @@ class CTRFeatureEngineer:
             
             X_test = test_df.copy()
             
-            # Remove ID columns
-            id_cols = [col for col in X_train.columns if 'id' in col.lower() or 'ID' in col]
+            # Remove ID columns except inventory_id
+            id_cols = [col for col in X_train.columns 
+                      if ('id' in col.lower() or 'ID' in col) 
+                      and col.lower() != 'inventory_id']
+            
             if id_cols:
-                logger.info(f"Removing ID columns: {id_cols}")
+                logger.info(f"Removing ID columns (preserving inventory_id): {id_cols}")
                 X_train = X_train.drop(columns=id_cols, errors='ignore')
                 X_test = X_test.drop(columns=id_cols, errors='ignore')
             
@@ -381,6 +384,17 @@ class CTRFeatureEngineer:
             if cols_to_remove_test:
                 logger.info(f"Removing unexpected object columns from test: {cols_to_remove_test}")
                 X_test = X_test.drop(columns=cols_to_remove_test, errors='ignore')
+            
+            # Verify inventory_id is preserved
+            if 'inventory_id' in X_train.columns:
+                logger.info(f"inventory_id preserved in training data (unique values: {X_train['inventory_id'].nunique()})")
+            else:
+                logger.warning("inventory_id not found in training data")
+            
+            if 'inventory_id' in X_test.columns:
+                logger.info(f"inventory_id preserved in test data (unique values: {X_test['inventory_id'].nunique()})")
+            else:
+                logger.warning("inventory_id not found in test data")
             
             # Ensure only numeric and expected categorical columns remain
             remaining_object_cols_train = X_train.select_dtypes(include=['object']).columns.tolist()

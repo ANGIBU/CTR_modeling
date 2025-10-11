@@ -160,7 +160,7 @@ class MemoryMonitor:
 class CTRBiasCorrector:
     """CTR bias correction"""
     
-    def __init__(self, target_ctr: float = 0.0201):
+    def __init__(self, target_ctr: float = 0.0191):
         self.target_ctr = target_ctr
         self.correction_factor = 1.0
         self.additive_correction = 0.0
@@ -398,6 +398,15 @@ class EnhancedMultiMethodCalibrator:
                 
         except Exception:
             return y_pred_proba
+    
+    def get_calibration_summary(self) -> Dict[str, Any]:
+        """Get calibration summary"""
+        return {
+            'is_fitted': self.is_fitted,
+            'best_method': self.best_method,
+            'available_methods': list(self.calibration_models.keys()),
+            'ensemble_weights': self.ensemble_calibrator
+        }
 
 class BaseModel(ABC):
     """Base class for all models"""
@@ -651,9 +660,9 @@ class XGBoostModel(BaseModel):
             'colsample_bytree': 0.8,
             'reg_alpha': 0.5,
             'reg_lambda': 0.5,
+            'scale_pos_weight': 51.3,
             'random_state': 42,
-            'n_jobs': 6,
-            'scale_pos_weight': 52.3
+            'n_jobs': 6
         }
         
         if GPU_AVAILABLE:
@@ -737,7 +746,7 @@ class XGBoostModel(BaseModel):
         return self._memory_safe_predict(_predict_internal, X, batch_size=25000)
 
 class LightGBMModel(BaseModel):
-    """LightGBM model with GPU support"""
+    """LightGBM model with CPU mode for stability"""
     
     def __init__(self, name: str = "LightGBM", params: Dict[str, Any] = None):
         if not LIGHTGBM_AVAILABLE:
@@ -747,11 +756,11 @@ class LightGBMModel(BaseModel):
             'objective': 'binary',
             'metric': 'binary_logloss',
             'boosting_type': 'gbdt',
-            'num_leaves': 63,
+            'num_leaves': 31,
             'max_depth': 6,
             'learning_rate': 0.05,
             'n_estimators': 800,
-            'min_child_samples': 200,
+            'min_child_samples': 20,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
             'reg_alpha': 0.5,
@@ -759,16 +768,12 @@ class LightGBMModel(BaseModel):
             'random_state': 42,
             'n_jobs': 6,
             'verbose': -1,
-            'is_unbalance': True
+            'device': 'cpu',
+            'is_unbalance': True,
+            'scale_pos_weight': 51.3
         }
         
-        if GPU_AVAILABLE:
-            default_params.update({
-                'device': 'gpu',
-                'gpu_platform_id': 0,
-                'gpu_device_id': 0
-            })
-            logger.info(f"LightGBM GPU mode enabled: {GPU_NAME}")
+        logger.info(f"LightGBM CPU mode enabled for stability")
         
         if params:
             default_params.update(params)
@@ -849,7 +854,7 @@ class LogisticModel(BaseModel):
             'C': 0.5,
             'penalty': 'l2',
             'solver': 'saga',
-            'max_iter': 4000,
+            'max_iter': 2000,
             'random_state': 42,
             'class_weight': 'balanced',
             'n_jobs': 6,
