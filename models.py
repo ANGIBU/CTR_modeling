@@ -2,7 +2,7 @@
 
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, List, Optional, Tuple, Union
+from typing import Dict, Any, List, Optional, Tuple
 import logging
 import time
 import gc
@@ -34,6 +34,22 @@ try:
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+    GPU_AVAILABLE = torch.cuda.is_available()
+    if GPU_AVAILABLE:
+        GPU_NAME = torch.cuda.get_device_name(0)
+        GPU_MEMORY_GB = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+    else:
+        GPU_NAME = "None"
+        GPU_MEMORY_GB = 0
+except ImportError:
+    TORCH_AVAILABLE = False
+    GPU_AVAILABLE = False
+    GPU_NAME = "None"
+    GPU_MEMORY_GB = 0
 
 try:
     import psutil
@@ -84,17 +100,17 @@ class MemoryMonitor:
                 }
             else:
                 return {
-                    'available_gb': 45.0,
-                    'used_gb': 19.0,
+                    'available_gb': 34.0,
+                    'used_gb': 30.0,
                     'total_gb': 64.0,
-                    'percent': 30.0
+                    'percent': 47.0
                 }
         except Exception:
             return {
-                'available_gb': 45.0,
-                'used_gb': 19.0,
+                'available_gb': 34.0,
+                'used_gb': 30.0,
                 'total_gb': 64.0,
-                'percent': 30.0
+                'percent': 47.0
             }
     
     def get_memory_status(self) -> Dict[str, Any]:
@@ -124,6 +140,13 @@ class MemoryMonitor:
     def force_memory_cleanup(self):
         """Force memory cleanup"""
         gc.collect()
+        
+        if GPU_AVAILABLE and TORCH_AVAILABLE:
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            except:
+                pass
         
     def log_memory_status(self, context: str = "", force: bool = False):
         """Log memory status"""
@@ -576,6 +599,214 @@ class BaseModel(ABC):
         """Simplify for memory"""
         pass
 
+class XGBoostModel(BaseModel):
+    """XGBoost model with Windows + RTX 4060 Ti GPU optimization"""
+    
+    def __init__(self, name: str = "XGBoost_GPU", params: Dict[str, Any] = None):
+        if not XGBOOST_AVAILABLE:
+            raise ImportError("XGBoost is not installed.")
+        
+        # RTX 4060 Ti optimized parameters
+        default_params = {
+            'objective': 'binary:logistic',
+            'eval_metric': 'logloss',
+            'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
+            'max_depth': 8,
+            'learning_rate': 0.1,
+            'n_estimators': 500,
+            'min_child_weight': 10,
+            'gamma': 0.1,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'reg_alpha': 0.5,
+            'reg_lambda': 0.5,
+            'random_state': 42,
+            'n_jobs': 6,
+            'scale_pos_weight': 52.3
+        }
+        
+        if GPU_AVAILABLE:
+            default_params.update({
+                'gpu_id': 0,
+                'predictor': 'gpu_predictor',
+                'max_bin': 256
+            })
+            logger.info(f"XGBoost GPU mode enabled: {GPU_NAME} ({GPU_MEMORY_GB:.1f}GB)")
+        else:
+            logger.warning("XGBoost GPU not available, using CPU mode")
+        
+        if params:
+            default_params.update(params)
+        
+        super().__init__(name, default_params)
+        self.model = None
+        self.use_scaling = False
+    
+    def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
+            X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
+        """Training with GPU optimization"""
+        logger.info(f"{self.name} model training started (data: {len(X_train):,})")
+        start_time = time.time()
+        
+        def _fit_internal():
+            self.feature_names = list(X_train.columns)
+            
+            X_train_clean = self._safe_data_preprocessing(X_train, fit_scaler=False)
+            
+            logger.info(f"{self.name}: Starting XGBoost GPU training")
+            
+            if X_val is not None and y_val is not None and len(X_val) > 0:
+                X_val_clean = self._safe_data_preprocessing(X_val, fit_scaler=False)
+                self.model = xgb.XGBClassifier(**self.params)
+                
+                eval_set = [(X_val_clean, y_val)]
+                self.model.fit(
+                    X_train_clean, y_train,
+                    eval_set=eval_set,
+                    verbose=False
+                )
+            else:
+                self.model = xgb.XGBClassifier(**self.params)
+                self.model.fit(X_train_clean, y_train)
+            
+            logger.info(f"{self.name}: Training completed successfully")
+            self.is_fitted = True
+            
+            if X_val is not None and y_val is not None and len(X_val) > 0:
+                calibration_success = self.apply_calibration(X_val, y_val, method='auto')
+                if calibration_success:
+                    logger.info(f"{self.name}: Calibration completed")
+                else:
+                    logger.warning(f"{self.name}: Calibration skipped")
+            else:
+                logger.warning(f"{self.name}: No validation data - calibration skipped")
+            
+            self.training_time = time.time() - start_time
+            
+            del X_train_clean
+            gc.collect()
+            
+            return self
+        
+        return self._memory_safe_fit(_fit_internal)
+    
+    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
+        """Raw predictions"""
+        if not self.is_fitted:
+            raise ValueError("Model is not fitted.")
+        
+        def _predict_internal(batch_X):
+            X_processed = self._ensure_feature_consistency(batch_X)
+            X_processed = self._safe_data_preprocessing(X_processed, fit_scaler=False)
+            
+            proba = self.model.predict_proba(X_processed)[:, 1]
+            proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            return self._enhance_prediction_diversity(proba)
+        
+        return self._memory_safe_predict(_predict_internal, X, batch_size=25000)
+
+class LightGBMModel(BaseModel):
+    """LightGBM model with GPU support"""
+    
+    def __init__(self, name: str = "LightGBM", params: Dict[str, Any] = None):
+        if not LIGHTGBM_AVAILABLE:
+            raise ImportError("LightGBM is not installed.")
+        
+        default_params = {
+            'objective': 'binary',
+            'metric': 'binary_logloss',
+            'boosting_type': 'gbdt',
+            'num_leaves': 63,
+            'max_depth': 6,
+            'learning_rate': 0.05,
+            'n_estimators': 800,
+            'min_child_samples': 200,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'reg_alpha': 0.5,
+            'reg_lambda': 0.5,
+            'random_state': 42,
+            'n_jobs': 6,
+            'verbose': -1,
+            'is_unbalance': True
+        }
+        
+        if GPU_AVAILABLE:
+            default_params.update({
+                'device': 'gpu',
+                'gpu_platform_id': 0,
+                'gpu_device_id': 0
+            })
+            logger.info(f"LightGBM GPU mode enabled: {GPU_NAME}")
+        
+        if params:
+            default_params.update(params)
+        
+        super().__init__(name, default_params)
+        self.model = None
+        self.use_scaling = False
+    
+    def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
+            X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
+        """Training"""
+        logger.info(f"{self.name} model training started (data: {len(X_train):,})")
+        start_time = time.time()
+        
+        def _fit_internal():
+            self.feature_names = list(X_train.columns)
+            
+            X_train_clean = self._safe_data_preprocessing(X_train, fit_scaler=False)
+            
+            logger.info(f"{self.name}: Starting LightGBM training")
+            
+            if X_val is not None and y_val is not None and len(X_val) > 0:
+                X_val_clean = self._safe_data_preprocessing(X_val, fit_scaler=False)
+                self.model = lgb.LGBMClassifier(**self.params)
+                self.model.fit(
+                    X_train_clean, y_train,
+                    eval_set=[(X_val_clean, y_val)],
+                    callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
+                )
+            else:
+                self.model = lgb.LGBMClassifier(**self.params)
+                self.model.fit(X_train_clean, y_train)
+            
+            logger.info(f"{self.name}: Training completed successfully")
+            self.is_fitted = True
+            
+            if X_val is not None and y_val is not None and len(X_val) > 0:
+                calibration_success = self.apply_calibration(X_val, y_val, method='auto')
+                if calibration_success:
+                    logger.info(f"{self.name}: Calibration completed")
+                else:
+                    logger.warning(f"{self.name}: Calibration skipped")
+            else:
+                logger.warning(f"{self.name}: No validation data - calibration skipped")
+            
+            self.training_time = time.time() - start_time
+            
+            del X_train_clean
+            gc.collect()
+            
+            return self
+        
+        return self._memory_safe_fit(_fit_internal)
+    
+    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
+        """Raw predictions"""
+        if not self.is_fitted:
+            raise ValueError("Model is not fitted.")
+        
+        def _predict_internal(batch_X):
+            X_processed = self._ensure_feature_consistency(batch_X)
+            X_processed = self._safe_data_preprocessing(X_processed, fit_scaler=False)
+            
+            proba = self.model.predict_proba(X_processed)[:, 1]
+            proba = np.clip(proba, 1e-15, 1 - 1e-15)
+            return self._enhance_prediction_diversity(proba)
+        
+        return self._memory_safe_predict(_predict_internal, X, batch_size=50000)
+
 class LogisticModel(BaseModel):
     """Logistic Regression model"""
     
@@ -590,7 +821,7 @@ class LogisticModel(BaseModel):
             'max_iter': 4000,
             'random_state': 42,
             'class_weight': 'balanced',
-            'n_jobs': 8,
+            'n_jobs': 6,
             'tol': 0.00005
         }
         
@@ -675,7 +906,6 @@ class LogisticModel(BaseModel):
             
             memory_status = self.memory_monitor.get_memory_status()
             
-            # No sampling - use all data
             X_train_sample, y_train_sample = X_train, y_train
             
             X_train_clean = self._safe_data_preprocessing(X_train_sample, fit_scaler=True)
@@ -727,207 +957,6 @@ class LogisticModel(BaseModel):
         
         return self._memory_safe_predict(_predict_internal, X, batch_size=50000)
 
-class LightGBMModel(BaseModel):
-    """LightGBM model with GPU support"""
-    
-    def __init__(self, name: str = "LightGBM", params: Dict[str, Any] = None):
-        if not LIGHTGBM_AVAILABLE:
-            raise ImportError("LightGBM is not installed.")
-        
-        default_params = {
-            'objective': 'binary',
-            'metric': 'binary_logloss',
-            'boosting_type': 'gbdt',
-            'num_leaves': 63,
-            'max_depth': 6,
-            'learning_rate': 0.05,
-            'n_estimators': 800,
-            'min_child_samples': 200,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'reg_alpha': 0.5,
-            'reg_lambda': 0.5,
-            'random_state': 42,
-            'n_jobs': 8,
-            'verbose': -1,
-            'is_unbalance': True
-        }
-        
-        if params:
-            default_params.update(params)
-        
-        super().__init__(name, default_params)
-        self.model = None
-        self.use_scaling = False
-        
-        try:
-            import torch
-            if torch.cuda.is_available():
-                default_params['device'] = 'gpu'
-                default_params['gpu_platform_id'] = 0
-                default_params['gpu_device_id'] = 0
-                logger.info(f"{self.name}: GPU mode enabled")
-        except:
-            pass
-    
-    def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
-            X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Training"""
-        logger.info(f"{self.name} model training started (data: {len(X_train):,})")
-        start_time = time.time()
-        
-        def _fit_internal():
-            self.feature_names = list(X_train.columns)
-            
-            X_train_clean = self._safe_data_preprocessing(X_train, fit_scaler=False)
-            
-            logger.info(f"{self.name}: Starting LightGBM training")
-            
-            if X_val is not None and y_val is not None and len(X_val) > 0:
-                X_val_clean = self._safe_data_preprocessing(X_val, fit_scaler=False)
-                self.model = lgb.LGBMClassifier(**self.params)
-                self.model.fit(
-                    X_train_clean, y_train,
-                    eval_set=[(X_val_clean, y_val)],
-                    callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
-                )
-            else:
-                self.model = lgb.LGBMClassifier(**self.params)
-                self.model.fit(X_train_clean, y_train)
-            
-            logger.info(f"{self.name}: Training completed successfully")
-            self.is_fitted = True
-            
-            if X_val is not None and y_val is not None and len(X_val) > 0:
-                calibration_success = self.apply_calibration(X_val, y_val, method='auto')
-                if calibration_success:
-                    logger.info(f"{self.name}: Calibration completed")
-                else:
-                    logger.warning(f"{self.name}: Calibration skipped")
-            else:
-                logger.warning(f"{self.name}: No validation data - calibration skipped")
-            
-            self.training_time = time.time() - start_time
-            
-            del X_train_clean
-            gc.collect()
-            
-            return self
-        
-        return self._memory_safe_fit(_fit_internal)
-    
-    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """Raw predictions"""
-        if not self.is_fitted:
-            raise ValueError("Model is not fitted.")
-        
-        def _predict_internal(batch_X):
-            X_processed = self._ensure_feature_consistency(batch_X)
-            X_processed = self._safe_data_preprocessing(X_processed, fit_scaler=False)
-            
-            proba = self.model.predict_proba(X_processed)[:, 1]
-            proba = np.clip(proba, 1e-15, 1 - 1e-15)
-            return self._enhance_prediction_diversity(proba)
-        
-        return self._memory_safe_predict(_predict_internal, X, batch_size=50000)
-
-class XGBoostModel(BaseModel):
-    """XGBoost model with GPU support"""
-    
-    def __init__(self, name: str = "XGBoost", params: Dict[str, Any] = None):
-        if not XGBOOST_AVAILABLE:
-            raise ImportError("XGBoost is not installed.")
-        
-        default_params = {
-            'objective': 'binary:logistic',
-            'eval_metric': 'logloss',
-            'tree_method': 'gpu_hist',
-            'gpu_id': 0,
-            'predictor': 'gpu_predictor',
-            'max_depth': 8,
-            'learning_rate': 0.1,
-            'n_estimators': 500,
-            'min_child_weight': 10,
-            'gamma': 0.1,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'reg_alpha': 0.5,
-            'reg_lambda': 0.5,
-            'random_state': 42,
-            'n_jobs': 8,
-            'scale_pos_weight': 52.3
-        }
-        
-        if params:
-            default_params.update(params)
-        
-        super().__init__(name, default_params)
-        self.model = None
-        self.use_scaling = False
-        
-        logger.info(f"{self.name}: GPU mode FORCED - tree_method=gpu_hist")
-    
-    def fit(self, X_train: pd.DataFrame, y_train: pd.Series, 
-            X_val: Optional[pd.DataFrame] = None, y_val: Optional[pd.Series] = None):
-        """Training with GPU"""
-        logger.info(f"{self.name} model training started (data: {len(X_train):,})")
-        start_time = time.time()
-        
-        def _fit_internal():
-            self.feature_names = list(X_train.columns)
-            
-            X_train_clean = self._safe_data_preprocessing(X_train, fit_scaler=False)
-            
-            logger.info(f"{self.name}: Starting XGBoost GPU training")
-            
-            if X_val is not None and y_val is not None and len(X_val) > 0:
-                X_val_clean = self._safe_data_preprocessing(X_val, fit_scaler=False)
-                self.model = xgb.XGBClassifier(**self.params)
-                self.model.fit(
-                    X_train_clean, y_train,
-                    eval_set=[(X_val_clean, y_val)],
-                    verbose=False
-                )
-            else:
-                self.model = xgb.XGBClassifier(**self.params)
-                self.model.fit(X_train_clean, y_train)
-            
-            logger.info(f"{self.name}: Training completed successfully")
-            self.is_fitted = True
-            
-            if X_val is not None and y_val is not None and len(X_val) > 0:
-                calibration_success = self.apply_calibration(X_val, y_val, method='auto')
-                if calibration_success:
-                    logger.info(f"{self.name}: Calibration completed")
-                else:
-                    logger.warning(f"{self.name}: Calibration skipped")
-            else:
-                logger.warning(f"{self.name}: No validation data - calibration skipped")
-            
-            self.training_time = time.time() - start_time
-            
-            del X_train_clean
-            gc.collect()
-            
-            return self
-        
-        return self._memory_safe_fit(_fit_internal)
-    
-    def predict_proba_raw(self, X: pd.DataFrame) -> np.ndarray:
-        """Raw predictions"""
-        if not self.is_fitted:
-            raise ValueError("Model is not fitted.")
-        
-        def _predict_internal(batch_X):
-            X_processed = self._ensure_feature_consistency(batch_X)
-            X_processed = self._safe_data_preprocessing(X_processed, fit_scaler=False)
-            
-            proba = self.model.predict_proba(X_processed)[:, 1]
-            proba = np.clip(proba, 1e-15, 1 - 1e-15)
-            return self._enhance_prediction_diversity(proba)
-        
-        return self._memory_safe_predict(_predict_internal, X, batch_size=25000)
-
 class ModelFactory:
     """Model factory"""
     
@@ -941,26 +970,24 @@ class ModelFactory:
                 memory_monitor = MemoryMonitor()
                 logger.info(f"Creating model: {model_type}")
                 
-                if kwargs.get('quick_mode', False):
-                    thresholds = memory_monitor.quick_mode_thresholds
-                    logger.info(f"Quick mode thresholds - warning: {thresholds['warning']:.1f}GB, critical: {thresholds['critical']:.1f}GB")
+                if GPU_AVAILABLE:
+                    logger.info(f"GPU available: {GPU_NAME} ({GPU_MEMORY_GB:.1f}GB)")
                 else:
-                    thresholds = memory_monitor.memory_thresholds
-                    logger.info(f"Memory thresholds - warning: {thresholds['warning']:.1f}GB, critical: {thresholds['critical']:.1f}GB")
+                    logger.info("GPU not available, using CPU mode")
                 
                 ModelFactory._factory_logged = True
             
             quick_mode = kwargs.get('quick_mode', False)
             
-            if model_type.lower() == 'lightgbm':
-                if not LIGHTGBM_AVAILABLE:
-                    raise ImportError("LightGBM is not installed.")
-                model = LightGBMModel(params=kwargs.get('params'))
-                
-            elif model_type.lower() == 'xgboost':
+            if model_type.lower() == 'xgboost':
                 if not XGBOOST_AVAILABLE:
                     raise ImportError("XGBoost is not installed.")
                 model = XGBoostModel(params=kwargs.get('params'))
+                
+            elif model_type.lower() == 'lightgbm':
+                if not LIGHTGBM_AVAILABLE:
+                    raise ImportError("LightGBM is not installed.")
+                model = LightGBMModel(params=kwargs.get('params'))
                 
             elif model_type.lower() == 'logistic':
                 model = LogisticModel(params=kwargs.get('params'))
@@ -985,10 +1012,10 @@ class ModelFactory:
         
         available.append('logistic')
         
-        if LIGHTGBM_AVAILABLE:
-            available.append('lightgbm')
         if XGBOOST_AVAILABLE:
             available.append('xgboost')
+        if LIGHTGBM_AVAILABLE:
+            available.append('lightgbm')
         
         logger.info(f"Available models: {available}")
         return available
@@ -1008,25 +1035,6 @@ class ModelFactory:
             priority_order.append('logistic')
         
         return priority_order
-    
-    @staticmethod
-    def select_models_by_memory_status() -> List[str]:
-        """Select models based on memory status"""
-        memory_monitor = MemoryMonitor()
-        memory_status = memory_monitor.get_memory_status()
-        
-        if memory_status['level'] == 'abort':
-            return ['logistic']
-        elif memory_status['level'] == 'critical':
-            models = ['xgboost', 'logistic']
-            if LIGHTGBM_AVAILABLE:
-                models.append('lightgbm')
-            return models
-        elif memory_status['level'] == 'warning':
-            models = ['xgboost', 'lightgbm', 'logistic']
-            return models
-        else:
-            return ModelFactory.get_available_models()
 
 FinalLightGBMModel = LightGBMModel
 FinalXGBoostModel = XGBoostModel  

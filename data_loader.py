@@ -8,7 +8,6 @@ import time
 import gc
 import warnings
 import os
-import pickle
 import tempfile
 from pathlib import Path
 warnings.filterwarnings('ignore')
@@ -26,22 +25,6 @@ try:
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
-
-try:
-    import nvtabular as nvt
-    from nvtabular import ops
-    from merlin.io import Dataset
-    NVTABULAR_AVAILABLE = True
-except ImportError:
-    NVTABULAR_AVAILABLE = False
-    logging.warning("NVTabular not available. Using pandas fallback. Install with: conda install -c nvidia -c rapidsai -c conda-forge nvtabular python=3.10 cudatoolkit=11.8")
-
-try:
-    import cudf
-    CUDF_AVAILABLE = True
-except ImportError:
-    CUDF_AVAILABLE = False
-    logging.warning("cuDF not available. Using pandas fallback.")
 
 from config import Config
 
@@ -67,16 +50,16 @@ class MemoryMonitor:
         """Get available memory in GB"""
         if PSUTIL_AVAILABLE:
             return psutil.virtual_memory().available / (1024**3)
-        return 64.0
+        return 34.0
     
     def get_memory_status(self) -> Dict[str, Any]:
         """Get detailed memory status information"""
         if not PSUTIL_AVAILABLE:
             return {
-                'available_gb': 64.0,
+                'available_gb': 34.0,
                 'used_gb': 16.0,
-                'total_gb': 80.0,
-                'percent': 20.0,
+                'total_gb': 64.0,
+                'percent': 25.0,
                 'should_cleanup': False,
                 'should_abort': False,
                 'level': 'unknown'
@@ -101,7 +84,7 @@ class MemoryMonitor:
         """Check current memory pressure and recommend actions"""
         if not PSUTIL_AVAILABLE:
             return {
-                'available_gb': 64.0,
+                'available_gb': 34.0,
                 'should_cleanup': False,
                 'should_abort': False,
                 'level': 'unknown'
@@ -255,8 +238,8 @@ class DataColumnAnalyzer:
         except Exception:
             return None
 
-class PandasDataLoader:
-    """Pandas-based data loader for Windows compatibility"""
+class WindowsOptimizedDataLoader:
+    """Windows optimized Pandas-based data loader with chunked processing"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -266,7 +249,10 @@ class PandasDataLoader:
         self.temp_dir = tempfile.mkdtemp()
         self.quick_mode = False
         
-        logger.info("Pandas data loader initialized (Windows compatible)")
+        self.chunk_size = config.CHUNK_SIZE
+        self.max_memory_gb = config.MAX_MEMORY_GB
+        
+        logger.info("Windows optimized Pandas data loader initialized")
     
     def __del__(self):
         """Cleanup temporary directory on destruction"""
@@ -380,295 +366,107 @@ class PandasDataLoader:
         
         return train_df, test_df
     
-    def load_full_data_pandas(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Load full data using pandas with chunking"""
-        logger.info("=== Pandas full data loading started ===")
+    def load_large_data_optimized(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Load full data with chunked processing for Windows"""
+        logger.info("=== Windows optimized full data loading started ===")
+        logger.info(f"Chunk size: {self.chunk_size:,} rows")
         
         try:
-            self.memory_monitor.log_memory_status("Pandas loading start", force=True)
+            self.memory_monitor.log_memory_status("Loading start", force=True)
             
             if not self._validate_files():
                 raise ValueError("Data files do not exist")
             
-            logger.info("Loading training data with pandas")
-            train_df = self._load_with_pandas(str(self.config.TRAIN_PATH), is_train=True)
+            logger.info("Loading training data with chunked processing")
+            train_df = self._load_chunked_parquet(str(self.config.TRAIN_PATH), is_train=True)
             
             if train_df is None or train_df.empty:
                 raise ValueError("Training data loading failed")
             
-            logger.info("Loading test data with pandas")
-            test_df = self._load_with_pandas(str(self.config.TEST_PATH), is_train=False)
+            logger.info("Loading test data with chunked processing")
+            test_df = self._load_chunked_parquet(str(self.config.TEST_PATH), is_train=False)
             
             if test_df is None or test_df.empty:
                 raise ValueError("Test data loading failed")
             
-            self.memory_monitor.log_memory_status("Pandas loading completed", force=True)
+            self.memory_monitor.log_memory_status("Loading completed", force=True)
             
-            logger.info(f"=== Pandas loading completed - Training: {train_df.shape}, Test: {test_df.shape} ===")
+            logger.info(f"=== Loading completed - Training: {train_df.shape}, Test: {test_df.shape} ===")
             
             return train_df, test_df
             
         except Exception as e:
-            logger.error(f"Pandas data loading failed: {e}")
+            logger.error(f"Data loading failed: {e}")
             self.memory_monitor.force_memory_cleanup()
             raise
     
-    def _load_with_pandas(self, file_path: str, is_train: bool = True) -> pd.DataFrame:
-        """Load data using pandas with memory optimization"""
+    def _load_chunked_parquet(self, file_path: str, is_train: bool = True) -> pd.DataFrame:
+        """Load parquet file with memory-efficient chunked processing"""
         try:
-            logger.info(f"Loading with pandas: {file_path}")
+            logger.info(f"Loading with chunked processing: {file_path}")
             
             if not PYARROW_AVAILABLE:
-                logger.warning("PyArrow not available, using slower engine")
+                logger.warning("PyArrow not available, using standard loading")
                 df = pd.read_parquet(file_path)
-            else:
-                df = pd.read_parquet(file_path, engine='pyarrow')
-            
-            if is_train and self.target_column is None:
-                self.target_column = self.column_analyzer.detect_target_column(df)
-                logger.info(f"Target column detected: {self.target_column}")
-            
-            logger.info(f"Pandas loading completed: {df.shape}")
-            
-            self.memory_monitor.force_memory_cleanup()
-            
-            return df
-            
-        except Exception as e:
-            logger.error(f"Pandas loading failed: {e}")
-            return pd.DataFrame()
-    
-    def _validate_files(self) -> bool:
-        """Validate input files exist and have reasonable sizes"""
-        try:
-            train_path = Path(self.config.TRAIN_PATH)
-            test_path = Path(self.config.TEST_PATH)
-            
-            if not train_path.exists():
-                logger.error(f"Training file not found: {train_path}")
-                return False
-            
-            if not test_path.exists():
-                logger.error(f"Test file not found: {test_path}")
-                return False
-            
-            train_size_mb = train_path.stat().st_size / (1024**2)
-            test_size_mb = test_path.stat().st_size / (1024**2)
-            
-            if train_size_mb < 100:
-                logger.warning(f"Training file seems small: {train_size_mb:.1f}MB")
-            
-            if test_size_mb < 10:
-                logger.warning(f"Test file seems small: {test_size_mb:.1f}MB")
-            
-            logger.info("File validation successful")
-            return True
-            
-        except Exception as e:
-            logger.error(f"File validation failed: {e}")
-            return False
-    
-    def get_detected_target_column(self) -> Optional[str]:
-        """Return detected target column name"""
-        return self.target_column
-
-class NVTabularDataLoader:
-    """NVTabular-based data loader with GPU acceleration (Linux only)"""
-    
-    def __init__(self, config: Config = Config):
-        self.config = config
-        self.memory_monitor = MemoryMonitor()
-        self.column_analyzer = DataColumnAnalyzer(config)
-        self.target_column = None
-        self.temp_dir = tempfile.mkdtemp()
-        self.quick_mode = False
-        
-        if not NVTABULAR_AVAILABLE:
-            logger.error("NVTabular is not available. This loader requires NVTabular installation.")
-            raise ImportError("NVTabular is required for this data loader")
-        
-        logger.info("NVTabular data loader initialization completed")
-    
-    def __del__(self):
-        """Cleanup temporary directory on destruction"""
-        try:
-            import shutil
-            if hasattr(self, 'temp_dir') and os.path.exists(self.temp_dir):
-                shutil.rmtree(self.temp_dir)
-        except Exception:
-            pass
-    
-    def set_quick_mode(self, quick_mode: bool):
-        """Enable or disable quick mode"""
-        self.quick_mode = quick_mode
-        if quick_mode:
-            logger.info("Quick mode enabled: Will load 50 samples only")
-        else:
-            logger.info("Full mode enabled: Will load complete dataset")
-    
-    def load_quick_sample_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Load small sample data for quick testing"""
-        logger.info("=== Quick sample data loading started ===")
-        
-        try:
-            train_sample = self._load_sample_from_file(self.config.TRAIN_PATH, 35, is_train=True)
-            test_sample = self._load_sample_from_file(self.config.TEST_PATH, 15, is_train=False)
-            
-            if self.target_column and self.target_column in train_sample.columns:
-                logger.info(f"Target column confirmed: {self.target_column}")
-            else:
-                self.target_column = 'clicked'
-                if self.target_column not in train_sample.columns:
-                    train_sample[self.target_column] = np.random.binomial(1, 0.02, len(train_sample))
-                    logger.info(f"Created dummy target column: {self.target_column}")
-            
-            logger.info(f"Quick sample loading completed - train: {train_sample.shape}, test: {test_sample.shape}")
-            
-            return train_sample, test_sample
-            
-        except Exception as e:
-            logger.error(f"Quick sample loading failed: {e}")
-            return self._create_dummy_data()
-    
-    def _load_sample_from_file(self, file_path: Path, sample_size: int, is_train: bool = True) -> pd.DataFrame:
-        """Load a small sample from a parquet file"""
-        try:
-            if not PYARROW_AVAILABLE:
-                raise ValueError("PyArrow is required for parquet loading")
-            
-            if not file_path.exists():
-                logger.warning(f"File not found: {file_path}")
-                return self._create_dummy_sample(sample_size, is_train)
+                
+                if is_train and self.target_column is None:
+                    self.target_column = self.column_analyzer.detect_target_column(df)
+                    logger.info(f"Target column detected: {self.target_column}")
+                
+                return df
             
             parquet_file = pq.ParquetFile(file_path)
+            total_rows = parquet_file.metadata.num_rows
+            num_row_groups = parquet_file.num_row_groups
             
-            table = parquet_file.read_row_group(0)
-            df = table.to_pandas()
+            logger.info(f"File info - Total rows: {total_rows:,}, Row groups: {num_row_groups}")
             
-            if is_train and self.target_column is None:
-                self.target_column = self.column_analyzer.detect_target_column(df)
+            chunks = []
+            rows_processed = 0
             
-            if len(df) > sample_size:
-                df = df.sample(n=sample_size, random_state=42).reset_index(drop=True)
+            for i in range(num_row_groups):
+                try:
+                    table = parquet_file.read_row_group(i)
+                    chunk_df = table.to_pandas()
+                    
+                    chunks.append(chunk_df)
+                    rows_processed += len(chunk_df)
+                    
+                    if (i + 1) % 10 == 0 or (i + 1) == num_row_groups:
+                        logger.info(f"Progress: {rows_processed:,}/{total_rows:,} rows ({(rows_processed/total_rows)*100:.1f}%)")
+                        
+                        memory_status = self.memory_monitor.get_memory_status()
+                        if memory_status['should_cleanup']:
+                            logger.warning(f"Memory pressure detected: {memory_status['available_gb']:.1f}GB available")
+                            gc.collect()
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to read row group {i}: {e}")
+                    continue
             
-            logger.info(f"Sample loaded from {file_path.name}: {df.shape}")
-            return df
+            if not chunks:
+                raise ValueError("No data chunks loaded")
             
-        except Exception as e:
-            logger.warning(f"Sample loading failed for {file_path}: {e}")
-            return self._create_dummy_sample(sample_size, is_train)
-    
-    def _create_dummy_sample(self, sample_size: int, is_train: bool) -> pd.DataFrame:
-        """Create dummy data when file loading fails"""
-        try:
-            data = {
-                'feature_1': np.random.randint(0, 100, sample_size),
-                'feature_2': np.random.normal(0, 1, sample_size),
-                'feature_3': np.random.choice(['A', 'B', 'C'], sample_size),
-                'feature_4': np.random.uniform(0, 1, sample_size)
-            }
+            logger.info("Concatenating chunks...")
+            df = pd.concat(chunks, ignore_index=True)
             
-            if is_train:
-                data['clicked'] = np.random.binomial(1, 0.02, sample_size)
-                self.target_column = 'clicked'
-            
-            df = pd.DataFrame(data)
-            logger.info(f"Created dummy sample: {df.shape}")
-            return df
-            
-        except Exception as e:
-            logger.error(f"Dummy sample creation failed: {e}")
-            return pd.DataFrame({'dummy': [0] * sample_size})
-    
-    def _create_dummy_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create minimal dummy data as absolute fallback"""
-        train_data = {
-            'feature_1': [1, 2, 3] * 17,
-            'feature_2': [0.1, 0.2, 0.3] * 17,
-            'clicked': [0, 1, 0] * 17
-        }
-        
-        test_data = {
-            'feature_1': [4, 5, 6] * 5,
-            'feature_2': [0.4, 0.5, 0.6] * 5
-        }
-        
-        train_df = pd.DataFrame(train_data).iloc[:35]
-        test_df = pd.DataFrame(test_data).iloc[:15]
-        
-        self.target_column = 'clicked'
-        logger.warning("Using minimal dummy data as fallback")
-        
-        return train_df, test_df
-    
-    def load_full_data_nvtabular(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Load full data using NVTabular with GPU acceleration"""
-        logger.info("=== NVTabular full data loading started ===")
-        
-        try:
-            self.memory_monitor.log_memory_status("NVTabular loading start", force=True)
-            
-            if not self._validate_files():
-                raise ValueError("Data files do not exist")
-            
-            logger.info("Processing training data with NVTabular")
-            train_df = self._load_with_nvtabular(str(self.config.TRAIN_PATH), is_train=True)
-            
-            if train_df is None or train_df.empty:
-                raise ValueError("Training data loading failed")
-            
-            logger.info("Processing test data with NVTabular")
-            test_df = self._load_with_nvtabular(str(self.config.TEST_PATH), is_train=False)
-            
-            if test_df is None or test_df.empty:
-                raise ValueError("Test data loading failed")
-            
-            self.memory_monitor.log_memory_status("NVTabular loading completed", force=True)
-            
-            logger.info(f"=== NVTabular loading completed - Training: {train_df.shape}, Test: {test_df.shape} ===")
-            
-            return train_df, test_df
-            
-        except Exception as e:
-            logger.error(f"NVTabular data loading failed: {e}")
-            self.memory_monitor.force_memory_cleanup()
-            raise
-    
-    def _load_with_nvtabular(self, file_path: str, is_train: bool = True) -> pd.DataFrame:
-        """Load data using NVTabular Dataset"""
-        try:
-            logger.info(f"Loading with NVTabular: {file_path}")
-            
-            dataset = Dataset(
-                file_path,
-                engine='parquet',
-                part_size=self.config.NVTABULAR_PARTITION_SIZE
-            )
-            
-            logger.info(f"NVTabular Dataset created with partition size: {self.config.NVTABULAR_PARTITION_SIZE}")
+            del chunks
+            gc.collect()
             
             if is_train and self.target_column is None:
-                sample_batch = dataset.to_ddf().head(1000)
-                sample_pd = sample_batch.to_pandas() if hasattr(sample_batch, 'to_pandas') else sample_batch
-                self.target_column = self.column_analyzer.detect_target_column(sample_pd)
+                logger.info("Detecting target column from sample...")
+                sample_df = df.head(10000)
+                self.target_column = self.column_analyzer.detect_target_column(sample_df)
                 logger.info(f"Target column detected: {self.target_column}")
             
-            logger.info("Converting NVTabular Dataset to DataFrame")
-            ddf = dataset.to_ddf()
-            df = ddf.compute()
+            logger.info(f"Chunked loading completed: {df.shape}")
             
-            if hasattr(df, 'to_pandas'):
-                df = df.to_pandas()
-            
-            logger.info(f"NVTabular loading completed: {df.shape}")
-            
-            del dataset, ddf
             self.memory_monitor.force_memory_cleanup()
             
             return df
             
         except Exception as e:
-            logger.error(f"NVTabular loading failed: {e}")
+            logger.error(f"Chunked loading failed: {e}")
             return pd.DataFrame()
     
     def _validate_files(self) -> bool:
@@ -687,6 +485,9 @@ class NVTabularDataLoader:
             
             train_size_mb = train_path.stat().st_size / (1024**2)
             test_size_mb = test_path.stat().st_size / (1024**2)
+            
+            logger.info(f"Training file: {train_size_mb:.1f}MB")
+            logger.info(f"Test file: {test_size_mb:.1f}MB")
             
             if train_size_mb < 100:
                 logger.warning(f"Training file seems small: {train_size_mb:.1f}MB")
@@ -706,7 +507,7 @@ class NVTabularDataLoader:
         return self.target_column
 
 class LargeDataLoader:
-    """Large data loader with automatic backend selection"""
+    """Large data loader with Windows optimization"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -714,12 +515,8 @@ class LargeDataLoader:
         self.target_column = None
         self.quick_mode = False
         
-        self.backend = 'pandas'
-        if NVTABULAR_AVAILABLE:
-            self.backend = 'nvtabular'
-            logger.info("NVTabular available - using GPU accelerated backend")
-        else:
-            logger.info("NVTabular not available - using pandas backend (Windows compatible)")
+        self.backend = 'pandas_windows'
+        logger.info("Windows optimized Pandas backend initialized")
         
         self.loading_stats = {
             'start_time': time.time(),
@@ -743,18 +540,12 @@ class LargeDataLoader:
     
     def load_quick_sample_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Load small sample data for quick testing"""
-        logger.info(f"=== Quick sample data loading via LargeDataLoader ({self.backend}) ===")
+        logger.info(f"=== Quick sample data loading via LargeDataLoader (Windows) ===")
         
-        if self.backend == 'nvtabular' and NVTABULAR_AVAILABLE:
-            loader = NVTabularDataLoader(self.config)
-            loader.set_quick_mode(True)
-            result = loader.load_quick_sample_data()
-            self.target_column = loader.get_detected_target_column()
-        else:
-            loader = PandasDataLoader(self.config)
-            loader.set_quick_mode(True)
-            result = loader.load_quick_sample_data()
-            self.target_column = loader.get_detected_target_column()
+        loader = WindowsOptimizedDataLoader(self.config)
+        loader.set_quick_mode(True)
+        result = loader.load_quick_sample_data()
+        self.target_column = loader.get_detected_target_column()
         
         self.loading_stats.update({
             'data_loaded': True,
@@ -766,19 +557,13 @@ class LargeDataLoader:
         return result
     
     def load_large_data_optimized(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Load complete data with automatic backend selection"""
-        logger.info(f"=== Complete data processing started ({self.backend} backend) ===")
+        """Load complete data with Windows optimization"""
+        logger.info(f"=== Complete data processing started (Windows optimized) ===")
         
-        if self.backend == 'nvtabular' and NVTABULAR_AVAILABLE:
-            loader = NVTabularDataLoader(self.config)
-            loader.set_quick_mode(False)
-            result = loader.load_full_data_nvtabular()
-            self.target_column = loader.get_detected_target_column()
-        else:
-            loader = PandasDataLoader(self.config)
-            loader.set_quick_mode(False)
-            result = loader.load_full_data_pandas()
-            self.target_column = loader.get_detected_target_column()
+        loader = WindowsOptimizedDataLoader(self.config)
+        loader.set_quick_mode(False)
+        result = loader.load_large_data_optimized()
+        self.target_column = loader.get_detected_target_column()
         
         self.loading_stats.update({
             'data_loaded': True,
@@ -809,7 +594,6 @@ if __name__ == "__main__":
         loader = LargeDataLoader(config)
         
         print(f"Backend: {loader.backend}")
-        print(f"NVTabular available: {NVTABULAR_AVAILABLE}")
         
         print("\nTesting quick mode...")
         loader.set_quick_mode(True)
@@ -821,10 +605,7 @@ if __name__ == "__main__":
         print(f"Detected target column: {loader.get_detected_target_column()}")
         print(f"Total samples: {len(train_df) + len(test_df)}")
         
-        if NVTABULAR_AVAILABLE:
-            print("\nTesting full mode with NVTabular...")
-        else:
-            print("\nTesting full mode with pandas...")
+        print("\nTesting full mode with chunked processing...")
         
         loader.set_quick_mode(False)
         train_df_full, test_df_full = loader.load_large_data_optimized()
