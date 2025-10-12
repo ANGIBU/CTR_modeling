@@ -218,8 +218,15 @@ class CTRFeatureEngineer:
             for col in X_train.columns:
                 try:
                     if col in self.categorical_features:
-                        X_train[col] = X_train[col].fillna(-1).astype('int32')
-                        X_test[col] = X_test[col].fillna(-1).astype('int32')
+                        train_values = X_train[col].astype(str).str.replace('.0', '', regex=False).fillna('-1')
+                        test_values = X_test[col].astype(str).str.replace('.0', '', regex=False).fillna('-1')
+                        
+                        try:
+                            X_train[col] = train_values.astype('int32')
+                            X_test[col] = test_values.astype('int32')
+                        except ValueError:
+                            X_train[col] = train_values.astype('float32')
+                            X_test[col] = test_values.astype('float32')
                     else:
                         X_train[col] = X_train[col].fillna(0).astype('float32')
                         X_test[col] = X_test[col].fillna(0).astype('float32')
@@ -244,14 +251,22 @@ class CTRFeatureEngineer:
             for col in self.categorical_features:
                 if col in X_train.columns and col in X_test.columns:
                     try:
-                        train_unique = set(X_train[col].fillna(-1).astype(str).unique())
-                        test_unique = set(X_test[col].fillna(-1).astype(str).unique())
+                        train_str = X_train[col].astype(str).str.replace('.0', '', regex=False).fillna('-1')
+                        test_str = X_test[col].astype(str).str.replace('.0', '', regex=False).fillna('-1')
+                        
+                        train_unique = set(train_str.unique())
+                        test_unique = set(test_str.unique())
                         all_unique = sorted(train_unique | test_unique)
                         
-                        mapping = {val: idx for idx, val in enumerate(all_unique)}
+                        value_counts = train_str.value_counts()
+                        sorted_values = [val for val in value_counts.index if val in all_unique]
+                        remaining_values = [val for val in all_unique if val not in sorted_values]
+                        sorted_values.extend(remaining_values)
                         
-                        X_train[col] = X_train[col].fillna(-1).astype(str).map(mapping).fillna(0).astype('float32')
-                        X_test[col] = X_test[col].fillna(-1).astype(str).map(mapping).fillna(0).astype('float32')
+                        mapping = {val: idx for idx, val in enumerate(sorted_values)}
+                        
+                        X_train[col] = train_str.map(mapping).fillna(0).astype('float32')
+                        X_test[col] = test_str.map(mapping).fillna(0).astype('float32')
                         
                         logger.info(f"Encoded {col}: {len(all_unique)} unique values")
                         
