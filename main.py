@@ -335,23 +335,12 @@ def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
         dtest = xgb.DMatrix(X_test_np)
         
         predictions = final_model.predict(dtest)
-        predictions = np.clip(predictions, 0.0, 1.0)
+        predictions = np.clip(predictions, 1e-15, 1 - 1e-15)
         
-        target_ctr = 0.0191
-        current_ctr = predictions.mean()
-        
-        logger.info(f"Before CTR correction: mean={current_ctr:.6f}")
-        
-        if abs(current_ctr - target_ctr) > 0.001:
-            logger.info(f"CTR correction: {current_ctr:.6f} -> {target_ctr:.6f}")
-            correction_factor = target_ctr / current_ctr if current_ctr > 0 else 1.0
-            predictions = predictions * correction_factor
-            predictions = np.clip(predictions, 1e-6, 0.9999)
-            
-            corrected_ctr = predictions.mean()
-            logger.info(f"After CTR correction: mean={corrected_ctr:.6f}")
-        else:
-            logger.info(f"CTR correction not needed (difference: {abs(current_ctr - target_ctr):.6f})")
+        predicted_ctr = predictions.mean()
+        logger.info(f"Predicted CTR: {predicted_ctr:.6f}")
+        logger.info(f"Target CTR: 0.0191")
+        logger.info(f"Prediction range: [{predictions.min():.6f}, {predictions.max():.6f}]")
         
         try:
             sample_submission = pd.read_csv(config.SUBMISSION_PATH)

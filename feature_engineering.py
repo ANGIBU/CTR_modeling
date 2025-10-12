@@ -218,18 +218,24 @@ class CTRFeatureEngineer:
             for col in X_train.columns:
                 try:
                     if col in self.categorical_features:
-                        train_values = X_train[col].astype(str).str.replace('.0', '', regex=False).fillna('-1')
-                        test_values = X_test[col].astype(str).str.replace('.0', '', regex=False).fillna('-1')
+                        train_values = X_train[col].fillna('missing').astype(str)
+                        test_values = X_test[col].fillna('missing').astype(str)
+                        
+                        train_values = train_values.replace('None', 'missing')
+                        test_values = test_values.replace('None', 'missing')
+                        
+                        train_values = train_values.str.replace('.0', '', regex=False)
+                        test_values = test_values.str.replace('.0', '', regex=False)
                         
                         try:
-                            X_train[col] = train_values.astype('int32')
-                            X_test[col] = test_values.astype('int32')
-                        except ValueError:
-                            X_train[col] = train_values.astype('float32')
-                            X_test[col] = test_values.astype('float32')
+                            X_train[col] = pd.to_numeric(train_values, errors='coerce').fillna(-1).astype('int32')
+                            X_test[col] = pd.to_numeric(test_values, errors='coerce').fillna(-1).astype('int32')
+                        except (ValueError, TypeError):
+                            X_train[col] = train_values.astype('object')
+                            X_test[col] = test_values.astype('object')
                     else:
-                        X_train[col] = X_train[col].fillna(0).astype('float32')
-                        X_test[col] = X_test[col].fillna(0).astype('float32')
+                        X_train[col] = pd.to_numeric(X_train[col], errors='coerce').fillna(0).astype('float32')
+                        X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0).astype('float32')
                         
                 except Exception as e:
                     logger.warning(f"Feature preparation failed for {col}: {e}")
@@ -251,17 +257,24 @@ class CTRFeatureEngineer:
             for col in self.categorical_features:
                 if col in X_train.columns and col in X_test.columns:
                     try:
-                        train_str = X_train[col].astype(str).str.replace('.0', '', regex=False).fillna('-1')
-                        test_str = X_test[col].astype(str).str.replace('.0', '', regex=False).fillna('-1')
+                        train_str = X_train[col].fillna('missing').astype(str)
+                        test_str = X_test[col].fillna('missing').astype(str)
+                        
+                        train_str = train_str.replace('None', 'missing')
+                        test_str = test_str.replace('None', 'missing')
+                        
+                        train_str = train_str.str.replace('.0', '', regex=False)
+                        test_str = test_str.str.replace('.0', '', regex=False)
                         
                         train_unique = set(train_str.unique())
                         test_unique = set(test_str.unique())
-                        all_unique = sorted(train_unique | test_unique)
+                        all_unique = train_unique | test_unique
                         
                         value_counts = train_str.value_counts()
-                        sorted_values = [val for val in value_counts.index if val in all_unique]
-                        remaining_values = [val for val in all_unique if val not in sorted_values]
-                        sorted_values.extend(remaining_values)
+                        sorted_by_freq = [val for val in value_counts.index if val in all_unique]
+                        
+                        remaining = sorted([val for val in all_unique if val not in sorted_by_freq])
+                        sorted_values = sorted_by_freq + remaining
                         
                         mapping = {val: idx for idx, val in enumerate(sorted_values)}
                         
@@ -302,6 +315,9 @@ class CTRFeatureEngineer:
                         if X_train[col].dtype == 'object' or not np.issubdtype(X_train[col].dtype, np.number):
                             train_str = X_train[col].fillna('missing').astype(str)
                             test_str = X_test[col].fillna('missing').astype(str)
+                            
+                            train_str = train_str.replace('None', 'missing')
+                            test_str = test_str.replace('None', 'missing')
                             
                             all_categories = sorted(set(train_str.unique()) | set(test_str.unique()))
                             category_map = {cat: idx for idx, cat in enumerate(all_categories)}
@@ -491,6 +507,9 @@ class CTRFeatureEngineer:
                         
                         train_str = X_train[col].fillna('missing').astype(str)
                         test_str = X_test[col].fillna('missing').astype(str)
+                        
+                        train_str = train_str.replace('None', 'missing')
+                        test_str = test_str.replace('None', 'missing')
                         
                         all_values = sorted(set(train_str.unique()) | set(test_str.unique()))
                         value_map = {val: idx for idx, val in enumerate(all_values)}
