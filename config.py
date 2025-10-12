@@ -14,29 +14,24 @@ except ImportError:
 class Config:
     """Project-wide configuration management for Windows environment"""
     
-    # Basic path settings
     BASE_DIR = Path(__file__).parent
     DATA_DIR = BASE_DIR / "data"
     MODEL_DIR = BASE_DIR / "models"
     LOG_DIR = BASE_DIR / "logs"
     OUTPUT_DIR = BASE_DIR / "output"
     
-    # Data file paths
     TRAIN_PATH = DATA_DIR / "train.parquet"
     TEST_PATH = DATA_DIR / "test.parquet"
     SUBMISSION_PATH = DATA_DIR / "sample_submission.csv"
     SUBMISSION_TEMPLATE_PATH = DATA_DIR / "sample_submission.csv"
     
-    # Experiment log path
     EXPERIMENTS_LOG_PATH = LOG_DIR / "experiments.log"
     
-    # Target column settings
     TARGET_COLUMN_CANDIDATES = [
         'clicked', 'click', 'is_click', 'target', 'label', 'y',
         'ctr', 'response', 'conversion', 'action'
     ]
     
-    # Target column detection settings
     TARGET_DETECTION_CONFIG = {
         'binary_values': {0, 1},
         'min_ctr': 0.001,
@@ -45,7 +40,6 @@ class Config:
         'typical_ctr_range': (0.005, 0.05)
     }
     
-    # GPU and hardware settings
     if TORCH_AVAILABLE:
         DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         GPU_AVAILABLE = torch.cuda.is_available()
@@ -59,13 +53,11 @@ class Config:
     GPU_OPTIMIZATION_LEVEL = 3
     FORCE_GPU_XGBOOST = True
     
-    # Windows environment - NVTabular not available
     USE_NVTABULAR = False
     NVTABULAR_PARTITION_SIZE = None
     NVTABULAR_OUT_FILES_PER_PROC = None
     NVTABULAR_SHUFFLE = False
     
-    # Memory settings for Windows
     MAX_MEMORY_GB = 45
     CHUNK_SIZE = 100000
     BATCH_SIZE_GPU = 32768
@@ -73,17 +65,14 @@ class Config:
     PREFETCH_FACTOR = 4
     NUM_WORKERS = 6
     
-    # Memory thresholds
     MEMORY_WARNING_THRESHOLD = 50
     MEMORY_CRITICAL_THRESHOLD = 55
     MEMORY_ABORT_THRESHOLD = 60
     
-    # Data size limits
     MAX_TRAIN_SIZE = 10704179
     MAX_TEST_SIZE = 1527298
     MAX_INTERACTION_FEATURES = 0
     
-    # Model training settings
     MODEL_TRAINING_CONFIG = {
         'xgboost': {
             'objective': 'binary:logistic',
@@ -91,12 +80,15 @@ class Config:
             'tree_method': 'gpu_hist' if GPU_AVAILABLE else 'hist',
             'gpu_id': 0 if GPU_AVAILABLE else None,
             'predictor': 'gpu_predictor' if GPU_AVAILABLE else 'cpu_predictor',
-            'max_depth': 8,
-            'learning_rate': 0.1,
+            'max_depth': 6,
+            'learning_rate': 0.05,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
+            'min_child_weight': 3,
+            'reg_alpha': 0.1,
+            'reg_lambda': 1.0,
             'scale_pos_weight': 51.43,
-            'early_stopping_rounds': 20,
+            'early_stopping_rounds': 30,
             'verbosity': 0,
             'seed': 42
         },
@@ -111,7 +103,7 @@ class Config:
             'bagging_fraction': 0.8,
             'bagging_freq': 5,
             'learning_rate': 0.05,
-            'n_estimators': 200,
+            'n_estimators': 300,
             'early_stopping_rounds': 50,
             'verbosity': -1,
             'device': 'cpu',
@@ -123,7 +115,7 @@ class Config:
             'C': 0.5,
             'penalty': 'l2',
             'solver': 'saga',
-            'max_iter': 1000,
+            'max_iter': 2000,
             'n_jobs': -1,
             'verbose': 0,
             'class_weight': 'balanced',
@@ -131,7 +123,6 @@ class Config:
         }
     }
     
-    # Feature engineering settings
     FEATURE_ENGINEERING_CONFIG = {
         'target_feature_count': 117,
         'use_feature_selection': False,
@@ -156,19 +147,16 @@ class Config:
         )
     }
     
-    # Training and evaluation settings
     CV_FOLDS = 5
     TEST_SIZE = 0.3
     RANDOM_STATE = 42
     
-    # Calibration settings
     CALIBRATION_CONFIG = {
         'enabled': False,
         'methods': ['isotonic'],
         'cv_folds': 3
     }
     
-    # Ensemble settings
     ENSEMBLE_CONFIG = {
         'enabled': False,
         'stacking_enabled': False,
@@ -179,7 +167,6 @@ class Config:
         'target_combined_score': 0.35
     }
     
-    # Evaluation settings
     EVALUATION_CONFIG = {
         'metrics': ['auc', 'ap', 'log_loss'],
         'ctr_validation_enabled': True,
@@ -188,30 +175,25 @@ class Config:
         'wll_weight': 0.5
     }
     
-    # Target metrics
     TARGET_COMBINED_SCORE = 0.35
     TARGET_CTR = 0.0191
     
-    # Logging settings
     LOG_LEVEL = logging.INFO
     LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     LOG_FILE_MAX_SIZE = 10 * 1024 * 1024
     LOG_FILE_BACKUP_COUNT = 5
     
-    # Performance settings
     ENABLE_PARALLEL_PROCESSING = True
     ENABLE_MEMORY_MAPPING = False
     ENABLE_CACHING = True
     CACHE_SIZE_MB = 4096
     
-    # Large dataset specific settings
     LARGE_DATASET_MODE = True
     MEMORY_EFFICIENT_SAMPLING = False
     AGGRESSIVE_SAMPLING_THRESHOLD = 0.95
     MIN_SAMPLE_SIZE = 10000000
     MAX_SAMPLE_SIZE = 10704179
     
-    # RTX 4060 Ti specific settings
     RTX_4060_TI_OPTIMIZATION = True
     
     @classmethod

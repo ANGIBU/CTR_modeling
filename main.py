@@ -1,5 +1,4 @@
 # main.py
-# 0.3361842215
 
 import os
 import sys
@@ -160,6 +159,29 @@ def calculate_competition_score(y_true: np.ndarray, y_pred: np.ndarray) -> Tuple
     score = 0.5 * ap + 0.5 * (1 / (1 + wll))
     return score, ap, wll
 
+def apply_ctr_correction(predictions: np.ndarray, target_ctr: float = 0.0191, tolerance: float = 0.0001) -> np.ndarray:
+    """Apply CTR correction to predictions"""
+    try:
+        current_ctr = predictions.mean()
+        logger.info(f"Before CTR correction: mean={current_ctr:.6f}")
+        
+        if abs(current_ctr - target_ctr) > tolerance:
+            correction_factor = target_ctr / current_ctr if current_ctr > 0 else 1.0
+            predictions = predictions * correction_factor
+            predictions = np.clip(predictions, 1e-15, 1 - 1e-15)
+            logger.info(f"CTR correction applied: {current_ctr:.6f} -> {target_ctr:.6f}")
+        else:
+            logger.info(f"CTR correction not needed: {current_ctr:.6f} (target: {target_ctr:.6f})")
+        
+        final_ctr = predictions.mean()
+        logger.info(f"After CTR correction: mean={final_ctr:.6f}")
+        
+        return predictions
+        
+    except Exception as e:
+        logger.error(f"CTR correction failed: {e}")
+        return predictions
+
 def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
     """Execute 5-Fold CV XGBoost training"""
     try:
@@ -248,10 +270,13 @@ def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
             'tree_method': 'gpu_hist' if gpu_optimization else 'hist',
-            'max_depth': 8,
-            'learning_rate': 0.1,
+            'max_depth': 6,
+            'learning_rate': 0.05,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
+            'min_child_weight': 3,
+            'reg_alpha': 0.1,
+            'reg_lambda': 1.0,
             'scale_pos_weight': scale_pos_weight,
             'seed': 42,
             'verbosity': 0
@@ -289,9 +314,9 @@ def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
             
             model = xgb.train(
                 params, dtrain,
-                num_boost_round=200,
+                num_boost_round=300,
                 evals=[(dval, 'val')],
-                early_stopping_rounds=20,
+                early_stopping_rounds=30,
                 verbose_eval=False
             )
             
@@ -326,7 +351,7 @@ def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
         
         final_model = xgb.train(
             params, dtrain_full,
-            num_boost_round=200,
+            num_boost_round=300,
             verbose_eval=False
         )
         
@@ -338,8 +363,10 @@ def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
         predictions = final_model.predict(dtest)
         predictions = np.clip(predictions, 1e-15, 1 - 1e-15)
         
+        predictions = apply_ctr_correction(predictions, target_ctr=0.0191, tolerance=0.0001)
+        
         predicted_ctr = predictions.mean()
-        logger.info(f"Predicted CTR: {predicted_ctr:.6f}")
+        logger.info(f"Final predicted CTR: {predicted_ctr:.6f}")
         logger.info(f"Target CTR: 0.0191")
         logger.info(f"Prediction range: [{predictions.min():.6f}, {predictions.max():.6f}]")
         
