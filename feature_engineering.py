@@ -13,7 +13,6 @@ from data_loader import MemoryMonitor
 logger = logging.getLogger(__name__)
 
 class CTRFeatureEngineer:
-    """CTR feature engineering based on reference notebook approach"""
     
     def __init__(self, config: Config = Config):
         self.config = config
@@ -47,7 +46,6 @@ class CTRFeatureEngineer:
         }
     
     def set_memory_efficient_mode(self, enabled: bool):
-        """Enable or disable memory efficient mode"""
         self.memory_efficient_mode = enabled
         if enabled:
             logger.info("Memory efficient mode enabled")
@@ -58,7 +56,6 @@ class CTRFeatureEngineer:
                          train_df: pd.DataFrame, 
                          test_df: pd.DataFrame, 
                          target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Main feature engineering pipeline based on reference notebook"""
         logger.info("=== Reference Notebook Style Feature Engineering (117 features) ===")
         return self.create_reference_features(train_df, test_df, target_col)
     
@@ -66,7 +63,6 @@ class CTRFeatureEngineer:
                             train_df: pd.DataFrame,
                             test_df: pd.DataFrame,
                             target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create basic features for quick testing"""
         logger.info("Creating basic features for quick mode")
         
         try:
@@ -100,7 +96,6 @@ class CTRFeatureEngineer:
                                   train_df: pd.DataFrame, 
                                   test_df: pd.DataFrame, 
                                   target_col: str = 'clicked') -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create features following reference notebook methodology"""
         logger.info("Creating features based on reference notebook approach")
         
         try:
@@ -135,7 +130,6 @@ class CTRFeatureEngineer:
     
     def _prepare_reference_data(self, train_df: pd.DataFrame, test_df: pd.DataFrame,
                                target_col: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
-        """Prepare data following reference notebook approach"""
         try:
             logger.info("Preparing data (reference approach)")
             
@@ -175,7 +169,6 @@ class CTRFeatureEngineer:
             raise
     
     def _identify_feature_types_reference(self, X: pd.DataFrame):
-        """Identify categorical and continuous features based on reference notebook"""
         try:
             logger.info("Identifying feature types (reference approach)")
             
@@ -211,15 +204,17 @@ class CTRFeatureEngineer:
             self.categorical_features = []
     
     def _prepare_features_reference(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Prepare features with reference notebook approach (no normalization)"""
         try:
             logger.info("Preparing features (reference approach - no normalization)")
             
             for col in X_train.columns:
                 try:
                     if col in self.categorical_features:
-                        train_values = X_train[col].astype(str).replace(['None', 'nan', 'NaN', '<NA>'], 'missing')
-                        test_values = X_test[col].astype(str).replace(['None', 'nan', 'NaN', '<NA>'], 'missing')
+                        train_values = X_train[col].fillna('missing')
+                        test_values = X_test[col].fillna('missing')
+                        
+                        train_values = train_values.astype(str).str.replace('None', 'missing', regex=False)
+                        test_values = test_values.astype(str).str.replace('None', 'missing', regex=False)
                         
                         train_values = train_values.str.replace('.0', '', regex=False)
                         test_values = test_values.str.replace('.0', '', regex=False)
@@ -247,15 +242,14 @@ class CTRFeatureEngineer:
             return X_train, X_test
     
     def _encode_categorical_reference(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Categorical encoding following Categorify approach from reference"""
         try:
             logger.info("Applying categorical encoding (Categorify style)")
             
             for col in self.categorical_features:
                 if col in X_train.columns and col in X_test.columns:
                     try:
-                        train_str = X_train[col].astype(str).replace(['None', 'nan', 'NaN', '<NA>'], 'missing')
-                        test_str = X_test[col].astype(str).replace(['None', 'nan', 'NaN', '<NA>'], 'missing')
+                        train_str = X_train[col].fillna('missing').astype(str).str.replace('None', 'missing', regex=False)
+                        test_str = X_test[col].fillna('missing').astype(str).str.replace('None', 'missing', regex=False)
                         
                         train_str = train_str.str.replace('.0', '', regex=False)
                         test_str = test_str.str.replace('.0', '', regex=False)
@@ -289,12 +283,10 @@ class CTRFeatureEngineer:
             return X_train, X_test
     
     def _force_memory_cleanup(self):
-        """Force memory cleanup"""
         gc.collect()
         self.memory_monitor.force_memory_cleanup()
     
     def _convert_to_numeric_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Convert categorical columns to numeric using label encoding"""
         try:
             logger.info("Converting categorical columns to numeric")
             
@@ -307,8 +299,8 @@ class CTRFeatureEngineer:
                             X_test[col] = X_test[col].astype('object')
                         
                         if X_train[col].dtype == 'object' or not np.issubdtype(X_train[col].dtype, np.number):
-                            train_str = X_train[col].astype(str).replace(['None', 'nan', 'NaN', '<NA>'], 'missing')
-                            test_str = X_test[col].astype(str).replace(['None', 'nan', 'NaN', '<NA>'], 'missing')
+                            train_str = X_train[col].fillna('missing').astype(str).str.replace('None', 'missing', regex=False)
+                            test_str = X_test[col].fillna('missing').astype(str).str.replace('None', 'missing', regex=False)
                             
                             all_categories = sorted(set(train_str.unique()) | set(test_str.unique()))
                             category_map = {cat: idx for idx, cat in enumerate(all_categories)}
@@ -338,7 +330,6 @@ class CTRFeatureEngineer:
             return X_train, X_test
     
     def _initialize_processing(self, train_df: pd.DataFrame, test_df: pd.DataFrame, target_col: str):
-        """Initialize feature engineering processing"""
         try:
             self.processing_stats['start_time'] = time.time()
             
@@ -358,7 +349,6 @@ class CTRFeatureEngineer:
             self.target_column = target_col
     
     def _detect_target_column(self, train_df: pd.DataFrame, provided_target_col: str = None) -> str:
-        """Detect CTR target column"""
         try:
             if provided_target_col and provided_target_col in train_df.columns:
                 unique_values = train_df[provided_target_col].dropna().unique()
@@ -386,7 +376,6 @@ class CTRFeatureEngineer:
     
     def _prepare_basic_data(self, train_df: pd.DataFrame, test_df: pd.DataFrame,
                            target_col: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
-        """Prepare basic data with proper column removal"""
         try:
             if target_col in train_df.columns:
                 y_train = train_df[target_col].copy()
@@ -456,7 +445,6 @@ class CTRFeatureEngineer:
             raise
     
     def _classify_columns_basic(self, X: pd.DataFrame):
-        """Basic column classification"""
         try:
             self.numerical_features = []
             self.categorical_features = []
@@ -479,14 +467,12 @@ class CTRFeatureEngineer:
             self.categorical_features = list(X.select_dtypes(exclude=[np.number]).columns)
     
     def _safe_fillna(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Safe fillna"""
         try:
             return X.fillna(0)
         except:
             return X
     
     def _encode_categorical_safe(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Safe categorical encoding"""
         try:
             for col in self.categorical_features:
                 if col in X_train.columns and col in X_test.columns:
@@ -496,8 +482,8 @@ class CTRFeatureEngineer:
                         if X_test[col].dtype == 'category':
                             X_test[col] = X_test[col].astype('object')
                         
-                        train_str = X_train[col].astype(str).replace(['None', 'nan', 'NaN', '<NA>'], 'missing')
-                        test_str = X_test[col].astype(str).replace(['None', 'nan', 'NaN', '<NA>'], 'missing')
+                        train_str = X_train[col].fillna('missing').astype(str).str.replace('None', 'missing', regex=False)
+                        test_str = X_test[col].fillna('missing').astype(str).str.replace('None', 'missing', regex=False)
                         
                         all_values = sorted(set(train_str.unique()) | set(test_str.unique()))
                         value_map = {val: idx for idx, val in enumerate(all_values)}
@@ -516,7 +502,6 @@ class CTRFeatureEngineer:
             return X_train, X_test
     
     def _final_data_cleanup(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Final data cleanup with strict type checking"""
         try:
             logger.info("Starting final data cleanup")
             
@@ -558,11 +543,9 @@ class CTRFeatureEngineer:
             return X_train, X_test
     
     def _clean_final_features(self, X_train: pd.DataFrame, X_test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Clean final features"""
         return self._final_data_cleanup(X_train, X_test)
     
     def _finalize_processing(self, X_train: pd.DataFrame, X_test: pd.DataFrame):
-        """Finalize processing"""
         try:
             self.final_feature_columns = list(X_train.columns)
             
@@ -581,7 +564,6 @@ class CTRFeatureEngineer:
     
     def _create_basic_features_only(self, train_df: pd.DataFrame, test_df: pd.DataFrame, 
                                     target_col: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create basic features only"""
         try:
             X_train, X_test, y_train = self._prepare_basic_data(train_df, test_df, target_col)
             self._classify_columns_basic(X_train)
@@ -602,7 +584,6 @@ class CTRFeatureEngineer:
     
     def _create_minimal_features(self, train_df: pd.DataFrame, test_df: pd.DataFrame,
                                 target_col: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Create minimal features"""
         try:
             X_train, X_test, y_train = self._prepare_basic_data(train_df, test_df, target_col)
             

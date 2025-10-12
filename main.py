@@ -53,7 +53,6 @@ logger = logging.getLogger(__name__)
 cleanup_required = False
 
 def signal_handler(signum, frame):
-    """Handle interrupt signals"""
     global cleanup_required
     cleanup_required = True
     logger.info("Interrupt signal received, cleaning up...")
@@ -61,7 +60,6 @@ def signal_handler(signum, frame):
     sys.exit(0)
 
 def force_memory_cleanup():
-    """Force memory cleanup"""
     try:
         start_time = time.time()
         
@@ -78,7 +76,6 @@ def force_memory_cleanup():
         logger.warning(f"Memory cleanup failed: {e}")
 
 def validate_environment() -> bool:
-    """Validate execution environment"""
     try:
         logger.info("=== Environment validation started ===")
         
@@ -139,7 +136,6 @@ def validate_environment() -> bool:
         return False
 
 def calculate_weighted_logloss(y_true: np.ndarray, y_pred: np.ndarray, eps: float = 1e-15) -> float:
-    """Calculate Weighted LogLoss with 50:50 class weights"""
     y_pred = np.clip(y_pred, eps, 1 - eps)
     
     mask_0 = (y_true == 0)
@@ -151,7 +147,6 @@ def calculate_weighted_logloss(y_true: np.ndarray, y_pred: np.ndarray, eps: floa
     return 0.5 * ll_0 + 0.5 * ll_1
 
 def calculate_competition_score(y_true: np.ndarray, y_pred: np.ndarray) -> Tuple[float, float, float]:
-    """Calculate competition score: 0.5*AP + 0.5*(1/(1+WLL))"""
     from sklearn.metrics import average_precision_score
     
     ap = average_precision_score(y_true, y_pred)
@@ -159,22 +154,28 @@ def calculate_competition_score(y_true: np.ndarray, y_pred: np.ndarray) -> Tuple
     score = 0.5 * ap + 0.5 * (1 / (1 + wll))
     return score, ap, wll
 
-def apply_ctr_correction(predictions: np.ndarray, target_ctr: float = 0.0191, tolerance: float = 0.0001) -> np.ndarray:
-    """Apply CTR correction to predictions"""
+def apply_ctr_correction(predictions: np.ndarray, target_ctr: float = 0.0191) -> np.ndarray:
     try:
         current_ctr = predictions.mean()
-        logger.info(f"Before CTR correction: mean={current_ctr:.6f}")
+        logger.info(f"CTR CORRECTION CHECK - Current: {current_ctr:.6f}, Target: {target_ctr:.6f}")
+        logger.info(f"Prediction range before correction: [{predictions.min():.6f}, {predictions.max():.6f}]")
         
-        if abs(current_ctr - target_ctr) > tolerance:
-            correction_factor = target_ctr / current_ctr if current_ctr > 0 else 1.0
+        if current_ctr > 0:
+            correction_factor = target_ctr / current_ctr
+            logger.info(f"Applying correction factor: {correction_factor:.6f}")
+            
             predictions = predictions * correction_factor
             predictions = np.clip(predictions, 1e-15, 1 - 1e-15)
-            logger.info(f"CTR correction applied: {current_ctr:.6f} -> {target_ctr:.6f}")
+            
+            final_ctr = predictions.mean()
+            logger.info(f"CTR after correction: {final_ctr:.6f}")
+            logger.info(f"Prediction range after correction: [{predictions.min():.6f}, {predictions.max():.6f}]")
+            
+            if abs(final_ctr - target_ctr) > 0.0001:
+                logger.warning(f"CTR correction imperfect: {final_ctr:.6f} vs target {target_ctr:.6f}")
         else:
-            logger.info(f"CTR correction not needed: {current_ctr:.6f} (target: {target_ctr:.6f})")
-        
-        final_ctr = predictions.mean()
-        logger.info(f"After CTR correction: mean={final_ctr:.6f}")
+            logger.error("Current CTR is zero, using target CTR as default")
+            predictions = np.full_like(predictions, target_ctr)
         
         return predictions
         
@@ -183,7 +184,6 @@ def apply_ctr_correction(predictions: np.ndarray, target_ctr: float = 0.0191, to
         return predictions
 
 def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
-    """Execute 5-Fold CV XGBoost training"""
     try:
         start_time = time.time()
         
@@ -270,8 +270,8 @@ def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
             'tree_method': 'gpu_hist' if gpu_optimization else 'hist',
-            'max_depth': 6,
-            'learning_rate': 0.05,
+            'max_depth': 8,
+            'learning_rate': 0.1,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
             'min_child_weight': 3,
@@ -363,12 +363,29 @@ def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
         predictions = final_model.predict(dtest)
         predictions = np.clip(predictions, 1e-15, 1 - 1e-15)
         
-        predictions = apply_ctr_correction(predictions, target_ctr=0.0191, tolerance=0.0001)
+        logger.info("=" * 80)
+        logger.info("CRITICAL: CTR CORRECTION PHASE")
+        logger.info("=" * 80)
+        
+        predictions = apply_ctr_correction(predictions, target_ctr=0.0191)
+        
+        final_ctr = predictions.mean()
+        logger.info(f"FINAL CHECK - CTR: {final_ctr:.6f}, Target: 0.0191")
+        
+        if abs(final_ctr - 0.0191) > 0.001:
+            logger.error(f"CTR CORRECTION FAILED! Current: {final_ctr:.6f}, Expected: 0.0191")
+            logger.error("Forcing correction...")
+            predictions = predictions * (0.0191 / final_ctr)
+            predictions = np.clip(predictions, 1e-15, 1 - 1e-15)
+            logger.info(f"After force correction: {predictions.mean():.6f}")
         
         predicted_ctr = predictions.mean()
         logger.info(f"Final predicted CTR: {predicted_ctr:.6f}")
         logger.info(f"Target CTR: 0.0191")
         logger.info(f"Prediction range: [{predictions.min():.6f}, {predictions.max():.6f}]")
+        
+        assert abs(predicted_ctr - 0.0191) < 0.001, f"CTR validation failed: {predicted_ctr:.6f}"
+        logger.info("CTR validation passed")
         
         try:
             sample_submission = pd.read_csv(config.SUBMISSION_PATH)
@@ -435,7 +452,6 @@ def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
         return None
 
 def main():
-    """Main execution function with argument parsing"""
     global cleanup_required
     
     signal.signal(signal.SIGINT, signal_handler)
