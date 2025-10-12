@@ -270,7 +270,7 @@ def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
             'tree_method': 'gpu_hist' if gpu_optimization else 'hist',
-            'max_depth': 8,
+            'max_depth': 9,
             'learning_rate': 0.1,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
@@ -314,9 +314,9 @@ def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
             
             model = xgb.train(
                 params, dtrain,
-                num_boost_round=300,
+                num_boost_round=500,
                 evals=[(dval, 'val')],
-                early_stopping_rounds=30,
+                early_stopping_rounds=50,
                 verbose_eval=False
             )
             
@@ -351,7 +351,7 @@ def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
         
         final_model = xgb.train(
             params, dtrain_full,
-            num_boost_round=300,
+            num_boost_round=500,
             verbose_eval=False
         )
         
