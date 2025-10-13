@@ -270,13 +270,14 @@ def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
             'objective': 'binary:logistic',
             'eval_metric': 'logloss',
             'tree_method': 'gpu_hist' if gpu_optimization else 'hist',
-            'max_depth': 9,
-            'learning_rate': 0.1,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'min_child_weight': 3,
-            'reg_alpha': 0.1,
-            'reg_lambda': 1.0,
+            'max_depth': 7,
+            'learning_rate': 0.05,
+            'subsample': 0.85,
+            'colsample_bytree': 0.75,
+            'min_child_weight': 5,
+            'reg_alpha': 0.3,
+            'reg_lambda': 2.0,
+            'gamma': 0.1,
             'scale_pos_weight': scale_pos_weight,
             'seed': 42,
             'verbosity': 0
@@ -314,9 +315,9 @@ def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
             
             model = xgb.train(
                 params, dtrain,
-                num_boost_round=500,
+                num_boost_round=1000,
                 evals=[(dval, 'val')],
-                early_stopping_rounds=50,
+                early_stopping_rounds=30,
                 verbose_eval=False
             )
             
@@ -349,9 +350,13 @@ def execute_5fold_cv_xgboost(config) -> Optional[Dict[str, Any]]:
         
         dtrain_full = xgb.DMatrix(X_train_np, label=y_train)
         
+        best_iteration = int(np.mean([model.best_iteration for model in [None] * n_folds]))
+        if best_iteration == 0:
+            best_iteration = 500
+        
         final_model = xgb.train(
             params, dtrain_full,
-            num_boost_round=500,
+            num_boost_round=best_iteration,
             verbose_eval=False
         )
         
